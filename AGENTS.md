@@ -28,18 +28,31 @@
 - KV-cache must be paged and reusable across tokens/streams; expose telemetry hooks for cache hits/evictions.
 - Always test quantized paths against FP16 references; define acceptable error tolerances (≤1% perplexity delta or <1e-3 relative error depending on metric).
 
-## 6. Testing & Tooling
+## 6. Test-Driven Development (TDD) Methodology
+- **Write tests FIRST, then implement:** For all core functionality (tensor ops, tokenization, sampling), write failing tests before writing implementation code.
+- **Red-Green-Refactor cycle:**
+  1. **RED**: Write a failing test that defines desired behavior
+  2. **GREEN**: Write minimal code to make the test pass
+  3. **REFACTOR**: Improve code quality while keeping tests green
+- **Tests as documentation:** Each test should be readable and educational, explaining WHAT the operation does, WHY it matters, and HOW to verify correctness.
+- **Numerical accuracy requirements:**
+  - Tensor operations: relative error < 1e-5 for Float32, < 1e-3 for Float16
+  - Quantized operations: perplexity delta ≤ 1% vs FP16 reference
+  - Include edge cases: empty tensors, mismatched shapes, numerical stability (NaN, Inf)
+- **Test naming convention:** `test<Operation><Scenario>` (e.g., `testMatMulBasic`, `testMatMulBroadcast`, `testSoftmaxNumericalStability`)
+
+## 7. Testing & Tooling
 - `swift test` and linting (SwiftFormat/SwiftLint or compiler plugins) must pass before opening PRs.
 - Add targeted unit tests for tensor math, tokenizer parity, sampler randomness, and streaming latencies. Include snapshot/UI tests for SwiftUI components.
 - Benchmark harness (`tinybrain-bench`) should support scripted scenarios and run smoke tests in CI (reduced workloads) while full runs are manual/weekly.
 - Never merge failing CI; if CI lacks required device features, gate tests with availability checks and document the manual validation plan.
 
-## 7. Documentation & Developer Experience
+## 8. Documentation & Developer Experience
 - Keep `docs/overview.md`, DocC articles, and `README.md` current with architectural diagrams and setup instructions.
 - Every feature task must update docs: architecture narratives, troubleshooting, and API examples.
-- Surface telemetry/UX copy (“TinyBrain Chat”, “Energy Overlay”) consistently across UI and docs.
+- Surface telemetry/UX copy ("TinyBrain Chat", "Energy Overlay") consistently across UI and docs.
 
-## 8. Collaboration Protocol
+## 9. Collaboration Protocol
 - Reference TB task IDs in issues/PRs (e.g., “Implements TB-003”).
 - Discuss major API or architecture changes in design docs before coding; store them under `docs/rfcs/`.
 - When blocked, document the issue in the task file and propose mitigation paths aligned with PRD risk table.
