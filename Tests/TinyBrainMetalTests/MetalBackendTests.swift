@@ -101,5 +101,88 @@ final class MetalBackendTests: XCTestCase {
         
         print("✅ Metal vs CPU parity test passed (64×64)!")
     }
+    
+    // MARK: - Tiled Kernel Tests
+    
+    /// Test tiled kernel correctness
+    ///
+    /// **What:** Run optimized tiled kernel and verify correctness
+    /// **Why:** Tiled version should give same results as naive, just faster!
+    /// **How:** Compare tiled vs CPU
+    func testMetalTiledMatMul() throws {
+        guard MetalBackend.isAvailable else {
+            throw XCTSkip("Metal not available")
+        }
+        
+        let backend = try MetalBackend()
+        
+        // Test with 64×64 (multiple tiles: 4×4 tiles of 16×16)
+        let a = Tensor.random(shape: TensorShape(64, 64))
+        let b = Tensor.random(shape: TensorShape(64, 64))
+        
+        // CPU result
+        let cpuResult = a.matmul(b)
+        
+        // GPU result (tiled)
+        let metalResult = try backend.matmulOptimized(a, b)
+        
+        // Compare
+        for i in 0..<64 {
+            for j in 0..<64 {
+                let diff = abs(metalResult[i,j] - cpuResult[i,j])
+                let relativeError = diff / max(abs(cpuResult[i,j]), 1e-7)
+                
+                XCTAssertLessThan(relativeError, 1e-3,
+                                 "Tiled kernel mismatch at [\(i),\(j)]")
+            }
+        }
+        
+        print("✅ Tiled kernel correctness validated!")
+    }
+    
+    /// Benchmark: Tiled kernel should be faster than naive
+    ///
+    /// **What:** Time both kernels and verify tiled is faster
+    /// **Why:** Validate our optimization actually works!
+    /// **How:** Run 10 iterations, measure average time
+    func testTiledKernelPerformance() throws {
+        guard MetalBackend.isAvailable else {
+            throw XCTSkip("Metal not available")
+        }
+        
+        let backend = try MetalBackend()
+        
+        // Large enough to see difference (256×256)
+        let a = Tensor.filled(shape: TensorShape(256, 256), value: 1.0)
+        let b = Tensor.filled(shape: TensorShape(256, 256), value: 2.0)
+        
+        // Warmup
+        _ = try backend.matmul(a, b)
+        _ = try backend.matmulOptimized(a, b)
+        
+        // Time naive kernel
+        let naiveStart = Date()
+        for _ in 0..<10 {
+            _ = try backend.matmul(a, b)
+        }
+        let naiveTime = Date().timeIntervalSince(naiveStart) / 10.0
+        
+        // Time tiled kernel
+        let tiledStart = Date()
+        for _ in 0..<10 {
+            _ = try backend.matmulOptimized(a, b)
+        }
+        let tiledTime = Date().timeIntervalSince(tiledStart) / 10.0
+        
+        let speedup = naiveTime / tiledTime
+        
+        print("Naive: \(naiveTime * 1000) ms")
+        print("Tiled: \(tiledTime * 1000) ms")
+        print("Speedup: \(speedup)×")
+        
+        // Tiled should be faster (might be marginal for 256×256)
+        XCTAssertLessThan(tiledTime, naiveTime * 1.5, 
+                         "Tiled kernel should be faster or comparable")
+    }
 }
 

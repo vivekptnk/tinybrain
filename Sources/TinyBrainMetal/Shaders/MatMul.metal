@@ -59,19 +59,89 @@ kernel void matmul_naive(
     C[row * N + col] = sum;
 }
 
-// Placeholder for tiled (optimized) implementation
-// Will be written in Phase 4 (Task 10)
+/// Tiled matrix multiplication kernel (OPTIMIZED!)
+///
+/// This is the FAST version using threadgroup (shared) memory.
+///
+/// **The Optimization:**
+/// Instead of reading from slow global memory repeatedly, we:
+/// 1. Load a TILE of data into fast threadgroup memory
+/// 2. All threads in the group share this tile
+/// 3. Compute using the fast shared memory
+/// 4. Repeat for next tile
+///
+/// **Speed difference:**
+/// - Global memory: ~100 cycles per read
+/// - Threadgroup memory: ~5 cycles per read
+/// - **20× faster memory access!**
+///
+/// **Tiling Strategy:**
+/// For 1024×1024 matrix:
+/// - Divide into 16×16 tiles (TILE_SIZE = 16)
+/// - Each threadgroup processes one 16×16 output tile
+/// - Loads 16×16 chunks from A and B into shared memory
+/// - 64×64 threadgroups total for 1024×1024
+///
+/// **Threadgroup Memory Usage:**
+/// - tileA: 16×16 floats = 1 KB
+/// - tileB: 16×16 floats = 1 KB
+/// - Total: 2 KB (well under 32 KB limit) ✅
 kernel void matmul_tiled(
     device const float* A [[buffer(0)]],
     device const float* B [[buffer(1)]],
     device float* C [[buffer(2)]],
     constant uint3& dims [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]],
-    uint2 tid [[thread_position_in_threadgroup]],
-    threadgroup float* tileA [[threadgroup(0)]],
-    threadgroup float* tileB [[threadgroup(1)]]
+    uint2 gid [[thread_position_in_grid]],           // Global thread ID
+    uint2 tid [[thread_position_in_threadgroup]],    // Local thread ID within group
+    threadgroup float* tileA [[threadgroup(0)]],     // Shared memory for A tile
+    threadgroup float* tileB [[threadgroup(1)]]      // Shared memory for B tile
 ) {
-    // TODO: Implement tiled version with threadgroup memory
-    // This will be 10-20× faster than naive!
+    // Extract dimensions
+    uint M = dims.x;  // Rows in A
+    uint N = dims.y;  // Cols in B
+    uint K = dims.z;  // Cols in A = Rows in B
+    
+    const uint TILE_SIZE = 16;
+    
+    // Which output element am I computing?
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    // Accumulator for this thread's output element
+    float sum = 0.0;
+    
+    // Loop over tiles along the K dimension
+    for (uint t = 0; t < K; t += TILE_SIZE) {
+        // Load tile of A into threadgroup memory
+        // Each thread loads one element
+        if (row < M && (t + tid.x) < K) {
+            tileA[tid.y * TILE_SIZE + tid.x] = A[row * K + (t + tid.x)];
+        } else {
+            tileA[tid.y * TILE_SIZE + tid.x] = 0.0;  // Pad with zeros
+        }
+        
+        // Load tile of B into threadgroup memory
+        if ((t + tid.y) < K && col < N) {
+            tileB[tid.y * TILE_SIZE + tid.x] = B[(t + tid.y) * N + col];
+        } else {
+            tileB[tid.y * TILE_SIZE + tid.x] = 0.0;  // Pad with zeros
+        }
+        
+        // Wait for all threads in group to finish loading
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Compute using threadgroup memory (FAST!)
+        for (uint k = 0; k < TILE_SIZE; k++) {
+            sum += tileA[tid.y * TILE_SIZE + k] * tileB[k * TILE_SIZE + tid.x];
+        }
+        
+        // Wait before loading next tile
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Write final result to global memory
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
+    }
 }
 
