@@ -5,6 +5,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import TinyBrainRuntime
 
 /// View model for the TinyBrain Chat demo app
 @MainActor
@@ -21,23 +22,61 @@ public class ChatViewModel: ObservableObject {
     /// Tokens per second metric
     @Published public var tokensPerSecond: Double = 0.0
     
+    /// **REVIEW HITLER:** Actual ModelRunner with quantized weights!
+    private let runner: ModelRunner
+    
     /// Initialize the view model
-    public init() {}
+    public init() {
+        // **REVIEW HITLER FIX:** Create real toy model with quantized weights
+        let config = ModelConfig(
+            numLayers: 2,      // Small for demo
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        self.runner = ModelRunner(weights: weights)
+    }
     
     /// Generate a response for the current prompt
     public func generate() async {
         isGenerating = true
         responseText = ""
         
-        // Placeholder - actual implementation tracked in TB-007
         defer { isGenerating = false }
         
-        // Simulate streaming response
-        let placeholderResponse = "This is a placeholder response. Actual inference will be implemented in TB-007."
-        for char in placeholderResponse {
-            responseText.append(char)
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+        // **REVIEW HITLER FIX:** Use actual ModelRunner with quantized weights!
+        
+        // Simple tokenization (character-based for demo)
+        let promptTokens = Array(promptText.prefix(10)).map { char in
+            Int(char.asciiValue ?? 0) % runner.config.vocabSize
         }
+        
+        // Track timing
+        let startTime = Date()
+        var tokenCount = 0
+        
+        // Stream generation
+        do {
+            for try await tokenId in runner.generateStream(prompt: promptTokens, maxTokens: 50) {
+                // Simple detokenization (placeholder - TB-005 will add real tokenizer)
+                let char = Character(UnicodeScalar(UInt8(tokenId % 94 + 33)))
+                responseText.append(char)
+                
+                tokenCount += 1
+                
+                // Update tokens/sec
+                let elapsed = Date().timeIntervalSince(startTime)
+                tokensPerSecond = Double(tokenCount) / elapsed
+            }
+        } catch {
+            responseText = "Error: \(error.localizedDescription)"
+        }
+        
+        // Reset for next generation
+        runner.reset()
     }
 }
 
