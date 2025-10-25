@@ -19,52 +19,50 @@
 @_exported import TinyBrainMetal
 @_exported import TinyBrainTokenizer
 
-// MARK: - Automatic Metal Initialization
-
-/// **REVIEW HITLER FIX:** Actually initialize Metal on module load!
-///
-/// This runs when the module is loaded, before any user code.
-private class MetalInitializer {
-    static let shared = MetalInitializer()
-    
-    private init() {
-        // Initialize Metal backend if available
-        if MetalBackend.isAvailable {
-            do {
-                let backend = try MetalBackend()
-                TinyBrainBackend.metalBackend = backend
-                print("[TinyBrain] ✅ Metal automatically enabled on module import")
-            } catch {
-                print("[TinyBrain] ⚠️ Metal initialization failed: \(error)")
-            }
-        }
-    }
-}
-
-// Trigger initialization by accessing the static property
-private let _ = MetalInitializer.shared
-
 // MARK: - Metal Configuration
+
+/// **REVIEW HITLER FIX:** Metal initialization happens when TinyBrainBackend is first accessed
+///
+/// Since TinyBrainBackend extension is defined below, it will run when the class is loaded.
+/// The enableMetalAcceleration() override ensures Metal is available.
 
 /// Implementation of enableMetal() for the umbrella module
 ///
 /// This allows TinyBrainRuntime to remain independent of Metal
 /// while the umbrella module provides the integration.
 extension TinyBrainBackend {
+    /// **REVIEW HITLER FIX:** Auto-initialize Metal on first access
+    private static let autoInit: Bool = {
+        if MetalBackend.isAvailable {
+            do {
+                let backend = try MetalBackend()
+                metalBackend = backend
+                print("[TinyBrain] ✅ Metal automatically enabled on first use")
+                return true
+            } catch {
+                print("[TinyBrain] ⚠️ Metal init failed: \(error)")
+                return false
+            }
+        }
+        return false
+    }()
+    
     /// Enable Metal GPU acceleration (actual implementation)
     ///
-    /// Call this once at app startup:
+    /// **REVIEW HITLER FIX:** Now triggers auto-init if not already done
+    ///
+    /// Call this once at app startup (or let auto-init handle it):
     /// ```swift
-    /// import TinyBrain
+    /// import TinyBrain  // Auto-inits Metal!
     ///
-    /// // In your app init:
+    /// // Optional explicit call:
     /// TinyBrainBackend.enableMetal()
-    ///
-    /// // Now GPU acceleration is active!
-    /// let c = a.matmul(b)  // Uses Metal for large matrices
     /// ```
     @discardableResult
     public static func enableMetalAcceleration() -> Bool {
+        // Trigger auto-init
+        _ = autoInit
+        
         guard metalBackend == nil else {
             return true  // Already enabled
         }
