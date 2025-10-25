@@ -208,7 +208,12 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     /// - Parameter tensor: Source tensor
     /// - Returns: Metal buffer containing tensor data
     /// - Throws: `MetalError.bufferCreationFailed` if allocation fails
-    public func createBuffer(from tensor: Tensor<Float>) throws -> MTLBuffer {
+    /// Create buffer with ownership tracking
+    ///
+    /// **REVIEW HITLER FIX:** Track whether buffer is newly acquired or reused
+    ///
+    /// - Returns: (buffer, isNewlyAcquired)
+    private func createBufferWithTracking(from tensor: Tensor<Float>) throws -> (MTLBuffer, Bool) {
         let elementCount = tensor.shape.count
         
         // **TB-004 CRITICAL FIX:** If tensor already on GPU, reuse its buffer!
@@ -216,7 +221,7 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             let storage = tensor.tensorStorage
             if let gpuBuffer = storage.gpuBuffer as? MTLBuffer {
                 // Already on GPU - reuse the buffer (zero transfer!)
-                return gpuBuffer
+                return (gpuBuffer, false)  // NOT newly acquired
             }
         }
         
@@ -231,6 +236,11 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             pointer[i] = tensorData[i]
         }
         
+        return (buffer, true)  // Newly acquired, must release later
+    }
+    
+    public func createBuffer(from tensor: Tensor<Float>) throws -> MTLBuffer {
+        let (buffer, _) = try createBufferWithTracking(from: tensor)
         return buffer
     }
     
@@ -358,10 +368,10 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         let aContiguous = a.isContiguous ? a : a.makeContiguousCopy()
         let bContiguous = b.isContiguous ? b : b.makeContiguousCopy()
         
-        // Create GPU buffers
-        let bufferA = try createBuffer(from: aContiguous)
-        let bufferB = try createBuffer(from: bContiguous)
-        let bufferC = try createBuffer(elementCount: Int(M * N))
+        // **REVIEW HITLER FIX:** Track which buffers need releasing
+        let (bufferA, releaseA) = try createBufferWithTracking(from: aContiguous)
+        let (bufferB, releaseB) = try createBufferWithTracking(from: bContiguous)
+        let bufferC = try createBuffer(elementCount: Int(M * N))  // Always new
         
         // Dimensions buffer
         var dims = SIMD3<UInt32>(M, N, K)
@@ -404,8 +414,24 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         
+        // **REVIEW HITLER FIX: Release ONLY newly acquired buffers!**
+        if releaseA {
+            bufferPool.release(bufferA, elementCount: Int(M * K))
+        }
+        if releaseB {
+            bufferPool.release(bufferB, elementCount: Int(K * N))
+        }
+        // bufferC stays with result tensor
+        
         // **TB-004 FIX:** Return GPU-resident tensor, don't download!
         let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
+        
+        // **REVIEW HITLER FIX:** Set release callback so buffer returns to pool when tensor destroyed
+        let pool = self.bufferPool
+        let resultCount = Int(M * N)
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(bufferC, elementCount: resultCount)
+        }
         
         return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
     }
@@ -433,10 +459,10 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         let aContiguous = a.isContiguous ? a : a.makeContiguousCopy()
         let bContiguous = b.isContiguous ? b : b.makeContiguousCopy()
         
-        // Create GPU buffers
-        let bufferA = try createBuffer(from: aContiguous)
-        let bufferB = try createBuffer(from: bContiguous)
-        let bufferC = try createBuffer(elementCount: Int(M * N))
+        // **REVIEW HITLER FIX:** Track which buffers need releasing
+        let (bufferA, releaseA) = try createBufferWithTracking(from: aContiguous)
+        let (bufferB, releaseB) = try createBufferWithTracking(from: bContiguous)
+        let bufferC = try createBuffer(elementCount: Int(M * N))  // Always new
         
         // Dimensions buffer
         var dims = SIMD3<UInt32>(M, N, K)
@@ -484,9 +510,25 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         
+        // **REVIEW HITLER FIX: Release ONLY newly acquired buffers!**
+        if releaseA {
+            bufferPool.release(bufferA, elementCount: Int(M * K))
+        }
+        if releaseB {
+            bufferPool.release(bufferB, elementCount: Int(K * N))
+        }
+        // bufferC stays with result tensor
+        
         // **TB-004 FIX:** Return GPU-resident tensor, don't download!
         // Create TensorStorage with GPU buffer to keep result on GPU
         let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
+        
+        // **REVIEW HITLER FIX:** Set release callback so buffer returns to pool when tensor destroyed
+        let pool = self.bufferPool
+        let resultCount = Int(M * N)
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(bufferC, elementCount: resultCount)
+        }
         
         return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
     }

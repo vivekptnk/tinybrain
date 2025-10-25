@@ -36,6 +36,10 @@ public final class TensorStorage<Element: TensorElement> {
     /// Number of elements
     public let count: Int
     
+    /// **REVIEW HITLER FIX:** Callback to release GPU buffer
+    /// Called when storage is destroyed to return buffer to pool
+    public var releaseCallback: (() -> Void)?
+    
     /// Initialize with CPU data
     public init(cpuData: [Element]) {
         self.cpuData = cpuData
@@ -98,6 +102,12 @@ public final class TensorStorage<Element: TensorElement> {
         let storage = TensorStorage(cpuData: getCPUData())
         storage.location = .cpu  // Copy always starts on CPU
         return storage
+    }
+    
+    /// **REVIEW HITLER FIX:** Release GPU buffer when storage is destroyed
+    deinit {
+        // Call release callback if set (releases buffer back to pool)
+        releaseCallback?()
     }
 }
 

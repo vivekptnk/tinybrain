@@ -87,6 +87,15 @@ public struct QuantizedTensor {
     /// Quantization mode used
     public let mode: QuantizationMode
     
+    /// **REVIEW HITLER FIX:** Cached dequantized tensor to avoid repeated conversions
+    /// Uses class reference so it can be mutated even from immutable QuantizedTensor
+    private let cache: DequantizationCache = DequantizationCache()
+    
+    /// Cache holder (class = reference semantics)
+    private class DequantizationCache {
+        var tensor: Tensor<Float>?
+    }
+    
     /// Create quantized tensor
     public init(shape: TensorShape, data: [Int8], scales: [Float], zeroPoints: [Int8]? = nil, mode: QuantizationMode, precision: QuantizationPrecision = .int8) {
         // Validate data size based on precision
@@ -120,14 +129,29 @@ public struct QuantizedTensor {
     
     /// Dequantize back to Float32
     ///
+    /// **REVIEW HITLER FIX:** Now caches result to avoid repeated conversions!
+    ///
     /// Converts Int8 → Float32 using stored scales/zero-points
     ///
     /// Example:
     /// ```swift
     /// let quantized = weights.quantize()
-    /// let float = quantized.dequantize()  // Back to Float32
+    /// let float = quantized.dequantize()  // Cached after first call!
     /// ```
     public func dequantize() -> Tensor<Float> {
+        // **REVIEW HITLER FIX:** Return cached if available (no repeated conversions!)
+        if let cached = cache.tensor {
+            return cached
+        }
+        
+        // Dequantize and cache result
+        let result = dequantizeUncached()
+        cache.tensor = result  // Cache for next time
+        return result
+    }
+    
+    /// Internal uncached dequantization
+    private func dequantizeUncached() -> Tensor<Float> {
         var floatData = [Float](repeating: 0.0, count: shape.count)  // Use shape.count, not data.count!
         
         switch mode {

@@ -6,6 +6,7 @@
 import XCTest
 import Metal
 @testable import TinyBrainMetal
+@testable import TinyBrainRuntime
 
 final class BufferPoolTests: XCTestCase {
     
@@ -108,6 +109,37 @@ final class BufferPoolTests: XCTestCase {
         
         // If we get here without crashes, thread safety works
         XCTAssertTrue(true, "Concurrent access succeeded")
+    }
+    
+    func testBufferPoolHitRate() throws {
+        // WHAT: **REVIEW HITLER CHECK:** Verify pool actually reuses buffers during matmul
+        // WHY: Claimed "450× faster" but never released buffers = 0% hit rate
+        // HOW: Run multiple matmuls, check hit rate > 0%
+        
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("Metal not available")
+        }
+        
+        let backend = try MetalBackend()
+        TinyBrainBackend.metalBackend = backend
+        
+        let a = Tensor<Float>.filled(shape: TensorShape(512, 512), value: 1.0).toGPU()
+        let b = Tensor<Float>.filled(shape: TensorShape(512, 512), value: 2.0).toGPU()
+        
+        // Reset pool stats
+        backend.bufferPool.clear()
+        
+        // Run multiple matmuls
+        for _ in 0..<10 {
+            let _ = try backend.matmul(a, b)
+        }
+        
+        // Check hit rate
+        let hitRate = backend.bufferPool.hitRate
+        print("Buffer pool hit rate: \(hitRate * 100)%")
+        
+        // **CRITICAL:** Hit rate should be > 0% if releases are working
+        XCTAssertGreaterThan(hitRate, 0.0, "Buffer pool should have cache hits if releasing properly. Got \(hitRate * 100)%")
     }
 }
 
