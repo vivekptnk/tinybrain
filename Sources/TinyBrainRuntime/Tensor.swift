@@ -791,8 +791,20 @@ public struct Tensor {
         precondition(self.shape.dimensions[1] == other.shape.dimensions[0],
                     "Inner dimensions must match: \(self.shape.dimensions[1]) ≠ \(other.shape.dimensions[0])")
         
-        // Try Metal backend if configured (auto-selection!)
-        if TinyBrainBackend.preferred == .metal || TinyBrainBackend.preferred == .auto,
+        let m = self.shape.dimensions[0]
+        let n = other.shape.dimensions[1]
+        
+        // Size-based auto-selection (auto mode only)
+        if TinyBrainBackend.preferred == .auto {
+            // Small matrices: Use CPU (overhead dominates)
+            if !TinyBrainBackend.shouldUseMetal(m: m, n: n) {
+                TinyBrainBackend.log("Using CPU for small matmul \(self.shape) × \(other.shape) (< \(TinyBrainBackend.metalSizeThreshold))")
+                return matmulCPU(other)
+            }
+        }
+        
+        // Try Metal backend if configured and appropriate
+        if (TinyBrainBackend.preferred == .metal || TinyBrainBackend.preferred == .auto),
            let metalBackend = TinyBrainBackend.metalBackend as? MatMulBackend {
             
             TinyBrainBackend.log("Using Metal backend for matmul \(self.shape) × \(other.shape)")
