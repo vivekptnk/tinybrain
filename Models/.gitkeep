@@ -1,0 +1,7 @@
+# Models Directory
+
+Place your quantized model files (.tbf) here.
+
+This directory is ignored by git to keep the repository lightweight.
+See the README for instructions on downloading or converting models.
+

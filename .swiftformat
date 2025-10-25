@@ -1,0 +1,57 @@
+# SwiftFormat Configuration for TinyBrain
+# https://github.com/nicklockwood/SwiftFormat
+
+# Swift version
+--swiftversion 5.10
+
+# Indentation
+--indent 4
+--tabwidth 4
+--indentcase false
+--ifdef no-indent
+
+# Wrapping
+--maxwidth 120
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--closingparen balanced
+
+# Spacing
+--trimwhitespace always
+--nospaceoperators ..<,...,>>,<<
+--ranges spaced
+
+# Braces
+--allman false
+--elseposition same-line
+--guardelse auto
+
+# Imports
+--importgrouping testable-bottom
+
+# Line breaks
+--linebreaks lf
+--emptybraces no-space
+
+# Organization
+--organizetypes actor,class,enum,struct
+--structthreshold 0
+--typeattributes prev-line
+--funcattributes prev-line
+--storedvarattrs same-line
+
+# Headers
+--header "/// TinyBrain – Swift-Native On-Device LLM Inference\n/// Copyright © {year} Vivek Pattanaik. Licensed under MIT."
+
+# Rules to enable
+--enable isEmpty
+--enable sortedImports
+--enable redundantNilInit
+--enable trailingCommas
+--enable consecutiveSpaces
+
+# Rules to disable
+--disable hoistPatternLet
+--disable acronyms
+

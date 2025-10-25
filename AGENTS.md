@@ -1,0 +1,48 @@
+# AGENTS – TinyBrain Project Rules
+
+## 1. Mission & Canonical Sources
+- **Primary goal:** build a Swift-native, on-device LLM runtime that is transparent, educational, and fast on Apple Silicon (per `docs/prd.md`).
+- **Truth hierarchy:** PRD → tasks in `docs/tasks/` → code comments/DocC → other docs. Resolve conflicts by updating upstream documents first.
+- **Deliverable cadence:** follow the roadmap phases (Scaffold → Runtime → Metal → Quant/KV → Tokenizer/Streaming → Demo App → Benchmarks/Docs) unless the product owner reprioritizes.
+
+## 2. Repository Expectations
+- Maintain the structure defined in TB-001 (`Sources/`, `Examples/ChatDemo`, `Tests/`, `Scripts/`, `docs/`). Keep module boundaries clean (`TinyBrainRuntime`, `TinyBrainMetal`, `TinyBrainTokenizer`, etc.).
+- All new binaries/models go under `Models/` with `.gitignore` entries; keep the repo lightweight.
+- Use semantic commit prefixes noted in the PRD (e.g., `feat/runtime`, `core/metal`, `ui/demo`).
+
+## 3. Swift Coding Best Practices
+- Target Swift 5.10+, iOS 17, macOS 14. Prefer Swift Package Manager; avoid mixed Objective-C/C++ unless no Swift alternative exists.
+- Design APIs with value semantics where practical (e.g., `struct Tensor`) but fall back to reference types for buffer managers to avoid copies.
+- Use Swift Concurrency (`async/await`, `AsyncSequence`) for streaming and long-running tasks; isolate Metal/Accelerate work on dedicated executors/queues.
+- Keep public APIs documented with DocC-compatible comments. Include preconditions/postconditions for tensor shapes and dtypes.
+- Favor protocol-oriented design for pluggable components (tokenizers, samplers, backends) to preserve educational clarity.
+
+## 4. Metal & Performance Rules
+- Encapsulate Metal objects inside `TinyBrainMetal`—no leaking `MTLDevice/CommandQueue` beyond backend interfaces.
+- Provide CPU fallbacks for every Metal op; tests should run headless on CI even without GPU acceleration.
+- Benchmark critical kernels (MatMul, Softmax, LayerNorm, quant/dequant) and commit representative numbers under `benchmarks/`.
+- Use shared buffer pools, avoid per-token allocations, and document tuning knobs (threadgroup sizes, tile dimensions).
+
+## 5. Quantization, Memory, and KV-Cache
+- Implement per-channel INT8 first; INT4 comes later via dedicated tasks. Keep metadata schemas versioned and documented.
+- KV-cache must be paged and reusable across tokens/streams; expose telemetry hooks for cache hits/evictions.
+- Always test quantized paths against FP16 references; define acceptable error tolerances (≤1% perplexity delta or <1e-3 relative error depending on metric).
+
+## 6. Testing & Tooling
+- `swift test` and linting (SwiftFormat/SwiftLint or compiler plugins) must pass before opening PRs.
+- Add targeted unit tests for tensor math, tokenizer parity, sampler randomness, and streaming latencies. Include snapshot/UI tests for SwiftUI components.
+- Benchmark harness (`tinybrain-bench`) should support scripted scenarios and run smoke tests in CI (reduced workloads) while full runs are manual/weekly.
+- Never merge failing CI; if CI lacks required device features, gate tests with availability checks and document the manual validation plan.
+
+## 7. Documentation & Developer Experience
+- Keep `docs/overview.md`, DocC articles, and `README.md` current with architectural diagrams and setup instructions.
+- Every feature task must update docs: architecture narratives, troubleshooting, and API examples.
+- Surface telemetry/UX copy (“TinyBrain Chat”, “Energy Overlay”) consistently across UI and docs.
+
+## 8. Collaboration Protocol
+- Reference TB task IDs in issues/PRs (e.g., “Implements TB-003”).
+- Discuss major API or architecture changes in design docs before coding; store them under `docs/rfcs/`.
+- When blocked, document the issue in the task file and propose mitigation paths aligned with PRD risk table.
+- Keep responses concise and action-focused; summarize deviations from the plan in AGENTS.md if they become permanent rules.
+
+Following these rules keeps TinyBrain aligned with the PRD vision while enabling future agents to contribute confidently.

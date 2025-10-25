@@ -1,0 +1,74 @@
+# TinyBrain .gitignore
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj
+xcuserdata/
+DerivedData/
+
+# Xcode
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.xcworkspace
+!default.xcworkspace
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Models (keep repo lightweight)
+Models/*
+!Models/.gitkeep
+*.tbf
+*.gguf
+*.safetensors
+*.bin
+
+# Python (converter scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Documentation build artifacts
+.docc-build/
+docs/.build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Coverage
+*.profdata
+*.profraw
+*.coverage
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.temp/
+
+# Benchmarks output
+benchmarks/results/*.json
+!benchmarks/results/.gitkeep
+
