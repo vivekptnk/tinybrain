@@ -461,6 +461,34 @@ final class TensorTests: XCTestCase {
         XCTAssertEqual(sum, 1.0, accuracy: 1e-5)
     }
     
+    /// Test Softmax on 2D tensor (per-row normalization)
+    ///
+    /// **What:** Verify that each ROW sums to 1.0 independently
+    /// **Why:** In attention, each token's attention weights must sum to 1.0
+    ///         Attention scores shape: [seq_len, seq_len]
+    ///         Each row = probability distribution for one token
+    /// **How:** Create [3, 4] tensor, verify each of 3 rows sums to 1.0
+    func testSoftmax2D() {
+        // [3, 4] tensor - 3 rows, 4 columns
+        let input = Tensor(shape: TensorShape(3, 4), 
+                          data: [1, 2, 3, 4,      // Row 0
+                                 5, 6, 7, 8,      // Row 1
+                                 9, 10, 11, 12])  // Row 2
+        
+        let output = input.softmax()
+        
+        // Each row should sum to 1.0
+        for row in 0..<3 {
+            let rowSum = (0..<4).map { output[row, $0] }.reduce(0, +)
+            XCTAssertEqual(rowSum, 1.0, accuracy: 1e-5, 
+                          "Row \(row) should sum to 1.0")
+        }
+        
+        // Within each row, larger values should get higher probabilities
+        XCTAssertGreaterThan(output[0, 3], output[0, 0], 
+                            "Row 0: softmax(4) > softmax(1)")
+    }
+    
     /// Test LayerNorm normalization
     ///
     /// **What:** Normalize to mean=0, variance=1
@@ -490,6 +518,41 @@ final class TensorTests: XCTestCase {
         // Calculate variance of output
         let variance = output.data.map { pow($0 - mean, 2) }.reduce(0, +) / Float(output.data.count)
         XCTAssertEqual(variance, 1.0, accuracy: 1e-2, "LayerNorm output should have variance ≈ 1")
+    }
+    
+    /// Test LayerNorm on 2D tensor (per-row normalization)
+    ///
+    /// **What:** Verify that each ROW has mean≈0 and variance≈1 independently
+    /// **Why:** In transformers, each token's embedding gets normalized separately
+    ///         Shape [batch, hidden_dim]: normalize each batch item's hidden vector
+    /// **How:** Create [2, 100] tensor, verify both rows have mean≈0, var≈1
+    func testLayerNorm2D() {
+        // [2, 100] tensor - 2 rows of 100 features each
+        let data1 = (0..<100).map { Float($0) }           // Row 0: [0..99]
+        let data2 = (0..<100).map { Float($0 * 2) }       // Row 1: [0, 2, 4, ..., 198]
+        let input = Tensor(shape: TensorShape(2, 100), 
+                          data: data1 + data2)
+        
+        let output = input.layerNorm()
+        
+        // Verify shape unchanged
+        XCTAssertEqual(output.shape, TensorShape(2, 100))
+        
+        // Check each row independently
+        for row in 0..<2 {
+            // Extract row
+            let rowData = (0..<100).map { output[row, $0] }
+            
+            // Calculate mean of this row
+            let rowMean = rowData.reduce(0, +) / Float(rowData.count)
+            XCTAssertEqual(rowMean, 0.0, accuracy: 1e-3, 
+                          "Row \(row) should have mean ≈ 0")
+            
+            // Calculate variance of this row
+            let rowVariance = rowData.map { pow($0 - rowMean, 2) }.reduce(0, +) / Float(rowData.count)
+            XCTAssertEqual(rowVariance, 1.0, accuracy: 1e-2, 
+                          "Row \(row) should have variance ≈ 1")
+        }
     }
 }
 

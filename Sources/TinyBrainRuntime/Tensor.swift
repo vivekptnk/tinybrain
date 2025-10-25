@@ -375,8 +375,9 @@ public struct Tensor {
         
         // Generate random values using Box-Muller transform
         // Converts uniform random → normal random
-        for i in stride(from: 0, to: shape.count, by: 2) {
-            let u1 = Float.random(in: 0..<1)
+        for i in Swift.stride(from: 0, to: shape.count, by: 2) {
+            // Clamp u1 away from 0 to avoid log(0) = -∞
+            let u1 = max(Float.random(in: 0..<1), Float.leastNonzeroMagnitude)
             let u2 = Float.random(in: 0..<1)
             
             // Box-Muller transform
@@ -920,34 +921,71 @@ public struct Tensor {
     /// Uses vDSP for vectorized operations (max, subtract, sum, divide)
     ///
     /// - Parameter epsilon: Small value for numerical stability (default: 1e-7)
-    /// - Returns: A new tensor with softmax applied (sums to 1.0)
+    /// - Returns: A new tensor with softmax applied along the last dimension
     public func softmax(epsilon: Float = 1e-7) -> Tensor {
+        precondition(shape.dimensions.count >= 1, "Cannot apply softmax to empty tensor")
+        
         var result = Tensor.zeros(shape: self.shape)
-        let n = self.data.count
         
-        // Step 1: Find max value (for numerical stability)
-        var maxVal: Float = 0.0
-        vDSP_maxv(self.data, 1, &maxVal, vDSP_Length(n))
+        // For 1D tensor, apply softmax to the entire vector
+        if shape.dimensions.count == 1 {
+            let n = self.data.count
+            
+            var maxVal: Float = 0.0
+            vDSP_maxv(self.data, 1, &maxVal, vDSP_Length(n))
+            
+            var shifted = [Float](repeating: 0, count: n)
+            var negMax = -maxVal
+            vDSP_vsadd(self.data, 1, &negMax, &shifted, 1, vDSP_Length(n))
+            
+            var expVals = [Float](repeating: 0, count: n)
+            var count = Int32(n)
+            vvexpf(&expVals, shifted, &count)
+            
+            var sum: Float = 0.0
+            vDSP_sve(expVals, 1, &sum, vDSP_Length(n))
+            sum += epsilon
+            
+            vDSP_vsdiv(expVals, 1, &sum, &result.data, 1, vDSP_Length(n))
+            
+            return result
+        }
         
-        // Step 2: Subtract max from all elements (x - max)
-        var shifted = [Float](repeating: 0, count: n)
-        var negMax = -maxVal
-        vDSP_vsadd(self.data, 1, &negMax, &shifted, 1, vDSP_Length(n))
+        // For multi-dimensional tensors, apply softmax along last dimension
+        // Each "row" (fixing all but last index) sums to 1.0
+        let lastDim = shape.dimensions.last!
+        let numRows = shape.count / lastDim
         
-        // Step 3: Compute exp for all elements
-        var expVals = [Float](repeating: 0, count: n)
-        var count = Int32(n)
-        vvexpf(&expVals, shifted, &count)
-        
-        // Step 4: Sum all exp values
-        var sum: Float = 0.0
-        vDSP_sve(expVals, 1, &sum, vDSP_Length(n))
-        
-        // Add epsilon to prevent division by zero
-        sum += epsilon
-        
-        // Step 5: Divide by sum to get probabilities
-        vDSP_vsdiv(expVals, 1, &sum, &result.data, 1, vDSP_Length(n))
+        for row in 0..<numRows {
+            let startIdx = row * lastDim
+            let endIdx = startIdx + lastDim
+            
+            let rowData = Array(self.data[startIdx..<endIdx])
+            
+            // Softmax for this row
+            var maxVal: Float = 0.0
+            vDSP_maxv(rowData, 1, &maxVal, vDSP_Length(lastDim))
+            
+            var shifted = [Float](repeating: 0, count: lastDim)
+            var negMax = -maxVal
+            vDSP_vsadd(rowData, 1, &negMax, &shifted, 1, vDSP_Length(lastDim))
+            
+            var expVals = [Float](repeating: 0, count: lastDim)
+            var count = Int32(lastDim)
+            vvexpf(&expVals, shifted, &count)
+            
+            var sum: Float = 0.0
+            vDSP_sve(expVals, 1, &sum, vDSP_Length(lastDim))
+            sum += epsilon
+            
+            var rowResult = [Float](repeating: 0, count: lastDim)
+            vDSP_vsdiv(expVals, 1, &sum, &rowResult, 1, vDSP_Length(lastDim))
+            
+            // Copy result back
+            for i in 0..<lastDim {
+                result.data[startIdx + i] = rowResult[i]
+            }
+        }
         
         return result
     }
@@ -995,32 +1033,70 @@ public struct Tensor {
     /// 4. Divide by std: `vDSP_vsdiv`
     ///
     /// - Parameter epsilon: Small value added to variance for numerical stability (default: 1e-5)
-    /// - Returns: A new tensor with LayerNorm applied (mean≈0, variance≈1)
+    /// - Returns: A new tensor with LayerNorm applied along the last dimension
     public func layerNorm(epsilon: Float = 1e-5) -> Tensor {
+        precondition(shape.dimensions.count >= 1, "Cannot apply layerNorm to empty tensor")
+        
         var result = Tensor.zeros(shape: self.shape)
-        let n = self.data.count
         
-        // Step 1: Compute mean
-        var mean: Float = 0.0
-        vDSP_meanv(self.data, 1, &mean, vDSP_Length(n))
+        // For 1D tensor, normalize the entire vector
+        if shape.dimensions.count == 1 {
+            let n = self.data.count
+            
+            var mean: Float = 0.0
+            vDSP_meanv(self.data, 1, &mean, vDSP_Length(n))
+            
+            var centered = [Float](repeating: 0, count: n)
+            var negMean = -mean
+            vDSP_vsadd(self.data, 1, &negMean, &centered, 1, vDSP_Length(n))
+            
+            var squared = [Float](repeating: 0, count: n)
+            vDSP_vsq(centered, 1, &squared, 1, vDSP_Length(n))
+            
+            var variance: Float = 0.0
+            vDSP_meanv(squared, 1, &variance, vDSP_Length(n))
+            
+            var std = sqrt(variance + epsilon)
+            vDSP_vsdiv(centered, 1, &std, &result.data, 1, vDSP_Length(n))
+            
+            return result
+        }
         
-        // Step 2: Subtract mean (center the data)
-        var centered = [Float](repeating: 0, count: n)
-        var negMean = -mean
-        vDSP_vsadd(self.data, 1, &negMean, &centered, 1, vDSP_Length(n))
+        // For multi-dimensional tensors, normalize along last dimension
+        // Each "feature vector" (last dimension) gets normalized independently
+        let lastDim = shape.dimensions.last!
+        let numVectors = shape.count / lastDim
         
-        // Step 3: Compute variance = mean((x - mean)²)
-        var squared = [Float](repeating: 0, count: n)
-        vDSP_vsq(centered, 1, &squared, 1, vDSP_Length(n))
-        
-        var variance: Float = 0.0
-        vDSP_meanv(squared, 1, &variance, vDSP_Length(n))
-        
-        // Step 4: Compute std = sqrt(variance + epsilon)
-        var std = sqrt(variance + epsilon)  // var, not let (vDSP needs &)
-        
-        // Step 5: Divide centered values by std
-        vDSP_vsdiv(centered, 1, &std, &result.data, 1, vDSP_Length(n))
+        for vec in 0..<numVectors {
+            let startIdx = vec * lastDim
+            let endIdx = startIdx + lastDim
+            
+            let vecData = Array(self.data[startIdx..<endIdx])
+            
+            // LayerNorm for this vector
+            var mean: Float = 0.0
+            vDSP_meanv(vecData, 1, &mean, vDSP_Length(lastDim))
+            
+            var centered = [Float](repeating: 0, count: lastDim)
+            var negMean = -mean
+            vDSP_vsadd(vecData, 1, &negMean, &centered, 1, vDSP_Length(lastDim))
+            
+            var squared = [Float](repeating: 0, count: lastDim)
+            vDSP_vsq(centered, 1, &squared, 1, vDSP_Length(lastDim))
+            
+            var variance: Float = 0.0
+            vDSP_meanv(squared, 1, &variance, vDSP_Length(lastDim))
+            
+            var std = sqrt(variance + epsilon)
+            
+            var vecResult = [Float](repeating: 0, count: lastDim)
+            vDSP_vsdiv(centered, 1, &std, &vecResult, 1, vDSP_Length(lastDim))
+            
+            // Copy result back
+            for i in 0..<lastDim {
+                result.data[startIdx + i] = vecResult[i]
+            }
+        }
         
         return result
     }
