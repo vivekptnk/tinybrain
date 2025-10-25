@@ -2,7 +2,7 @@
 
 **Swift-Native On-Device LLM Inference Kit**
 
-[![Swift](https://img.shields.io/badge/Swift-5.10+-orange.svg)](https://swift.org)
+[![Swift](https://img.shields.io/badge/Swift-5.10+-purple.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/platform-iOS%2017%2B%20%7C%20macOS%2014%2B-lightgrey.svg)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/vivekptnk/tinybrain/workflows/CI/badge.svg)](https://github.com/vivekptnk/tinybrain/actions)
