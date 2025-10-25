@@ -1504,10 +1504,18 @@ extension Tensor where Element == Float {
         }
     }
     
-    /// Helper to create MetalBackend directly (for testing/fallback)
+    /// Helper for runtime-only Metal enabling
+    ///
+    /// **REVIEW HITLER HONEST:** This doesn't work without umbrella module.
+    /// 
+    /// **Limitation:** TinyBrainRuntime can't initialize Metal without TinyBrainMetal.
+    /// **Solution:** Import `TinyBrain` (umbrella module) instead of just `TinyBrainRuntime`.
+    ///
+    /// If you must use runtime-only, call `TinyBrainBackend.metalBackend = try MetalBackend()`
+    /// explicitly after importing both TinyBrainRuntime and TinyBrainMetal.
     private func createMetalBackendDirectly() throws -> Any {
-        // This will be properly resolved when Metal is imported
-        // For now, just throw an error
+        // Can't instantiate without circular dependency
+        // User must import umbrella module or initialize manually
         throw TensorError.metalNotAvailable
     }
     
