@@ -102,3 +102,8 @@ public protocol TensorDownloader {
     func downloadTensor(_ tensor: Tensor<Float>) -> Tensor<Float>
 }
 
+/// **REVIEW HITLER FIX:** Protocol for INT8 quantized operations
+public protocol QuantizedMatMulBackend {
+    func matmulQuantized(_ input: Tensor<Float>, _ quantized: QuantizedTensor) throws -> Tensor<Float>
+}
+

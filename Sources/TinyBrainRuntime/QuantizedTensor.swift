@@ -366,19 +366,29 @@ extension Tensor where Element == Float {
 extension Tensor where Element == Float {
     /// Matrix multiplication with quantized weights
     ///
-    /// **TB-004 Phase 3:** Auto-dequantizes during matmul
+    /// **REVIEW HITLER FIX:** Now uses INT8 Metal kernel (no Float32 materialization!)
     ///
     /// Example:
     /// ```swift
     /// let input = Tensor<Float>.random([128, 768])
     /// let weights = loadWeights().quantize()  // QuantizedTensor
-    /// let output = input.matmul(weights)  // Dequantizes automatically
+    /// let output = input.matmul(weights)  // Computes directly from INT8!
     /// ```
     public func matmul(_ quantized: QuantizedTensor) -> Tensor<Float> {
-        // Dequantize then multiply
-        // TODO: Fused dequant+matmul Metal kernel for performance
+        // **REVIEW HITLER FIX:** Try INT8 Metal kernel first!
+        if let metalBackend = TinyBrainBackend.metalBackend as? QuantizedMatMulBackend {
+            do {
+                // Use fused INT8 dequant+matmul kernel (THE REAL FIX!)
+                return try metalBackend.matmulQuantized(self, quantized)
+            } catch {
+                // Metal failed, fall back to CPU
+                TinyBrainBackend.log("INT8 kernel failed: \(error), falling back to dequant+CPU")
+            }
+        }
+        
+        // Fallback: Dequantize then CPU matmul
         let weights = quantized.dequantize()
-        return self.matmul(weights)
+        return self.matmulCPU(weights)
     }
 }
 

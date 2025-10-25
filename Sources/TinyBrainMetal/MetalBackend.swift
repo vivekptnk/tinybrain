@@ -8,7 +8,9 @@ import Foundation
 import TinyBrainRuntime
 
 /// Metal backend for accelerated tensor operations
-public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader {
+///
+/// **REVIEW HITLER FIX:** Now includes INT8 quantized operations!
+public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader, QuantizedMatMulBackend {
     /// Shared Metal device (the GPU)
     private let device: MTLDevice
     
@@ -89,6 +91,8 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     
     /// Compile Metal shader library from source
     ///
+    /// **REVIEW HITLER FIX:** Now includes INT8 dequant + fused matmul kernels!
+    ///
     /// Used when SPM doesn't pre-compile .metal files.
     /// Compiles at runtime for flexibility.
     ///
@@ -167,6 +171,38 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             if (row < M && col < N) {
                 C[row * N + col] = sum;
             }
+        }
+        
+        // **REVIEW HITLER FIX:** INT8 dequant + fused matmul kernels
+        
+        // Fused INT8 dequant + matmul (THE REAL FIX!)
+        kernel void matmul_int8_dequant(
+            device const float* A [[buffer(0)]],
+            device const char* B_quantized [[buffer(1)]],
+            device const float* B_scales [[buffer(2)]],
+            device float* C [[buffer(3)]],
+            constant uint3& dims [[buffer(4)]],
+            uint2 gid [[thread_position_in_grid]]
+        ) {
+            uint M = dims.x, N = dims.y, K = dims.z;
+            uint row = gid.y, col = gid.x;
+            
+            if (row >= M || col >= N) return;
+            
+            float sum = 0.0;
+            
+            for (uint k = 0; k < K; k++) {
+                float a_val = A[row * K + k];
+                
+                // Dequantize on-the-fly (no Float32 materialization!)
+                char b_quant = B_quantized[k * N + col];
+                float b_scale = B_scales[k];
+                float b_val = float(b_quant) * b_scale;
+                
+                sum += a_val * b_val;
+            }
+            
+            C[row * N + col] = sum;
         }
         """
         
@@ -528,6 +564,87 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         let resultCount = Int(M * N)
         storage.releaseCallback = { [weak pool] in
             pool?.release(bufferC, elementCount: resultCount)
+        }
+        
+        return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
+    }
+    
+    // MARK: - INT8 Quantized Operations
+    
+    /// **REVIEW HITLER FIX:** Fused INT8 dequant + matmul
+    ///
+    /// THE REAL SOLUTION: Compute directly from INT8 without Float32 materialization!
+    ///
+    /// - Parameters:
+    ///   - input: Float32 input [M, K]
+    ///   - quantized: INT8 weights
+    /// - Returns: Float32 output [M, N]
+    public func matmulQuantized(_ input: Tensor<Float>, _ quantized: QuantizedTensor) throws -> Tensor<Float> {
+        precondition(input.shape.dimensions.count == 2, "Input must be 2D")
+        precondition(quantized.shape.dimensions.count == 2, "Weights must be 2D")
+        precondition(input.shape.dimensions[1] == quantized.shape.dimensions[0], "Dimensions must match")
+        
+        let M = UInt32(input.shape.dimensions[0])
+        let K = UInt32(input.shape.dimensions[1])
+        let N = UInt32(quantized.shape.dimensions[1])
+        
+        // Ensure input is contiguous
+        let inputContiguous = input.isContiguous ? input : input.makeContiguousCopy()
+        
+        // Create buffers
+        let (bufferA, releaseA) = try createBufferWithTracking(from: inputContiguous)
+        
+        // INT8 weights buffer
+        let bufferB = device.makeBuffer(bytes: quantized.data, length: quantized.data.count, options: .storageModeShared)!
+        
+        // Scales buffer (per-channel)
+        let bufferScales = device.makeBuffer(bytes: quantized.scales, length: quantized.scales.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
+        
+        // Output buffer
+        let bufferC = try createBuffer(elementCount: Int(M * N))
+        
+        // Dimensions
+        var dims = SIMD3<UInt32>(M, N, K)
+        let dimsBuffer = device.makeBuffer(bytes: &dims, length: MemoryLayout<SIMD3<UInt32>>.stride, options: .storageModeShared)!
+        
+        // Load kernel
+        let pipeline = try loadKernel(named: "matmul_int8_dequant")
+        
+        // Encode
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.invalidKernelConfiguration("Failed to create command buffer")
+        }
+        
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(bufferA, offset: 0, index: 0)
+        encoder.setBuffer(bufferB, offset: 0, index: 1)
+        encoder.setBuffer(bufferScales, offset: 0, index: 2)
+        encoder.setBuffer(bufferC, offset: 0, index: 3)
+        encoder.setBuffer(dimsBuffer, offset: 0, index: 4)
+        
+        let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadgroupsPerGrid = MTLSize(
+            width: (Int(N) + 15) / 16,
+            height: (Int(M) + 15) / 16,
+            depth: 1
+        )
+        
+        encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        encoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        // Release input buffer
+        if releaseA {
+            bufferPool.release(bufferA, elementCount: Int(M * K))
+        }
+        
+        // Return result
+        let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
+        storage.releaseCallback = { [weak bufferPool] in
+            bufferPool?.release(bufferC, elementCount: Int(M * N))
         }
         
         return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
