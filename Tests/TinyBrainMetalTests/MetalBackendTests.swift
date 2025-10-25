@@ -184,5 +184,40 @@ final class MetalBackendTests: XCTestCase {
         XCTAssertLessThan(tiledTime, naiveTime * 1.5, 
                          "Tiled kernel should be faster or comparable")
     }
+    
+    // MARK: - Comprehensive Benchmarks
+    
+    /// Test Metal on various matrix sizes (comprehensive validation)
+    func testMetalComprehensiveSizes() throws {
+        guard MetalBackend.isAvailable else {
+            throw XCTSkip("Metal not available")
+        }
+        
+        let backend = try MetalBackend()
+        
+        let sizes = [(32, 32), (64, 64), (128, 128), (256, 256)]
+        
+        for (m, n) in sizes {
+            let a = Tensor.random(shape: TensorShape(m, n))
+            let b = Tensor.random(shape: TensorShape(n, m))
+            
+            let cpuResult = a.matmul(b)
+            let metalResult = try backend.matmul(a, b)
+            
+            // Check random samples for parity
+            for _ in 0..<10 {
+                let i = Int.random(in: 0..<m)
+                let j = Int.random(in: 0..<m)
+                
+                let diff = abs(metalResult[i,j] - cpuResult[i,j])
+                let relError = diff / max(abs(cpuResult[i,j]), 1e-7)
+                
+                XCTAssertLessThan(relError, 1e-3, 
+                                 "Mismatch at [\(i),\(j)] for size \(m)×\(n)")
+            }
+            
+            print("✅ Metal parity validated for \(m)×\(n)")
+        }
+    }
 }
 

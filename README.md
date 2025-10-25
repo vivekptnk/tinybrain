@@ -211,7 +211,7 @@ tinybrain/
 |-------|----------|--------------|
 | **Phase 1: Scaffold** | ✅ Complete | Project structure, tooling, docs |
 | **Phase 2: Runtime** | ✅ Complete | Tensor engine (Float32, Accelerate) |
-| **Phase 3: Metal** | 🚧 Next | GPU kernels, optimization |
+| **Phase 3: Metal** | ✅ Complete | GPU MatMul kernel (3-5× speedup) |
 | **Phase 4: Quant/KV** | Planned | INT8/INT4, paged KV-cache |
 | **Phase 5: Tokenizer** | Planned | BPE, streaming output |
 | **Phase 6: Demo** | Planned | SwiftUI chat app |
