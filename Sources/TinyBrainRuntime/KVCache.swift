@@ -37,6 +37,22 @@ import Foundation
 import Metal
 #endif
 
+/// **REVIEW HITLER FIX:** Page storage using class (reference semantics)
+///
+/// This avoids copying entire pages on every dictionary access!
+private final class KVPage {
+    /// Raw Float array for fast access
+    var data: [Float]
+    
+    /// Allocator page ID for cleanup
+    let allocatorPageId: Int
+    
+    init(allocatorPageId: Int, size: Int) {
+        self.allocatorPageId = allocatorPageId
+        self.data = [Float](repeating: 0.0, count: size)
+    }
+}
+
 /// KV cache manager for transformer layers
 public final class KVCache {
     /// Number of transformer layers
@@ -54,13 +70,12 @@ public final class KVCache {
     /// Page allocator
     private let allocator: PageAllocator
     
-    /// Storage for keys: [layer][logicalPageId] → (allocatorPageId, [Float] data)
-    /// Each page stores `pageSize` keys of dimension `hiddenDim`
-    /// **Uses raw arrays for FAST writes** (no Tensor CoW overhead)
-    private var keyPages: [[Int: (Int, [Float])]]
+    /// Storage for keys: [layer][logicalPageId] → KVPage
+    /// **REVIEW HITLER FIX:** Uses class (reference semantics) to avoid copying!
+    private var keyPages: [[Int: KVPage]]
     
-    /// Storage for values: [layer][logicalPageId] → (allocatorPageId, [Float] data)
-    private var valuePages: [[Int: (Int, [Float])]]
+    /// Storage for values: [layer][logicalPageId] → KVPage
+    private var valuePages: [[Int: KVPage]]
     
     /// Current sequence length per layer
     private var lengths: [Int]
@@ -147,36 +162,30 @@ public final class KVCache {
                 }
             }
             
-            // Create raw arrays for this page (FAST!)
-            let keyData = [Float](repeating: 0.0, count: pageSize * hiddenDim)
-            let valueData = [Float](repeating: 0.0, count: pageSize * hiddenDim)
+            // **REVIEW HITLER FIX:** Create KVPage (class = no copying!)
+            let keyPage = KVPage(allocatorPageId: allocatorPageId!, size: pageSize * hiddenDim)
+            let valuePage = KVPage(allocatorPageId: allocatorPageId!, size: pageSize * hiddenDim)
             
-            keyPages[layer][pageId] = (allocatorPageId!, keyData)
-            valuePages[layer][pageId] = (allocatorPageId!, valueData)
+            keyPages[layer][pageId] = keyPage
+            valuePages[layer][pageId] = valuePage
         }
         
-        // Write key/value into page (FAST: direct array write!)
-        if let (allocatorId, keyDataArray) = keyPages[layer][pageId],
-           let (_, valueDataArray) = valuePages[layer][pageId] {
+        // Write key/value into page (FAST: direct mutation, no copying!)
+        if let keyPage = keyPages[layer][pageId],
+           let valuePage = valuePages[layer][pageId] {
             
-            // Get mutable copies
-            var keyData = keyDataArray
-            var valueData = valueDataArray
-            
-            // **TB-004 OPTIMIZATION:** Direct array manipulation (100× faster!)
+            // **REVIEW HITLER FIX:** Direct mutation (reference semantics)
+            // No copying! We mutate the class's internal array directly
             let rowStartIdx = offsetInPage * hiddenDim
             let keyInput = key.rawData
             let valueInput = value.rawData
             
-            // Bulk copy entire row
+            // Bulk write directly to page's data array
             for i in 0..<hiddenDim {
-                keyData[rowStartIdx + i] = keyInput[i]
-                valueData[rowStartIdx + i] = valueInput[i]
+                keyPage.data[rowStartIdx + i] = keyInput[i]
+                valuePage.data[rowStartIdx + i] = valueInput[i]
             }
-            
-            // Store back
-            keyPages[layer][pageId] = (allocatorId, keyData)
-            valuePages[layer][pageId] = (allocatorId, valueData)
+            // No need to store back - it's a class reference!
         }
         
         // Update length - track how many tokens we have
@@ -208,11 +217,11 @@ public final class KVCache {
             let pageId = pos / pageSize
             let offsetInPage = pos % pageSize
             
-            if let (_, keyData) = keyPages[layer][pageId] {
-                // Copy row from page array to result
+            if let keyPage = keyPages[layer][pageId] {
+                // Copy row from page to result
                 let rowStartIdx = offsetInPage * hiddenDim
                 for i in 0..<hiddenDim {
-                    result[idx, i] = keyData[rowStartIdx + i]
+                    result[idx, i] = keyPage.data[rowStartIdx + i]
                 }
             }
         }
@@ -240,11 +249,11 @@ public final class KVCache {
             let pageId = pos / pageSize
             let offsetInPage = pos % pageSize
             
-            if let (_, valueData) = valuePages[layer][pageId] {
-                // Copy row from page array to result
+            if let valuePage = valuePages[layer][pageId] {
+                // Copy row from page to result
                 let rowStartIdx = offsetInPage * hiddenDim
                 for i in 0..<hiddenDim {
-                    result[idx, i] = valueData[rowStartIdx + i]
+                    result[idx, i] = valuePage.data[rowStartIdx + i]
                 }
             }
         }
@@ -261,13 +270,15 @@ public final class KVCache {
             return
         }
         
-        // Get allocator page ID
-        if let (allocatorPageId, _) = keyPages[layer][oldestLogicalPageId] {
-            // Free page in allocator for reuse
-            allocator.freePage(allocatorPageId)
+        // Free allocator pages
+        if let keyPage = keyPages[layer][oldestLogicalPageId] {
+            allocator.freePage(keyPage.allocatorPageId)
+        }
+        if let valuePage = valuePages[layer][oldestLogicalPageId] {
+            allocator.freePage(valuePage.allocatorPageId)
         }
         
-        // Remove page from cache
+        // Remove pages from cache
         keyPages[layer].removeValue(forKey: oldestLogicalPageId)
         valuePages[layer].removeValue(forKey: oldestLogicalPageId)
         
@@ -295,8 +306,11 @@ public final class KVCache {
         
         // Free all pages
         for layer in 0..<numLayers {
-            for (allocatorPageId, _) in keyPages[layer].values {
-                allocator.freePage(allocatorPageId)
+            for keyPage in keyPages[layer].values {
+                allocator.freePage(keyPage.allocatorPageId)
+            }
+            for valuePage in valuePages[layer].values {
+                allocator.freePage(valuePage.allocatorPageId)
             }
             keyPages[layer].removeAll()
             valuePages[layer].removeAll()

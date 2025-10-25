@@ -19,12 +19,6 @@
 @_exported import TinyBrainMetal
 @_exported import TinyBrainTokenizer
 
-// MARK: - Metal Initialization
-
-/// **REVIEW HITLER FIX:** Auto-initialize Metal when module loads
-/// This makes "automatically enabled" claim in docs actually true!
-private let _ = TinyBrainBackend.enableMetalAcceleration()
-
 // MARK: - Metal Configuration
 
 /// Implementation of enableMetal() for the umbrella module
