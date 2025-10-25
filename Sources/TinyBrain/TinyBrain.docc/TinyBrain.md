@@ -21,6 +21,7 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 
 - <doc:GettingStarted>
 - <doc:Architecture>
+- <doc:TensorOperations>
 - ``TinyBrain/TinyBrain``
 
 ### Core Runtime
@@ -28,6 +29,14 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 - ``TinyBrain/ModelRunner``
 - ``TinyBrain/Tensor``
 - ``TinyBrain/TensorShape``
+
+### Tensor Operations
+
+- ``TinyBrain/Tensor/matmul(_:)``
+- ``TinyBrain/Tensor/gelu()``
+- ``TinyBrain/Tensor/relu()``
+- ``TinyBrain/Tensor/softmax(epsilon:)``
+- ``TinyBrain/Tensor/layerNorm(epsilon:)``
 
 ### Backends
 
