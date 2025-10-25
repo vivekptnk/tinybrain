@@ -69,5 +69,11 @@ extension TinyBrainBackend {
             return false
         }
     }
+    
+    /// **TB-004:** Alias for enableMetalAcceleration() to match Backend API
+    @discardableResult
+    public static func enableMetal() -> Bool {
+        enableMetalAcceleration()
+    }
 }
 

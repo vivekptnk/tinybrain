@@ -51,11 +51,15 @@ public final class TinyBrainBackend {
     
     /// Enable Metal GPU acceleration (opt-in)
     ///
+    /// **TB-004:** This is implemented by the TinyBrain umbrella module.
+    ///
     /// Call this once at app startup to enable GPU acceleration.
     /// If Metal is unavailable, falls back to CPU silently.
     ///
     /// Example:
     /// ```swift
+    /// import TinyBrain
+    ///
     /// // In your app's init:
     /// TinyBrainBackend.enableMetal()
     ///
@@ -66,13 +70,8 @@ public final class TinyBrainBackend {
     /// - Returns: True if Metal was successfully enabled
     @discardableResult
     public static func enableMetal() -> Bool {
-        guard metalBackend == nil else {
-            return true  // Already enabled
-        }
-        
-        // Try to create Metal backend
-        // Note: Actual creation happens in TinyBrainMetal module
-        // This is a placeholder - umbrella module will override
+        // Stub implementation - overridden by TinyBrain umbrella module
+        log("enableMetal() called but not overridden by umbrella module")
         return false
     }
     
@@ -87,7 +86,19 @@ public final class TinyBrainBackend {
 /// Protocol for backend implementations to conform to
 ///
 /// Allows runtime polymorphism without compile-time dependency
+///
+/// **TB-004:** Currently supports Float32 tensors (Float16/Int8 coming later)
 public protocol MatMulBackend {
-    func matmul(_ a: Tensor, _ b: Tensor) throws -> Tensor
+    func matmul(_ a: Tensor<Float>, _ b: Tensor<Float>) throws -> Tensor<Float>
+}
+
+/// **TB-004:** Protocol for uploading tensors to GPU
+public protocol TensorUploader {
+    func uploadTensor(_ tensor: Tensor<Float>) throws -> Tensor<Float>
+}
+
+/// **TB-004:** Protocol for downloading tensors from GPU
+public protocol TensorDownloader {
+    func downloadTensor(_ tensor: Tensor<Float>) -> Tensor<Float>
 }
 

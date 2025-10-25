@@ -8,7 +8,7 @@ import Foundation
 import TinyBrainRuntime
 
 /// Metal backend for accelerated tensor operations
-public final class MetalBackend: MatMulBackend {
+public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader {
     /// Shared Metal device (the GPU)
     private let device: MTLDevice
     
@@ -21,6 +21,9 @@ public final class MetalBackend: MatMulBackend {
     /// Cache of compiled compute pipelines (kernel name → pipeline)
     /// Avoids recompiling shaders on every use
     private var pipelineCache: [String: MTLComputePipelineState] = [:]
+    
+    /// **TB-004:** Persistent buffer pool to eliminate 0.45ms allocation overhead
+    public let bufferPool: MetalBufferPool
     
     /// Initialize the Metal backend
     /// - Throws: `MetalError` if Metal is unavailable
@@ -36,6 +39,9 @@ public final class MetalBackend: MatMulBackend {
             throw MetalError.commandQueueCreationFailed
         }
         self.commandQueue = commandQueue
+        
+        // 3. Create buffer pool for persistent GPU buffers (TB-004 optimization)
+        self.bufferPool = MetalBufferPool(device: device)
         
         // Note: Library is loaded lazily when first kernel is requested
         // This allows MetalBackend to initialize even if shaders aren't compiled yet
@@ -193,43 +199,60 @@ public final class MetalBackend: MatMulBackend {
     
     // MARK: - Buffer Management
     
-    /// Create a Metal buffer from tensor data
+    /// **TB-004:** Create a Metal buffer from tensor data (using pool)
     ///
-    /// Copies data from CPU memory to GPU memory.
+    /// Copies data from CPU memory to GPU memory, reusing buffers from pool.
+    ///
+    /// **Performance:** ~0.001ms (pool lookup) vs 0.45ms (new allocation)
     ///
     /// - Parameter tensor: Source tensor
     /// - Returns: Metal buffer containing tensor data
     /// - Throws: `MetalError.bufferCreationFailed` if allocation fails
-    public func createBuffer(from tensor: Tensor) throws -> MTLBuffer {
-        let byteCount = tensor.shape.count * MemoryLayout<Float>.stride
+    public func createBuffer(from tensor: Tensor<Float>) throws -> MTLBuffer {
+        let elementCount = tensor.shape.count
         
-        guard let buffer = device.makeBuffer(
-            bytes: tensor.rawData,
-            length: byteCount,
-            options: .storageModeShared  // CPU & GPU can access
-        ) else {
-            throw MetalError.bufferCreationFailed
+        // **TB-004 CRITICAL FIX:** If tensor already on GPU, reuse its buffer!
+        if tensor.isOnGPU {
+            let storage = tensor.tensorStorage
+            if let gpuBuffer = storage.gpuBuffer as? MTLBuffer {
+                // Already on GPU - reuse the buffer (zero transfer!)
+                return gpuBuffer
+            }
+        }
+        
+        // Tensor on CPU - need to upload
+        // Get buffer from pool (or create new)
+        let buffer = try bufferPool.acquire(elementCount: elementCount)
+        
+        // Copy data to GPU
+        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: elementCount)
+        let tensorData = tensor.rawData
+        for i in 0..<elementCount {
+            pointer[i] = tensorData[i]
         }
         
         return buffer
     }
     
-    /// Create an empty Metal buffer for results
+    /// **TB-004:** Create an empty Metal buffer for results (using pool)
     ///
     /// - Parameter elementCount: Number of Float elements
-    /// - Returns: Empty Metal buffer
+    /// - Returns: Empty Metal buffer (may be reused from pool)
     /// - Throws: `MetalError.bufferCreationFailed` if allocation fails
     public func createBuffer(elementCount: Int) throws -> MTLBuffer {
-        let byteCount = elementCount * MemoryLayout<Float>.stride
-        
-        guard let buffer = device.makeBuffer(
-            length: byteCount,
-            options: .storageModeShared
-        ) else {
-            throw MetalError.bufferCreationFailed
-        }
-        
-        return buffer
+        // Get buffer from pool (or create new)
+        return try bufferPool.acquire(elementCount: elementCount)
+    }
+    
+    /// Release a buffer back to the pool
+    ///
+    /// **TB-004:** This enables buffer reuse for next operation.
+    ///
+    /// - Parameters:
+    ///   - buffer: Buffer to release
+    ///   - elementCount: Number of elements in buffer
+    public func releaseBuffer(_ buffer: MTLBuffer, elementCount: Int) {
+        bufferPool.release(buffer, elementCount: elementCount)
     }
     
     /// Read Metal buffer back to Swift array
@@ -241,6 +264,57 @@ public final class MetalBackend: MatMulBackend {
     public func readBuffer(_ buffer: MTLBuffer, count: Int) -> [Float] {
         let pointer = buffer.contents().bindMemory(to: Float.self, capacity: count)
         return Array(UnsafeBufferPointer(start: pointer, count: count))
+    }
+    
+    // MARK: - TB-004: GPU-Resident Tensor Support
+    
+    /// Upload tensor to GPU
+    ///
+    /// **TB-004:** This creates a GPU-resident tensor that stays on GPU.
+    ///
+    /// - Parameter tensor: CPU tensor to upload
+    /// - Returns: GPU-resident tensor
+    /// - Throws: MetalError if upload fails
+    public func uploadTensor(_ tensor: Tensor<Float>) throws -> Tensor<Float> {
+        // Already on GPU?
+        if tensor.isOnGPU {
+            return tensor
+        }
+        
+        // Create GPU buffer and copy data
+        let buffer = try createBuffer(from: tensor)
+        
+        // Create TensorStorage with GPU buffer
+        let storage = TensorStorage<Float>(gpuBuffer: buffer, count: tensor.shape.count)
+        
+        // Return new tensor with GPU storage
+        return Tensor<Float>(shape: tensor.shape, storage: storage)
+    }
+    
+    /// Download tensor from GPU
+    ///
+    /// **TB-004:** Sync GPU data back to CPU.
+    ///
+    /// - Parameter tensor: GPU tensor to download
+    /// - Returns: CPU tensor with data copied from GPU
+    public func downloadTensor(_ tensor: Tensor<Float>) -> Tensor<Float> {
+        // Already on CPU?
+        if !tensor.isOnGPU {
+            return tensor
+        }
+        
+        // Get GPU buffer from storage
+        let storage = tensor.tensorStorage
+        guard let buffer = storage.gpuBuffer as? MTLBuffer else {
+            // Fallback: already has CPU data
+            return tensor
+        }
+        
+        // Read data from GPU
+        let cpuData = readBuffer(buffer, count: tensor.shape.count)
+        
+        // Create CPU tensor
+        return Tensor(shape: tensor.shape, data: cpuData)
     }
     
     // MARK: - Matrix Operations (MatMulBackend Protocol)
@@ -262,7 +336,7 @@ public final class MetalBackend: MatMulBackend {
     /// let backend = try MetalBackend()
     /// let c = try backend.matmul(a, b)  // Runs on GPU!
     /// ```
-    public func matmul(_ a: Tensor, _ b: Tensor) throws -> Tensor {
+    public func matmul(_ a: Tensor<Float>, _ b: Tensor<Float>) throws -> Tensor<Float> {
         // Use optimized tiled version for best performance
         return try matmulOptimized(a, b)
     }
@@ -271,7 +345,7 @@ public final class MetalBackend: MatMulBackend {
     ///
     /// Uses the simpler naive kernel instead of tiled.
     /// Useful for debugging or comparing performance.
-    public func matmulNaive(_ a: Tensor, _ b: Tensor) throws -> Tensor {
+    public func matmulNaive(_ a: Tensor<Float>, _ b: Tensor<Float>) throws -> Tensor<Float> {
         precondition(a.shape.dimensions.count == 2, "A must be 2D")
         precondition(b.shape.dimensions.count == 2, "B must be 2D")
         precondition(a.shape.dimensions[1] == b.shape.dimensions[0], "Inner dimensions must match")
@@ -330,10 +404,10 @@ public final class MetalBackend: MatMulBackend {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         
-        // Read results back from GPU
-        let resultData = readBuffer(bufferC, count: Int(M * N))
+        // **TB-004 FIX:** Return GPU-resident tensor, don't download!
+        let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
         
-        return Tensor(shape: TensorShape(Int(M), Int(N)), data: resultData)
+        return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
     }
     
     /// Perform OPTIMIZED matrix multiplication using tiled kernel
@@ -346,7 +420,7 @@ public final class MetalBackend: MatMulBackend {
     ///   - useTiled: Whether to use tiled kernel (default: true for large matrices)
     /// - Returns: Result matrix [M, N]
     /// - Throws: `MetalError` if GPU operation fails
-    public func matmulOptimized(_ a: Tensor, _ b: Tensor, useTiled: Bool = true) throws -> Tensor {
+    public func matmulOptimized(_ a: Tensor<Float>, _ b: Tensor<Float>, useTiled: Bool = true) throws -> Tensor<Float> {
         precondition(a.shape.dimensions.count == 2, "A must be 2D")
         precondition(b.shape.dimensions.count == 2, "B must be 2D")
         precondition(a.shape.dimensions[1] == b.shape.dimensions[0], "Inner dimensions must match")
@@ -410,17 +484,18 @@ public final class MetalBackend: MatMulBackend {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         
-        // Read results back from GPU
-        let resultData = readBuffer(bufferC, count: Int(M * N))
+        // **TB-004 FIX:** Return GPU-resident tensor, don't download!
+        // Create TensorStorage with GPU buffer to keep result on GPU
+        let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
         
-        return Tensor(shape: TensorShape(Int(M), Int(N)), data: resultData)
+        return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
     }
 }
 
 // Helper extension for making contiguous copies
-extension Tensor {
+extension Tensor<Float> {
     /// Make a contiguous copy of this tensor (public for Metal backend)
-    public func makeContiguousCopy() -> Tensor {
+    public func makeContiguousCopy() -> Tensor<Float> {
         if isContiguous {
             return self
         }

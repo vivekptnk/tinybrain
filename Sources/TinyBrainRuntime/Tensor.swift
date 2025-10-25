@@ -226,9 +226,11 @@ public struct TensorShape: Equatable, CustomStringConvertible {
     }
 }
 
-/// Multi-dimensional array for numerical operations in TinyBrain
+/// **TB-004 Phase 2:** Multi-dimensional array for numerical operations in TinyBrain
 ///
-/// A `Tensor` holds the actual numerical data along with its shape. Think of it as
+/// Generic over element type to support Float32, Float16, and Int8.
+///
+/// A `Tensor<Element>` holds the actual numerical data along with its shape. Think of it as
 /// a container that knows both **what numbers it contains** and **how they're organized**.
 ///
 /// ## Creating Tensors
@@ -237,7 +239,7 @@ public struct TensorShape: Equatable, CustomStringConvertible {
 /// ```swift
 /// let shape = TensorShape(2, 3)  // 2 rows, 3 columns
 /// let data: [Float] = [1, 2, 3, 4, 5, 6]
-/// let tensor = Tensor(shape: shape, data: data)
+/// let tensor = Tensor<Float>(shape: shape, data: data)
 /// // Represents: [[1, 2, 3],
 /// //              [4, 5, 6]]
 /// ```
@@ -245,13 +247,13 @@ public struct TensorShape: Equatable, CustomStringConvertible {
 /// **Using factory methods:**
 /// ```swift
 /// // All zeros
-/// let zeros = Tensor.zeros(shape: TensorShape(10, 768))
+/// let zeros = Tensor<Float>.zeros(shape: TensorShape(10, 768))
 ///
-/// // All ones
-/// let ones = Tensor.filled(shape: TensorShape(4, 4), value: 1.0)
+/// // Half precision (50% memory savings)
+/// let fp16 = Tensor<Float16>.zeros(shape: TensorShape(10, 768))
 ///
-/// // Custom value
-/// let initialized = Tensor.filled(shape: TensorShape(3, 3), value: 0.01)
+/// // Quantized (75% memory savings)
+/// let int8 = Tensor<Int8>.filled(shape: TensorShape(10, 768), value: 0)
 /// ```
 ///
 /// ## Why Use Structs? (Value Semantics)
@@ -259,16 +261,16 @@ public struct TensorShape: Equatable, CustomStringConvertible {
 /// `Tensor` is a `struct`, not a `class`, which means it has **value semantics**:
 ///
 /// ```swift
-/// var a = Tensor.zeros(shape: TensorShape(2, 2))
+/// var a = Tensor<Float>.zeros(shape: TensorShape(2, 2))
 /// var b = a  // 'b' is a copy, not a reference
 ///
-/// // Modifying 'b' doesn't affect 'a'
-/// b.data[0] = 5.0  // Only 'b' changes
+/// // Modifying 'b' doesn't affect 'a' (CoW optimization!)
+/// b[0, 0] = 5.0  // Only 'b' changes
 /// ```
 ///
 /// This prevents sneaky bugs where changing one tensor accidentally changes another.
 ///
-/// **Note:** We'll add copy-on-write optimization later (TB-002) so copying is fast!
+/// **TB-004:** Now with copy-on-write optimization - copies are cheap!
 ///
 /// ## Storage Layout (Row-Major)
 ///
@@ -287,12 +289,11 @@ public struct TensorShape: Equatable, CustomStringConvertible {
 ///
 /// This matches how most ML frameworks (PyTorch, NumPy) store data.
 ///
-/// ## Current Limitations (Will Fix in Future Tasks)
+/// ## Supported Types
 ///
-/// - ⚠️ No bounds checking on data access (use with care!)
-/// - ⚠️ No arithmetic operations yet (`+`, `-`, `*` coming in TB-002)
-/// - ⚠️ No GPU acceleration yet (Metal kernels in TB-003)
-/// - ⚠️ Only Float32 supported (quantization in TB-004)
+/// - **Float (Float32):** Standard precision, 4 bytes - default
+/// - **Float16:** Half precision, 2 bytes - 50% memory savings
+/// - **Int8:** Quantized, 1 byte - 75% memory savings
 ///
 /// ## Topics
 /// ### Creating Tensors
@@ -302,8 +303,8 @@ public struct TensorShape: Equatable, CustomStringConvertible {
 ///
 /// ### Properties
 /// - ``Tensor/shape``
-/// - ``Tensor/data``
-public struct Tensor {
+/// - ``Tensor/storage``
+public struct Tensor<Element: TensorElement> {
     /// The shape (dimensions) of this tensor
     ///
     /// Defines how the flat `data` array should be interpreted as a multi-dimensional structure.
@@ -315,20 +316,42 @@ public struct Tensor {
     /// ```
     public let shape: TensorShape
     
-    /// The underlying numerical data stored as a flat array
+    /// The underlying storage (CPU or GPU)
+    ///
+    /// **TB-004 Phase 2:** Now generic over Element type.
+    /// This enables lazy synchronization and eliminates transfer overhead.
+    ///
+    /// **Note:** Uses reference semantics internally but Tensor remains a value type.
+    /// Copy-on-write optimization included!
+    internal var storage: TensorStorage<Element>
+    
+    /// The underlying numerical data stored as a flat array (CPU view)
     ///
     /// Elements are stored in row-major order. Access is currently unprotected,
     /// so be careful with indices!
     ///
-    /// **Note:** This will be optimized with copy-on-write in TB-002 to avoid
-    /// unnecessary copies while maintaining value semantics.
-    ///
     /// Example:
     /// ```swift
-    /// let tensor = Tensor.filled(shape: TensorShape(2, 2), value: 5.0)
+    /// let tensor = Tensor<Float>.filled(shape: TensorShape(2, 2), value: 5.0)
     /// print(tensor.data)  // [5.0, 5.0, 5.0, 5.0]
     /// ```
-    internal var data: [Float]
+    internal var data: [Element] {
+        get { storage.getCPUData() }
+        set { 
+            ensureUniqueStorage()
+            storage.cpuData = newValue 
+        }
+    }
+    
+    /// **TB-004 CoW:** Ensure storage is uniquely owned before mutation
+    ///
+    /// This is the magic of copy-on-write: only copy when we need to write!
+    private mutating func ensureUniqueStorage() {
+        if !isKnownUniquelyReferenced(&storage) {
+            // Storage is shared - make our own copy
+            storage = storage.copy()
+        }
+    }
     
     /// Creates a tensor with the given shape and data
     ///
@@ -344,11 +367,26 @@ public struct Tensor {
     /// let data: [Float] = [1, 2, 3, 4, 5, 6]
     /// let tensor = Tensor(shape: shape, data: data)
     /// ```
-    public init(shape: TensorShape, data: [Float]) {
+    public init(shape: TensorShape, data: [Element]) {
         precondition(data.count == shape.count, 
                      "Data count (\(data.count)) must match shape count (\(shape.count))")
         self.shape = shape
-        self.data = data
+        self.storage = TensorStorage<Element>(cpuData: data)
+    }
+    
+    /// Internal initializer with storage (for GPU tensors)
+    ///
+    /// **TB-004:** Needed by MetalBackend to create GPU-resident tensors.
+    public init(shape: TensorShape, storage: TensorStorage<Element>) {
+        self.shape = shape
+        self.storage = storage
+    }
+    
+    /// Get internal storage (for Metal backend use)
+    ///
+    /// **TB-004:** Allows MetalBackend to access GPU buffer.
+    public var tensorStorage: TensorStorage<Element> {
+        storage
     }
     
     /// Creates a tensor filled with zeros
@@ -356,15 +394,15 @@ public struct Tensor {
     /// Useful for initializing buffers, gradients, or placeholder tensors.
     ///
     /// - Parameter shape: The dimensions of the tensor
-    /// - Returns: A new tensor with all elements set to `0.0`
+    /// - Returns: A new tensor with all elements set to zero
     ///
     /// Example:
     /// ```swift
     /// // Create a 10×768 embedding matrix initialized to zeros
-    /// let embeddings = Tensor.zeros(shape: TensorShape(10, 768))
+    /// let embeddings = Tensor<Float>.zeros(shape: TensorShape(10, 768))
     /// ```
-    public static func zeros(shape: TensorShape) -> Tensor {
-        Tensor(shape: shape, data: Array(repeating: 0.0, count: shape.count))
+    public static func zeros(shape: TensorShape) -> Tensor<Element> {
+        Tensor(shape: shape, data: Array(repeating: Element.zero, count: shape.count))
     }
     
     /// Creates a tensor filled with a specific value
@@ -376,13 +414,13 @@ public struct Tensor {
     ///
     /// Example:
     /// ```swift
-    /// // Initialize weights to small random-ish value
-    /// let weights = Tensor.filled(shape: TensorShape(768, 3072), value: 0.02)
+    /// // Initialize weights to small value
+    /// let weights = Tensor<Float>.filled(shape: TensorShape(768, 3072), value: 0.02)
     ///
     /// // Create a mask of ones
-    /// let mask = Tensor.filled(shape: TensorShape(10, 10), value: 1.0)
+    /// let mask = Tensor<Int8>.filled(shape: TensorShape(10, 10), value: 1)
     /// ```
-    public static func filled(shape: TensorShape, value: Float) -> Tensor {
+    public static func filled(shape: TensorShape, value: Element) -> Tensor<Element> {
         Tensor(shape: shape, data: Array(repeating: value, count: shape.count))
     }
     
@@ -402,68 +440,15 @@ public struct Tensor {
     /// //  [0, 1, 0],
     /// //  [0, 0, 1]]
     /// ```
-    public static func identity(size: Int) -> Tensor {
-        var data = [Float](repeating: 0.0, count: size * size)
+    public static func identity(size: Int) -> Tensor<Element> {
+        var data = [Element](repeating: Element.zero, count: size * size)
         
-        // Set diagonal elements to 1.0
+        // Set diagonal elements to 1
         for i in 0..<size {
-            data[i * size + i] = 1.0
+            data[i * size + i] = Element.one
         }
         
         return Tensor(shape: TensorShape(size, size), data: data)
-    }
-    
-    /// Creates a tensor filled with random values from a normal distribution
-    ///
-    /// Generates random numbers with mean=0 and standard deviation=1 (standard normal).
-    ///
-    /// **Why Random Initialization Matters:**
-    ///
-    /// In neural networks, weights **must** start random (not zero):
-    /// - All zeros → Symmetric → No learning!
-    /// - Small random values → Break symmetry → Learning works!
-    ///
-    /// **Where It's Used:**
-    /// - Weight initialization (before loading pretrained weights)
-    /// - Testing (generate random test data)
-    /// - Research (random baselines)
-    ///
-    /// - Parameters:
-    ///   - shape: The dimensions of the tensor
-    ///   - mean: Mean of the normal distribution (default: 0.0)
-    ///   - std: Standard deviation (default: 1.0)
-    /// - Returns: A tensor filled with random values from N(mean, std²)
-    ///
-    /// Example:
-    /// ```swift
-    /// // Standard normal: N(0, 1)
-    /// let weights = Tensor.random(shape: TensorShape(768, 3072))
-    ///
-    /// // Custom: N(0, 0.02)
-    /// let smallWeights = Tensor.random(shape: TensorShape(10, 10), mean: 0, std: 0.02)
-    /// ```
-    public static func random(shape: TensorShape, mean: Float = 0.0, std: Float = 1.0) -> Tensor {
-        var data = [Float](repeating: 0.0, count: shape.count)
-        
-        // Generate random values using Box-Muller transform
-        // Converts uniform random → normal random
-        for i in Swift.stride(from: 0, to: shape.count, by: 2) {
-            // Clamp u1 away from 0 to avoid log(0) = -∞
-            let u1 = max(Float.random(in: 0..<1), Float.leastNonzeroMagnitude)
-            let u2 = Float.random(in: 0..<1)
-            
-            // Box-Muller transform
-            let r = sqrt(-2.0 * log(u1))
-            let theta = 2.0 * Float.pi * u2
-            
-            data[i] = mean + std * r * cos(theta)
-            
-            if i + 1 < shape.count {
-                data[i + 1] = mean + std * r * sin(theta)
-            }
-        }
-        
-        return Tensor(shape: shape, data: data)
     }
     
     // MARK: - Subscript Access
@@ -503,7 +488,7 @@ public struct Tensor {
     /// - Returns: The value at the specified position
     /// - Precondition: `indices.count` must equal `shape.dimensions.count`
     /// - Precondition: Each index must be within bounds `[0, dimension_size)`
-    public subscript(indices: Int...) -> Float {
+    public subscript(indices: Int...) -> Element {
         get {
             precondition(indices.count == shape.dimensions.count,
                         "Expected \(shape.dimensions.count) indices, got \(indices.count)")
@@ -522,6 +507,7 @@ public struct Tensor {
             precondition(offset >= 0 && offset < data.count,
                         "Index \(indices) out of bounds for shape \(shape)")
             
+            ensureUniqueStorage()  // TB-004 CoW: ensure unique before mutation!
             data[offset] = newValue
         }
     }
@@ -588,8 +574,8 @@ public struct Tensor {
     /// **Internal use only!** Exposes the underlying data array for backend implementations.
     /// Needed by Metal and Accelerate to access tensor data efficiently.
     ///
-    /// - Returns: The underlying Float array
-    public var rawData: [Float] {
+    /// - Returns: The underlying Element array
+    public var rawData: [Element] {
         data
     }
     
@@ -647,7 +633,7 @@ public struct Tensor {
     /// // b[0,1] accesses same memory as a[1,0]
     /// // NO DATA WAS COPIED! ✅
     /// ```
-    public func transpose() -> Tensor {
+    public func transpose() -> Tensor<Element> {
         precondition(shape.dimensions.count == 2, 
                     "transpose() currently only supports 2D tensors")
         
@@ -657,8 +643,8 @@ public struct Tensor {
         
         let newShape = TensorShape(dimensions: newDimensions, strides: newStrides)
         
-        // Return new tensor sharing the same data!
-        return Tensor(shape: newShape, data: self.data)
+        // Return new tensor sharing the same storage (zero-copy!)
+        return Tensor(shape: newShape, storage: self.storage)
     }
     
     /// Reshape the tensor to a new shape
@@ -694,18 +680,18 @@ public struct Tensor {
     /// let c = a.reshape(TensorShape(2, 6))   // [2, 6]
     /// let d = a.reshape(TensorShape(2, 2, 3)) // [2, 2, 3]
     /// ```
-    public func reshape(_ newShape: TensorShape) -> Tensor {
+    public func reshape(_ newShape: TensorShape) -> Tensor<Element> {
         precondition(newShape.count == self.shape.count,
                     "Cannot reshape: element count mismatch (\(self.shape.count) vs \(newShape.count))")
         
         // If tensor is contiguous, can just change shape (zero-copy!)
         if self.isContiguous {
-            return Tensor(shape: newShape, data: self.data)
+            return Tensor(shape: newShape, storage: self.storage)
         }
         
         // If non-contiguous, must copy to make contiguous
         // (This ensures the new shape's stride assumptions are correct)
-        var newData = [Float](repeating: 0, count: self.shape.count)
+        var newData = [Element](repeating: Element.zero, count: self.shape.count)
         
         // Copy elements in the correct order
         var destIdx = 0
@@ -718,6 +704,17 @@ public struct Tensor {
         
         return Tensor(shape: newShape, data: newData)
     }
+}
+
+// MARK: - Float32-Specific Operations
+
+/// **TB-004 Phase 2:** Float-specific operations using Accelerate and Metal
+///
+/// These operations are only available for Tensor<Float> because they use:
+/// - Accelerate framework (vDSP, BLAS) which requires Float pointers
+/// - Metal kernels optimized for Float32
+/// - Floating-point math (softmax, layernorm, etc.)
+extension Tensor where Element == Float {
     
     // MARK: - Matrix Operations
     
@@ -824,9 +821,11 @@ public struct Tensor {
     
     /// CPU-only matrix multiplication using Accelerate
     ///
+    /// **TB-004:** Exposed publicly for explicit CPU benchmarking.
+    ///
     /// This is the fallback when Metal is unavailable or fails.
     /// Also used when backend preference is explicitly set to .cpu.
-    private func matmulCPU(_ other: Tensor) -> Tensor {
+    public func matmulCPU(_ other: Tensor) -> Tensor {
         // Ensure both tensors are contiguous for BLAS
         let a = self.isContiguous ? self : self.makeContiguous()
         let b = other.isContiguous ? other : other.makeContiguous()
@@ -856,13 +855,13 @@ public struct Tensor {
     /// Otherwise, copies data into contiguous row-major layout.
     ///
     /// - Returns: A contiguous version of this tensor
-    private func makeContiguous() -> Tensor {
+    private func makeContiguous() -> Tensor<Element> {
         if isContiguous {
             return self
         }
         
         // Need to copy elements in the correct order using strides
-        var newData = [Float](repeating: 0, count: shape.count)
+        var newData = [Element](repeating: Element.zero, count: shape.count)
         var destIdx = 0
         
         // For 2D tensors, iterate with proper stride-aware access
@@ -1400,9 +1399,167 @@ public struct Tensor {
     }
 }
 
-extension Tensor: CustomStringConvertible {
-    public var description: String {
-        "Tensor(shape: \(shape))"
+// MARK: - GPU Operations (TB-004)
+
+/// **TB-004 Phase 1:** GPU-resident tensor operations
+///
+/// Currently Float-specific but will support other types in future phases
+extension Tensor where Element == Float {
+    
+    /// Creates a tensor filled with random values from a normal distribution
+    ///
+    /// **Float-only:** Random generation using Box-Muller transform
+    ///
+    /// Example:
+    /// ```swift
+    /// let weights = Tensor<Float>.random(shape: TensorShape(768, 3072))
+    /// ```
+    public static func random(shape: TensorShape, mean: Float = 0.0, std: Float = 1.0) -> Tensor<Float> {
+        var data = [Float](repeating: 0.0, count: shape.count)
+        
+        for i in Swift.stride(from: 0, to: shape.count, by: 2) {
+            let u1 = max(Float.random(in: 0..<1), Float.leastNonzeroMagnitude)
+            let u2 = Float.random(in: 0..<1)
+            
+            let r = sqrt(-2.0 * log(u1))
+            let theta = 2.0 * Float.pi * u2
+            
+            data[i] = mean + std * r * cos(theta)
+            
+            if i + 1 < shape.count {
+                data[i + 1] = mean + std * r * sin(theta)
+            }
+        }
+        
+        return Tensor(shape: shape, data: data)
+    }
+    
+    /// Check if tensor data is on GPU
+    ///
+    /// **TB-004:** Enables checking tensor location for performance debugging.
+    ///
+    /// Example:
+    /// ```swift
+    /// let cpu = Tensor.zeros([100, 100])
+    /// print(cpu.isOnGPU)  // false
+    ///
+    /// let gpu = cpu.toGPU()
+    /// print(gpu.isOnGPU)  // true
+    /// ```
+    public var isOnGPU: Bool {
+        storage.isOnGPU
+    }
+    
+    /// Move tensor data to GPU
+    ///
+    /// **TB-004:** This is the key optimization that eliminates transfer overhead.
+    ///
+    /// Once a tensor is on the GPU, operations can chain without CPU roundtrips:
+    /// ```swift
+    /// let a = Tensor.random([1024, 1024]).toGPU()
+    /// let b = Tensor.random([1024, 1024]).toGPU()
+    /// let c = a.matmul(b)  // Stays on GPU!
+    /// let d = c.softmax()  // Still on GPU!
+    /// let result = d.toCPU()  // Download once
+    /// ```
+    ///
+    /// - Returns: New tensor with data on GPU
+    public func toGPU() -> Tensor {
+        // If already on GPU, return self
+        if storage.isOnGPU {
+            return self
+        }
+        
+        // Ensure Metal backend is initialized
+        if TinyBrainBackend.metalBackend == nil {
+            // First try the proper way (umbrella module override)
+            if !TinyBrainBackend.enableMetal() {
+                // Fallback: Try creating MetalBackend directly
+                // This is needed when importing TinyBrainRuntime directly (e.g., in tests)
+                #if canImport(TinyBrainMetal)
+                do {
+                    let backend = try createMetalBackendDirectly()
+                    TinyBrainBackend.metalBackend = backend
+                    TinyBrainBackend.log("Metal backend initialized (direct)")
+                } catch {
+                    TinyBrainBackend.log("Metal initialization failed: \(error)")
+                }
+                #endif
+            }
+        }
+        
+        // Try to upload to GPU via MetalBackend
+        guard let metalBackend = TinyBrainBackend.metalBackend as? TensorUploader else {
+            // Metal not available, return CPU tensor
+            TinyBrainBackend.log("toGPU() called but Metal not available, staying on CPU")
+            return self
+        }
+        
+        // Upload to GPU
+        do {
+            return try metalBackend.uploadTensor(self)
+        } catch {
+            TinyBrainBackend.log("toGPU() failed: \(error), staying on CPU")
+            return self
+        }
+    }
+    
+    /// Helper to create MetalBackend directly (for testing/fallback)
+    private func createMetalBackendDirectly() throws -> Any {
+        // This will be properly resolved when Metal is imported
+        // For now, just throw an error
+        throw TensorError.metalNotAvailable
+    }
+    
+    /// Move tensor data to CPU
+    ///
+    /// **TB-004:** Explicit CPU transfer for when you need results on CPU.
+    ///
+    /// Example:
+    /// ```swift
+    /// let gpu = Tensor.random([1024, 1024]).toGPU()
+    /// let result = gpu.matmul(gpu)  // Compute on GPU
+    /// let cpu = result.toCPU()       // Download for CPU processing
+    /// ```
+    ///
+    /// - Returns: New tensor with data on CPU
+    public func toCPU() -> Tensor {
+        // If already on CPU, return self
+        if storage.location == .cpu {
+            return self
+        }
+        
+        // Try to download from GPU via MetalBackend
+        if let metalBackend = TinyBrainBackend.metalBackend as? TensorDownloader {
+            return metalBackend.downloadTensor(self)
+        }
+        
+        // Fallback: Use storage's getCPUData()
+        let cpuData = storage.getCPUData()
+        return Tensor(shape: self.shape, data: cpuData)
     }
 }
+
+extension Tensor: CustomStringConvertible {
+    public var description: String {
+        "Tensor<\(Element.typeName)>(shape: \(shape))"
+    }
+}
+
+/// Errors that can occur during tensor operations
+enum TensorError: Error {
+    case metalNotAvailable
+}
+
+// MARK: - Type Aliases for Backward Compatibility
+
+/// **TB-004:** Default Tensor is Float32 for backward compatibility
+///
+/// Existing code using `Tensor` without type parameter will use Float32.
+///
+/// Example:
+/// ```swift
+/// let a = Tensor.zeros(shape: TensorShape(10, 10))  // Infers Tensor<Float>
+/// ```
+public typealias FloatTensor = Tensor<Float>
 

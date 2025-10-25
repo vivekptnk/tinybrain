@@ -46,10 +46,10 @@ final class MetalBackendTests: XCTestCase {
         let backend = try MetalBackend()
         
         // A: [2, 3]
-        let a = Tensor(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
+        let a = Tensor<Float>(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
         
         // B: [3, 2]
-        let b = Tensor(shape: TensorShape(3, 2), data: [7,8,9,10,11,12])
+        let b = Tensor<Float>(shape: TensorShape(3, 2), data: [7,8,9,10,11,12])
         
         // C = A × B on GPU
         let c = try backend.matmul(a, b)
@@ -153,8 +153,8 @@ final class MetalBackendTests: XCTestCase {
         let backend = try MetalBackend()
         
         // Large enough to see difference (256×256)
-        let a = Tensor.filled(shape: TensorShape(256, 256), value: 1.0)
-        let b = Tensor.filled(shape: TensorShape(256, 256), value: 2.0)
+        let a = Tensor<Float>.filled(shape: TensorShape(256, 256), value: 1.0)
+        let b = Tensor<Float>.filled(shape: TensorShape(256, 256), value: 2.0)
         
         // Warmup
         _ = try backend.matmul(a, b)

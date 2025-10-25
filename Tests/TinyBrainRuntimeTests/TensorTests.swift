@@ -12,20 +12,20 @@ final class TensorTests: XCTestCase {
     func testTensorCreation() {
         let shape = TensorShape(2, 3)
         let data = Array(repeating: 1.0 as Float, count: 6)
-        let tensor = Tensor(shape: shape, data: data)
+        let tensor = Tensor<Float>(shape: shape, data: data)
         
         XCTAssertEqual(tensor.shape, shape)
         XCTAssertEqual(tensor.data.count, 6)
     }
     
     func testZeroTensor() {
-        let tensor = Tensor.zeros(shape: TensorShape(2, 3))
+        let tensor = Tensor<Float>.zeros(shape: TensorShape(2, 3))
         XCTAssertEqual(tensor.data.count, 6)
         XCTAssertTrue(tensor.data.allSatisfy { $0 == 0.0 })
     }
     
     func testFilledTensor() {
-        let tensor = Tensor.filled(shape: TensorShape(2, 2), value: 5.0)
+        let tensor = Tensor<Float>.filled(shape: TensorShape(2, 2), value: 5.0)
         XCTAssertEqual(tensor.data.count, 4)
         XCTAssertTrue(tensor.data.allSatisfy { $0 == 5.0 })
     }
@@ -80,7 +80,7 @@ final class TensorTests: XCTestCase {
     /// **Why:** Contiguous tensors are faster (better cache locality)
     /// **How:** Verify new tensors are contiguous, transposed are not
     func testIsContiguous() {
-        let a = Tensor.zeros(shape: TensorShape(3, 4))
+        let a = Tensor<Float>.zeros(shape: TensorShape(3, 4))
         XCTAssertTrue(a.isContiguous, "Newly created tensor should be contiguous")
         
         // After transpose, stride order changes -> not contiguous
@@ -95,7 +95,7 @@ final class TensorTests: XCTestCase {
     /// **How:** Create tensor with known strides, verify subscript access
     func testOffsetCalculationWithStrides() {
         // Create [2, 3]: [[1,2,3], [4,5,6]]
-        let a = Tensor(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
+        let a = Tensor<Float>(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
         
         // Transpose to [3, 2]: [[1,4], [2,5], [3,6]]
         let b = a.transpose()
@@ -117,7 +117,7 @@ final class TensorTests: XCTestCase {
     /// **How:** Reshape and verify elements are accessible with new shape
     func testReshapeContiguous() {
         // Create 1D: [1,2,3,4,5,6]
-        let a = Tensor(shape: TensorShape(6), data: [1,2,3,4,5,6])
+        let a = Tensor<Float>(shape: TensorShape(6), data: [1,2,3,4,5,6])
         
         // Reshape to [2, 3]
         let b = a.reshape(TensorShape(2, 3))
@@ -144,10 +144,10 @@ final class TensorTests: XCTestCase {
     /// **How:** Create Q and K, transpose K, multiply
     func testTransposeMatMul() {
         // Q: [2, 3] - 2 queries, 3 dimensions each
-        let q = Tensor(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
+        let q = Tensor<Float>(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
         
         // K: [2, 3] - 2 keys, 3 dimensions each
-        let k = Tensor(shape: TensorShape(2, 3), data: [7,8,9,10,11,12])
+        let k = Tensor<Float>(shape: TensorShape(2, 3), data: [7,8,9,10,11,12])
         
         // Attention scores: Q × Kᵀ
         // Q: [2,3], Kᵀ: [3,2] → result: [2,2]
@@ -180,7 +180,7 @@ final class TensorTests: XCTestCase {
     /// **How:** Create a known tensor and read elements, comparing to expected values
     func testSubscriptRead2D() {
         // Create a 2×3 tensor: [[1,2,3], [4,5,6]]
-        let tensor = Tensor(shape: TensorShape(2, 3), 
+        let tensor = Tensor<Float>(shape: TensorShape(2, 3), 
                            data: [1, 2, 3, 4, 5, 6])
         
         // Test row 0
@@ -200,7 +200,7 @@ final class TensorTests: XCTestCase {
     /// **Why:** Needed for manual tensor construction and testing
     /// **How:** Create a zero tensor, write values, verify they were set correctly
     func testSubscriptWrite2D() {
-        var tensor = Tensor.zeros(shape: TensorShape(2, 2))
+        var tensor = Tensor<Float>.zeros(shape: TensorShape(2, 2))
         
         // Write values
         tensor[0, 0] = 10.0
@@ -221,7 +221,7 @@ final class TensorTests: XCTestCase {
     /// **Why:** Not all tensors are 2D - need to support vectors too
     /// **How:** Create a 1D tensor and access elements with single index
     func testSubscriptRead1D() {
-        let tensor = Tensor(shape: TensorShape(5), 
+        let tensor = Tensor<Float>(shape: TensorShape(5), 
                            data: [10, 20, 30, 40, 50])
         
         XCTAssertEqual(tensor[0], 10.0, accuracy: 1e-5)
@@ -247,12 +247,12 @@ final class TensorTests: XCTestCase {
     /// ```
     func testMatMulBasic() {
         // A: [2, 3]
-        let a = Tensor(shape: TensorShape(2, 3), 
+        let a = Tensor<Float>(shape: TensorShape(2, 3), 
                       data: [1, 2, 3,    // Row 0
                              4, 5, 6])   // Row 1
         
         // B: [3, 2]
-        let b = Tensor(shape: TensorShape(3, 2), 
+        let b = Tensor<Float>(shape: TensorShape(3, 2), 
                       data: [7, 8,       // Row 0
                              9, 10,      // Row 1
                              11, 12])    // Row 2
@@ -282,12 +282,12 @@ final class TensorTests: XCTestCase {
     /// **How:** [2,3] × [3,1] = [2,1]
     func testMatMulMatrixVector() {
         // A: [2, 3]
-        let a = Tensor(shape: TensorShape(2, 3), 
+        let a = Tensor<Float>(shape: TensorShape(2, 3), 
                       data: [1, 2, 3,
                              4, 5, 6])
         
         // B: [3, 1] (column vector)
-        let b = Tensor(shape: TensorShape(3, 1), 
+        let b = Tensor<Float>(shape: TensorShape(3, 1), 
                       data: [10, 20, 30])
         
         // C = A × B should be [2, 1]
@@ -308,13 +308,13 @@ final class TensorTests: XCTestCase {
     /// **How:** Create a matrix and identity, multiply, verify result equals original
     func testMatMulIdentity() {
         // A: [3, 3]
-        let a = Tensor(shape: TensorShape(3, 3), 
+        let a = Tensor<Float>(shape: TensorShape(3, 3), 
                       data: [1, 2, 3,
                              4, 5, 6,
                              7, 8, 9])
         
         // I: [3, 3] identity matrix
-        let identity = Tensor.identity(size: 3)
+        let identity = Tensor<Float>.identity(size: 3)
         
         // A × I should equal A
         let c = a.matmul(identity)
@@ -336,8 +336,8 @@ final class TensorTests: XCTestCase {
     func testMatMulLarge() {
         let size = 128
         
-        let a = Tensor.filled(shape: TensorShape(size, size), value: 1.0)
-        let b = Tensor.filled(shape: TensorShape(size, size), value: 2.0)
+        let a = Tensor<Float>.filled(shape: TensorShape(size, size), value: 1.0)
+        let b = Tensor<Float>.filled(shape: TensorShape(size, size), value: 2.0)
         
         let start = Date()
         let c = a.matmul(b)
@@ -371,9 +371,9 @@ final class TensorTests: XCTestCase {
     /// ```
     /// Each element pairs with the element at the same position.
     func testElementWiseAddition() {
-        let a = Tensor(shape: TensorShape(2, 3), 
+        let a = Tensor<Float>(shape: TensorShape(2, 3), 
                       data: [1, 2, 3, 4, 5, 6])
-        let b = Tensor(shape: TensorShape(2, 3), 
+        let b = Tensor<Float>(shape: TensorShape(2, 3), 
                       data: [10, 20, 30, 40, 50, 60])
         
         let c = a + b
@@ -397,9 +397,9 @@ final class TensorTests: XCTestCase {
     ///         Attention applies a mask: masked_scores = scores × mask
     /// **How:** Create two tensors, multiply them, verify each element
     func testElementWiseMultiplication() {
-        let a = Tensor(shape: TensorShape(3, 2), 
+        let a = Tensor<Float>(shape: TensorShape(3, 2), 
                       data: [2, 3, 4, 5, 6, 7])
-        let b = Tensor(shape: TensorShape(3, 2), 
+        let b = Tensor<Float>(shape: TensorShape(3, 2), 
                       data: [10, 10, 10, 10, 10, 10])
         
         let c = a * b
@@ -422,7 +422,7 @@ final class TensorTests: XCTestCase {
     /// **Why:** Used in bias addition and numerical adjustments
     /// **How:** Add 5.0 to every element of a tensor
     func testScalarAddition() {
-        let a = Tensor(shape: TensorShape(2, 2), 
+        let a = Tensor<Float>(shape: TensorShape(2, 2), 
                       data: [1, 2, 3, 4])
         
         let c = a + 5.0
@@ -439,7 +439,7 @@ final class TensorTests: XCTestCase {
     /// **Why:** Used for scaling (e.g., attention scores / sqrt(d_k))
     /// **How:** Multiply every element by 2.0
     func testScalarMultiplication() {
-        let a = Tensor(shape: TensorShape(3, 1), 
+        let a = Tensor<Float>(shape: TensorShape(3, 1), 
                       data: [5, 10, 15])
         
         let c = a * 2.0
@@ -469,7 +469,7 @@ final class TensorTests: XCTestCase {
     /// - GELU(x) < 0 for x < 0 (small negative values allowed)
     /// - Smooth (differentiable everywhere)
     func testGELU() {
-        let input = Tensor(shape: TensorShape(5), 
+        let input = Tensor<Float>(shape: TensorShape(5), 
                           data: [-2.0, -1.0, 0.0, 1.0, 2.0])
         
         let output = input.gelu()
@@ -508,7 +508,7 @@ final class TensorTests: XCTestCase {
     /// ReLU(5) = 5
     /// ```
     func testReLU() {
-        let input = Tensor(shape: TensorShape(6), 
+        let input = Tensor<Float>(shape: TensorShape(6), 
                           data: [-2.0, -0.5, 0.0, 0.5, 1.0, 2.0])
         
         let output = input.relu()
@@ -547,7 +547,7 @@ final class TensorTests: XCTestCase {
     /// exp(1000 - 1000) = exp(0) = 1  (safe!)
     /// ```
     func testSoftmax() {
-        let input = Tensor(shape: TensorShape(5), 
+        let input = Tensor<Float>(shape: TensorShape(5), 
                           data: [1.0, 2.0, 3.0, 4.0, 5.0])
         
         let output = input.softmax()
@@ -576,7 +576,7 @@ final class TensorTests: XCTestCase {
     /// **Why:** Without max subtraction, exp(1000) = ∞
     /// **How:** Use large values and verify no NaN/Inf in output
     func testSoftmaxNumericalStability() {
-        let input = Tensor(shape: TensorShape(3), 
+        let input = Tensor<Float>(shape: TensorShape(3), 
                           data: [1000.0, 1001.0, 1002.0])
         
         let output = input.softmax()
@@ -601,7 +601,7 @@ final class TensorTests: XCTestCase {
     /// **How:** Create [3, 4] tensor, verify each of 3 rows sums to 1.0
     func testSoftmax2D() {
         // [3, 4] tensor - 3 rows, 4 columns
-        let input = Tensor(shape: TensorShape(3, 4), 
+        let input = Tensor<Float>(shape: TensorShape(3, 4), 
                           data: [1, 2, 3, 4,      // Row 0
                                  5, 6, 7, 8,      // Row 1
                                  9, 10, 11, 12])  // Row 2
@@ -634,7 +634,7 @@ final class TensorTests: XCTestCase {
     /// - Makes optimization easier
     /// - Critical for transformer stability
     func testLayerNorm() {
-        let input = Tensor(shape: TensorShape(100), 
+        let input = Tensor<Float>(shape: TensorShape(100), 
                           data: (0..<100).map { Float($0) })  // [0, 1, 2, ..., 99]
         
         let output = input.layerNorm()
@@ -661,7 +661,7 @@ final class TensorTests: XCTestCase {
         // [2, 100] tensor - 2 rows of 100 features each
         let data1 = (0..<100).map { Float($0) }           // Row 0: [0..99]
         let data2 = (0..<100).map { Float($0 * 2) }       // Row 1: [0, 2, 4, ..., 198]
-        let input = Tensor(shape: TensorShape(2, 100), 
+        let input = Tensor<Float>(shape: TensorShape(2, 100), 
                           data: data1 + data2)
         
         let output = input.layerNorm()
