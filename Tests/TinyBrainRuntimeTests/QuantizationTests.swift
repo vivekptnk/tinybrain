@@ -21,8 +21,24 @@
 
 import XCTest
 @testable import TinyBrainRuntime
+import TinyBrainMetal
 
 final class QuantizationTests: XCTestCase {
+    
+    override func setUp() {
+        super.setUp()
+        // **REVIEW HITLER FIX:** Initialize Metal for INT8 kernel tests!
+        if TinyBrainBackend.metalBackend == nil {
+            if MetalBackend.isAvailable {
+                do {
+                    TinyBrainBackend.metalBackend = try MetalBackend()
+                    print("✅ Metal initialized for quantization tests")
+                } catch {
+                    print("⚠️ Metal init failed: \(error)")
+                }
+            }
+        }
+    }
     
     // MARK: - Symmetric Quantization Tests
     

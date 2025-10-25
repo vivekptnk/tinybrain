@@ -333,6 +333,13 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         // Create TensorStorage with GPU buffer
         let storage = TensorStorage<Float>(gpuBuffer: buffer, count: tensor.shape.count)
         
+        // **REVIEW HITLER FIX:** Set release callback so uploaded buffers return to pool!
+        let pool = self.bufferPool
+        let count = tensor.shape.count
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(buffer, elementCount: count)
+        }
+        
         // Return new tensor with GPU storage
         return Tensor<Float>(shape: tensor.shape, storage: storage)
     }
