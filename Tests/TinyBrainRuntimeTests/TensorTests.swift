@@ -40,6 +40,137 @@ final class TensorTests: XCTestCase {
         // XCTAssertThrowsError(try Tensor(shape: shape, data: invalidData))
     }
     
+    // MARK: - Stride and Memory Layout Tests (TB-003 TDD)
+    
+    /// Test that TensorShape calculates strides correctly for contiguous tensors
+    ///
+    /// **What:** Strides define how many elements to skip to move along each dimension
+    /// **Why:** Needed for transpose/reshape without copying data
+    /// **How:** Create shapes and verify stride calculation
+    ///
+    /// **Educational Note:**
+    /// For row-major layout, strides are calculated from right to left:
+    /// ```
+    /// Shape: [2, 3, 4]
+    /// stride[2] = 1                    (last dimension)
+    /// stride[1] = 4                    (4 elements per row)
+    /// stride[0] = 3 × 4 = 12          (12 elements per "sheet")
+    /// ```
+    func testStrideCalculationContiguous() {
+        // 1D tensor
+        let shape1D = TensorShape(5)
+        XCTAssertEqual(shape1D.strides, [1], "1D stride should be [1]")
+        
+        // 2D tensor [2, 3]
+        let shape2D = TensorShape(2, 3)
+        XCTAssertEqual(shape2D.strides, [3, 1], "[2,3] strides should be [3,1]")
+        
+        // 3D tensor [2, 3, 4]
+        let shape3D = TensorShape(2, 3, 4)
+        XCTAssertEqual(shape3D.strides, [12, 4, 1], "[2,3,4] strides should be [12,4,1]")
+        
+        // 4D tensor [2, 3, 4, 5]
+        let shape4D = TensorShape(2, 3, 4, 5)
+        XCTAssertEqual(shape4D.strides, [60, 20, 5, 1], "[2,3,4,5] strides should be [60,20,5,1]")
+    }
+    
+    /// Test that isContiguous correctly identifies contiguous vs strided tensors
+    ///
+    /// **What:** Contiguous = elements are packed sequentially in memory
+    /// **Why:** Contiguous tensors are faster (better cache locality)
+    /// **How:** Verify new tensors are contiguous, transposed are not
+    func testIsContiguous() {
+        let a = Tensor.zeros(shape: TensorShape(3, 4))
+        XCTAssertTrue(a.isContiguous, "Newly created tensor should be contiguous")
+        
+        // After transpose, stride order changes -> not contiguous
+        let b = a.transpose()
+        XCTAssertFalse(b.isContiguous, "Transposed tensor should not be contiguous")
+    }
+    
+    /// Test offset calculation with custom strides
+    ///
+    /// **What:** Verify we can calculate correct memory offset with non-standard strides
+    /// **Why:** Transpose changes strides but not data - need correct indexing
+    /// **How:** Create tensor with known strides, verify subscript access
+    func testOffsetCalculationWithStrides() {
+        // Create [2, 3]: [[1,2,3], [4,5,6]]
+        let a = Tensor(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
+        
+        // Transpose to [3, 2]: [[1,4], [2,5], [3,6]]
+        let b = a.transpose()
+        
+        // Verify transposed access
+        XCTAssertEqual(b.shape.dimensions, [3, 2], "Transposed shape")
+        XCTAssertEqual(b[0,0], 1.0, accuracy: 1e-5, "b[0,0] should access a[0,0]")
+        XCTAssertEqual(b[0,1], 4.0, accuracy: 1e-5, "b[0,1] should access a[1,0]")
+        XCTAssertEqual(b[1,0], 2.0, accuracy: 1e-5, "b[1,0] should access a[0,1]")
+        XCTAssertEqual(b[1,1], 5.0, accuracy: 1e-5, "b[1,1] should access a[1,1]")
+        XCTAssertEqual(b[2,0], 3.0, accuracy: 1e-5, "b[2,0] should access a[0,2]")
+        XCTAssertEqual(b[2,1], 6.0, accuracy: 1e-5, "b[2,1] should access a[1,2]")
+    }
+    
+    /// Test reshape on contiguous tensor (zero-copy)
+    ///
+    /// **What:** Reshape should create new view without copying when tensor is contiguous
+    /// **Why:** Memory efficiency - don't copy gigabytes of data unnecessarily!
+    /// **How:** Reshape and verify elements are accessible with new shape
+    func testReshapeContiguous() {
+        // Create 1D: [1,2,3,4,5,6]
+        let a = Tensor(shape: TensorShape(6), data: [1,2,3,4,5,6])
+        
+        // Reshape to [2, 3]
+        let b = a.reshape(TensorShape(2, 3))
+        
+        XCTAssertEqual(b.shape.dimensions, [2, 3])
+        XCTAssertEqual(b[0,0], 1.0, accuracy: 1e-5)
+        XCTAssertEqual(b[0,1], 2.0, accuracy: 1e-5)
+        XCTAssertEqual(b[0,2], 3.0, accuracy: 1e-5)
+        XCTAssertEqual(b[1,0], 4.0, accuracy: 1e-5)
+        XCTAssertEqual(b[1,1], 5.0, accuracy: 1e-5)
+        XCTAssertEqual(b[1,2], 6.0, accuracy: 1e-5)
+        
+        // Reshape to [3, 2]
+        let c = a.reshape(TensorShape(3, 2))
+        XCTAssertEqual(c.shape.dimensions, [3, 2])
+        XCTAssertEqual(c[0,0], 1.0, accuracy: 1e-5)
+        XCTAssertEqual(c[2,1], 6.0, accuracy: 1e-5)
+    }
+    
+    /// Test that transpose + matmul works (real transformer use case)
+    ///
+    /// **What:** Q × Kᵀ is how attention computes scores
+    /// **Why:** Most important use of transpose in transformers!
+    /// **How:** Create Q and K, transpose K, multiply
+    func testTransposeMatMul() {
+        // Q: [2, 3] - 2 queries, 3 dimensions each
+        let q = Tensor(shape: TensorShape(2, 3), data: [1,2,3,4,5,6])
+        
+        // K: [2, 3] - 2 keys, 3 dimensions each
+        let k = Tensor(shape: TensorShape(2, 3), data: [7,8,9,10,11,12])
+        
+        // Attention scores: Q × Kᵀ
+        // Q: [2,3], Kᵀ: [3,2] → result: [2,2]
+        let scores = q.matmul(k.transpose())
+        
+        XCTAssertEqual(scores.shape.dimensions, [2, 2])
+        
+        // Manual calculation:
+        // Q: [[1,2,3], [4,5,6]]
+        // K: [[7,8,9], [10,11,12]]
+        // Kᵀ: [[7,10], [8,11], [9,12]]
+        //
+        // scores[0,0] = Q[0,:] · Kᵀ[:,0] = [1,2,3]·[7,8,9] = 1×7 + 2×8 + 3×9 = 50
+        // scores[0,1] = Q[0,:] · Kᵀ[:,1] = [1,2,3]·[10,11,12] = 1×10 + 2×11 + 3×12 = 68
+        // scores[1,0] = Q[1,:] · Kᵀ[:,0] = [4,5,6]·[7,8,9] = 4×7 + 5×8 + 6×9 = 122
+        // scores[1,1] = Q[1,:] · Kᵀ[:,1] = [4,5,6]·[10,11,12] = 4×10 + 5×11 + 6×12 = 167
+        
+        XCTAssertEqual(scores[0,0], 50.0, accuracy: 1e-3)
+        XCTAssertEqual(scores[0,1], 68.0, accuracy: 1e-3)
+        XCTAssertEqual(scores[1,0], 122.0, accuracy: 1e-3)
+        XCTAssertEqual(scores[1,1], 167.0, accuracy: 1e-3)  // Fixed: was 157
+    }
+    
     // MARK: - Subscript Access Tests (TDD)
     
     /// Test subscript read access for 2D tensors
