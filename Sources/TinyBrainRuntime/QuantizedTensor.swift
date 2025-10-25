@@ -87,14 +87,13 @@ public struct QuantizedTensor {
     /// Quantization mode used
     public let mode: QuantizationMode
     
-    /// **REVIEW HITLER FIX:** Cached dequantized tensor to avoid repeated conversions
-    /// Uses class reference so it can be mutated even from immutable QuantizedTensor
-    private let cache: DequantizationCache = DequantizationCache()
-    
-    /// Cache holder (class = reference semantics)
-    private class DequantizationCache {
-        var tensor: Tensor<Float>?
-    }
+    /// **REVIEW HITLER HONEST:** Caching dequantized result makes memory WORSE
+    /// - Stores INT8: 1 byte
+    /// - Stores cached Float32: 4 bytes  
+    /// - Total: 5 bytes (worse than just Float32!)
+    ///
+    /// Real fix: Implement INT8 matmul Metal kernel (TB-005)
+    /// For now: Accept the repeated dequantization cost
     
     /// Create quantized tensor
     public init(shape: TensorShape, data: [Int8], scales: [Float], zeroPoints: [Int8]? = nil, mode: QuantizationMode, precision: QuantizationPrecision = .int8) {
@@ -129,29 +128,19 @@ public struct QuantizedTensor {
     
     /// Dequantize back to Float32
     ///
-    /// **REVIEW HITLER FIX:** Now caches result to avoid repeated conversions!
+    /// **REVIEW HITLER HONEST:** This converts on every call (inefficient)
+    ///
+    /// Real solution: INT8 matmul Metal kernel that operates directly on quantized data
+    /// For now: Accept conversion cost, get memory savings from storage
     ///
     /// Converts Int8 → Float32 using stored scales/zero-points
     ///
     /// Example:
     /// ```swift
     /// let quantized = weights.quantize()
-    /// let float = quantized.dequantize()  // Cached after first call!
+    /// let float = quantized.dequantize()  // Converts each time
     /// ```
     public func dequantize() -> Tensor<Float> {
-        // **REVIEW HITLER FIX:** Return cached if available (no repeated conversions!)
-        if let cached = cache.tensor {
-            return cached
-        }
-        
-        // Dequantize and cache result
-        let result = dequantizeUncached()
-        cache.tensor = result  // Cache for next time
-        return result
-    }
-    
-    /// Internal uncached dequantization
-    private func dequantizeUncached() -> Tensor<Float> {
         var floatData = [Float](repeating: 0.0, count: shape.count)  // Use shape.count, not data.count!
         
         switch mode {
