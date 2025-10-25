@@ -591,6 +591,14 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         precondition(quantized.shape.dimensions.count == 2, "Weights must be 2D")
         precondition(input.shape.dimensions[1] == quantized.shape.dimensions[0], "Dimensions must match")
         
+        // **REVIEW HITLER FIX:** Only per-channel mode supported in current kernel!
+        // Symmetric/asymmetric modes need different kernel (single scale, not per-channel)
+        guard quantized.mode == .perChannel else {
+            // Fall back to CPU for non-per-channel modes
+            let dequantized = quantized.dequantize()
+            return try matmul(input, dequantized)
+        }
+        
         let M = UInt32(input.shape.dimensions[0])
         let K = UInt32(input.shape.dimensions[1])
         let N = UInt32(quantized.shape.dimensions[1])

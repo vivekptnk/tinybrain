@@ -19,6 +19,31 @@
 @_exported import TinyBrainMetal
 @_exported import TinyBrainTokenizer
 
+// MARK: - Automatic Metal Initialization
+
+/// **REVIEW HITLER FIX:** Actually initialize Metal on module load!
+///
+/// This runs when the module is loaded, before any user code.
+private class MetalInitializer {
+    static let shared = MetalInitializer()
+    
+    private init() {
+        // Initialize Metal backend if available
+        if MetalBackend.isAvailable {
+            do {
+                let backend = try MetalBackend()
+                TinyBrainBackend.metalBackend = backend
+                print("[TinyBrain] ✅ Metal automatically enabled on module import")
+            } catch {
+                print("[TinyBrain] ⚠️ Metal initialization failed: \(error)")
+            }
+        }
+    }
+}
+
+// Trigger initialization by accessing the static property
+private let _ = MetalInitializer.shared
+
 // MARK: - Metal Configuration
 
 /// Implementation of enableMetal() for the umbrella module
