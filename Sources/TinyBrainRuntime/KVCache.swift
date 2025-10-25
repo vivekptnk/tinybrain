@@ -37,20 +37,24 @@ import Foundation
 import Metal
 #endif
 
-/// **REVIEW HITLER FIX:** Page storage using class (reference semantics)
-///
-/// This avoids copying entire pages on every dictionary access!
+/// Backing storage for a page of cached keys/values
 private final class KVPage {
-    /// Raw Float array for fast access
     var data: [Float]
     
-    /// Allocator page ID for cleanup
-    let allocatorPageId: Int
-    
-    init(allocatorPageId: Int, size: Int) {
-        self.allocatorPageId = allocatorPageId
+    init(size: Int) {
         self.data = [Float](repeating: 0.0, count: size)
     }
+    
+    func reset() {
+        for i in 0..<data.count {
+            data[i] = 0
+        }
+    }
+}
+
+private struct PooledPage {
+    let poolIndex: Int
+    let page: KVPage
 }
 
 /// KV cache manager for transformer layers
@@ -67,15 +71,23 @@ public final class KVCache {
     /// Tokens per page
     public let pageSize: Int
     
-    /// Page allocator
-    private let allocator: PageAllocator
+    /// Maximum number of pages per layer
+    private let maxPages: Int
     
-    /// Storage for keys: [layer][logicalPageId] → KVPage
-    /// **REVIEW HITLER FIX:** Uses class (reference semantics) to avoid copying!
-    private var keyPages: [[Int: KVPage]]
+    /// Page allocators per layer
+    private var allocators: [PageAllocator]
     
-    /// Storage for values: [layer][logicalPageId] → KVPage
-    private var valuePages: [[Int: KVPage]]
+    /// Storage for keys: [layer][logicalPageId] → pooled page binding
+    private var keyPages: [[Int: PooledPage]]
+    
+    /// Storage for values: [layer][logicalPageId] → pooled page binding
+    private var valuePages: [[Int: PooledPage]]
+    
+    /// Pre-allocated key buffers per layer
+    private let keyPools: [[KVPage]]
+    
+    /// Pre-allocated value buffers per layer
+    private let valuePools: [[KVPage]]
     
     /// Current sequence length per layer
     private var lengths: [Int]
@@ -99,14 +111,28 @@ public final class KVCache {
         self.maxTokens = maxTokens
         self.pageSize = pageSize
         
-        let maxPages = (maxTokens + pageSize - 1) / pageSize
-        self.allocator = PageAllocator(pageSize: pageSize, maxPages: maxPages)
-        
-        // Initialize storage for each layer
+        self.maxPages = (maxTokens + pageSize - 1) / pageSize
+        // Initialize simple properties first
         self.keyPages = Array(repeating: [:], count: numLayers)
         self.valuePages = Array(repeating: [:], count: numLayers)
         self.lengths = Array(repeating: 0, count: numLayers)
         self.minPositions = Array(repeating: 0, count: numLayers)
+        
+        // Initialize arrays that need self
+        let elementsPerPage = pageSize * hiddenDim
+        var allocators: [PageAllocator] = []
+        var keyPools: [[KVPage]] = []
+        var valuePools: [[KVPage]] = []
+        
+        for _ in 0..<numLayers {
+            allocators.append(PageAllocator(pageSize: pageSize, maxPages: maxPages))
+            keyPools.append((0..<maxPages).map { _ in KVPage(size: elementsPerPage) })
+            valuePools.append((0..<maxPages).map { _ in KVPage(size: elementsPerPage) })
+        }
+        
+        self.allocators = allocators
+        self.keyPools = keyPools
+        self.valuePools = valuePools
     }
     
     /// Current cache length (max across all layers)
@@ -136,43 +162,43 @@ public final class KVCache {
         precondition(key.shape == TensorShape(hiddenDim), "Key shape mismatch")
         precondition(value.shape == TensorShape(hiddenDim), "Value shape mismatch")
         
-        // Check if adding this token would exceed maxTokens
-        // If so, evict oldest page(s) to make room
+        let allocator = allocators[layer]
+        
+        // Evict until we have room for another token
         while lengths[layer] >= maxTokens {
             evictOldestPage(layer: layer)
-            lengths[layer] -= pageSize  // Evicted one page worth of tokens
+            lengths[layer] = max(0, lengths[layer] - pageSize)
         }
         
         // Determine which page this position belongs to
         let pageId = position / pageSize
         let offsetInPage = position % pageSize
         
-        // Get or create page
+        // Get or create pooled page
         if keyPages[layer][pageId] == nil {
-            // Allocate new page from allocator
-            var allocatorPageId = allocator.allocatePage()
+            var poolIndex = allocator.allocatePage()
             
-            if allocatorPageId == nil {
-                // Allocator exhausted - evict oldest page and retry
+            if poolIndex == nil {
                 evictOldestPage(layer: layer)
-                allocatorPageId = allocator.allocatePage()
-                
-                guard allocatorPageId != nil else {
-                    fatalError("Failed to allocate page even after eviction")
-                }
+                poolIndex = allocator.allocatePage()
             }
             
-            // **REVIEW HITLER FIX:** Create KVPage (class = no copying!)
-            let keyPage = KVPage(allocatorPageId: allocatorPageId!, size: pageSize * hiddenDim)
-            let valuePage = KVPage(allocatorPageId: allocatorPageId!, size: pageSize * hiddenDim)
+            guard let resolvedIndex = poolIndex else {
+                fatalError("Failed to allocate KV cache page for layer \(layer)")
+            }
             
-            keyPages[layer][pageId] = keyPage
-            valuePages[layer][pageId] = valuePage
+            let keyPage = keyPools[layer][resolvedIndex]
+            keyPage.reset()
+            let valuePage = valuePools[layer][resolvedIndex]
+            valuePage.reset()
+            
+            keyPages[layer][pageId] = PooledPage(poolIndex: resolvedIndex, page: keyPage)
+            valuePages[layer][pageId] = PooledPage(poolIndex: resolvedIndex, page: valuePage)
         }
         
         // Write key/value into page (FAST: direct mutation, no copying!)
-        if let keyPage = keyPages[layer][pageId],
-           let valuePage = valuePages[layer][pageId] {
+        if let keyBinding = keyPages[layer][pageId],
+           let valueBinding = valuePages[layer][pageId] {
             
             // **REVIEW HITLER FIX:** Direct mutation (reference semantics)
             // No copying! We mutate the class's internal array directly
@@ -182,8 +208,8 @@ public final class KVCache {
             
             // Bulk write directly to page's data array
             for i in 0..<hiddenDim {
-                keyPage.data[rowStartIdx + i] = keyInput[i]
-                valuePage.data[rowStartIdx + i] = valueInput[i]
+                keyBinding.page.data[rowStartIdx + i] = keyInput[i]
+                valueBinding.page.data[rowStartIdx + i] = valueInput[i]
             }
             // No need to store back - it's a class reference!
         }
@@ -217,11 +243,11 @@ public final class KVCache {
             let pageId = pos / pageSize
             let offsetInPage = pos % pageSize
             
-            if let keyPage = keyPages[layer][pageId] {
+            if let binding = keyPages[layer][pageId] {
                 // Copy row from page to result
                 let rowStartIdx = offsetInPage * hiddenDim
                 for i in 0..<hiddenDim {
-                    result[idx, i] = keyPage.data[rowStartIdx + i]
+                    result[idx, i] = binding.page.data[rowStartIdx + i]
                 }
             }
         }
@@ -249,11 +275,11 @@ public final class KVCache {
             let pageId = pos / pageSize
             let offsetInPage = pos % pageSize
             
-            if let valuePage = valuePages[layer][pageId] {
+            if let binding = valuePages[layer][pageId] {
                 // Copy row from page to result
                 let rowStartIdx = offsetInPage * hiddenDim
                 for i in 0..<hiddenDim {
-                    result[idx, i] = valuePage.data[rowStartIdx + i]
+                    result[idx, i] = binding.page.data[rowStartIdx + i]
                 }
             }
         }
@@ -266,17 +292,12 @@ public final class KVCache {
     /// **Strategy:** Remove lowest page ID (FIFO eviction)
     private func evictOldestPage(layer: Int) {
         // Find the oldest page (lowest logical page ID still allocated)
-        guard let oldestLogicalPageId = keyPages[layer].keys.min() else {
+        guard let oldestLogicalPageId = keyPages[layer].keys.min(),
+              let binding = keyPages[layer][oldestLogicalPageId] else {
             return
         }
         
-        // Free allocator pages
-        if let keyPage = keyPages[layer][oldestLogicalPageId] {
-            allocator.freePage(keyPage.allocatorPageId)
-        }
-        if let valuePage = valuePages[layer][oldestLogicalPageId] {
-            allocator.freePage(valuePage.allocatorPageId)
-        }
+        allocators[layer].freePage(binding.poolIndex)
         
         // Remove pages from cache
         keyPages[layer].removeValue(forKey: oldestLogicalPageId)
@@ -284,17 +305,6 @@ public final class KVCache {
         
         // Update min position
         minPositions[layer] = (oldestLogicalPageId + 1) * pageSize
-    }
-    
-    /// Evict oldest N tokens
-    ///
-    /// Used when cache exceeds maxTokens limit
-    private func evictOldestTokens(layer: Int, count: Int) {
-        let pagesToEvict = (count + pageSize - 1) / pageSize
-        
-        for _ in 0..<pagesToEvict {
-            evictOldestPage(layer: layer)
-        }
     }
     
     /// Clear all cached data
@@ -306,12 +316,7 @@ public final class KVCache {
         
         // Free all pages
         for layer in 0..<numLayers {
-            for keyPage in keyPages[layer].values {
-                allocator.freePage(keyPage.allocatorPageId)
-            }
-            for valuePage in valuePages[layer].values {
-                allocator.freePage(valuePage.allocatorPageId)
-            }
+            allocators[layer].reset()
             keyPages[layer].removeAll()
             valuePages[layer].removeAll()
             lengths[layer] = 0
@@ -337,4 +342,3 @@ public final class KVCache {
         """
     }
 }
-

@@ -55,15 +55,27 @@ public final class ModelRunner {
     /// Model configuration
     public let config: ModelConfig
     
+    /// Backing weights (quantized INT8)
+    public let weights: ModelWeights
+    
     /// KV cache for attention
     public let kvCache: KVCache
     
     /// Current position in sequence
     public private(set) var currentPosition: Int = 0
     
-    /// Initialize model runner
-    public init(config: ModelConfig) {
-        self.config = config
+    /// Last computed logits (used for streaming/verifications)
+    private var lastLogits: Tensor<Float>?
+    
+    /// Initialize model runner with deterministic toy weights (useful for demos/tests)
+    public convenience init(config: ModelConfig) {
+        self.init(weights: ModelWeights.makeToyModel(config: config))
+    }
+    
+    /// Initialize model runner with explicit weights
+    public init(weights: ModelWeights) {
+        self.weights = weights
+        self.config = weights.config
         self.kvCache = KVCache(
             numLayers: config.numLayers,
             hiddenDim: config.hiddenDim,
@@ -86,69 +98,20 @@ public final class ModelRunner {
     /// - Parameter tokenId: Input token ID
     /// - Returns: Logits for next token [vocabSize]
     public func step(tokenId: Int) -> Tensor<Float> {
-        // **REVIEW HITLER FIX:** Real transformer forward pass!
+        // 1. Embed input token
+        var hiddenRow = weights.embedding(for: tokenId).asRowMatrix()
         
-        // 1. Embed token (simplified - use random for now, TB-005 will add real embeddings)
-        let embedding = Tensor<Float>.random(shape: TensorShape(config.hiddenDim))
-        
-        // 2. For each layer: REAL attention + MLP
-        var hidden = embedding
-        
-        for layer in 0..<config.numLayers {
-            // === ATTENTION LAYER (REAL IMPLEMENTATION!) ===
-            
-            // Compute query for current token
-            let query = hidden  // Simplified: Q = hidden (TB-005 will add weight matrices)
-            
-            // Compute key and value for current token
-            let key = hidden    // Simplified: K = hidden
-            let value = hidden  // Simplified: V = hidden
-            
-            // **CRITICAL:** Cache key/value for future tokens!
-            kvCache.append(layer: layer, key: key, value: value, position: currentPosition)
-            
-            // **REVIEW HITLER FIX:** Retrieve ALL cached keys/values
-            let allKeys = kvCache.getKeys(layer: layer, range: 0..<(currentPosition + 1))
-            let allValues = kvCache.getValues(layer: layer, range: 0..<(currentPosition + 1))
-            
-            // Compute attention scores: Q · K^T
-            // Query: [hiddenDim], AllKeys: [seqLen, hiddenDim]
-            // Need to broadcast query to [1, hiddenDim] for matmul
-            let queryExpanded = Tensor<Float>(
-                shape: TensorShape(1, config.hiddenDim),
-                data: query.rawData
-            )
-            
-            // scores = Q · K^T → [1, seqLen]
-            let scores = queryExpanded.matmul(allKeys.transpose())
-            
-            // Apply softmax to get attention weights
-            let attentionWeights = scores.softmax()  // [1, seqLen]
-            
-            // Apply attention to values: attention_weights · V → [1, hiddenDim]
-            let attentionOutput = attentionWeights.matmul(allValues)
-            
-            // Extract back to [hiddenDim]
-            var outputData = [Float](repeating: 0.0, count: config.hiddenDim)
-            for i in 0..<config.hiddenDim {
-                outputData[i] = attentionOutput[0, i]
-            }
-            let attended = Tensor<Float>(shape: TensorShape(config.hiddenDim), data: outputData)
-            
-            // Residual connection: hidden + attended
-            hidden = hidden + attended
-            
-            // === MLP LAYER (simplified) ===
-            // TB-005 will add real FFN, for now just pass through
-            hidden = hidden.gelu()
+        // 2. Transformer layers with cached attention + quantized matmuls
+        for (layerIndex, layerWeights) in weights.layers.enumerated() {
+            hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
         }
         
-        // 3. Output projection (simplified - random for now)
-        // TB-005: hidden · output_weights → logits
-        let logits = Tensor<Float>.random(shape: TensorShape(config.vocabSize))
+        // 3. Output projection to logits
+        let logitsRow = weights.output.apply(toRow: hiddenRow)
+        let logits = logitsRow.squeezedRowVector()
         
-        // Increment position
         currentPosition += 1
+        lastLogits = logits
         
         return logits
     }
@@ -159,6 +122,7 @@ public final class ModelRunner {
     public func reset() {
         kvCache.clear()
         currentPosition = 0
+        lastLogits = nil
     }
     
     /// Generate stream of tokens using AsyncSequence
@@ -179,26 +143,21 @@ public final class ModelRunner {
     public func generateStream(prompt: [Int], maxTokens: Int = 100) -> AsyncThrowingStream<Int, Error> {
         AsyncThrowingStream { continuation in
             Task {
-                // Process prompt tokens
-                for tokenId in prompt {
-                    let _ = self.step(tokenId: tokenId)
+                var currentToken = prompt.last ?? 0
+                
+                if !prompt.isEmpty {
+                    for token in prompt.dropLast() {
+                        _ = self.step(tokenId: token)
+                    }
                 }
                 
-                // Generate new tokens
                 var generated = 0
                 while generated < maxTokens {
-                    // Get logits
-                    let logits = self.step(tokenId: 0)  // TODO: Sample from previous logits
-                    
-                    // Sample next token (mock - would use proper sampling)
+                    let logits = self.step(tokenId: currentToken)
                     let nextToken = self.sampleToken(from: logits)
-                    
-                    // Yield token
                     continuation.yield(nextToken)
+                    currentToken = nextToken
                     generated += 1
-                    
-                    // Check for end-of-sequence
-                    // TODO: Check for EOS token
                 }
                 
                 continuation.finish()
@@ -211,9 +170,55 @@ public final class ModelRunner {
     /// **TB-004 MVP:** Simple argmax sampling
     /// Real implementation would use top-k, top-p, temperature
     private func sampleToken(from logits: Tensor<Float>) -> Int {
-        // Mock: Return random token
-        // TODO: Implement proper sampling (softmax + multinomial)
-        return Int.random(in: 0..<config.vocabSize)
+        let probabilities = logits.softmax()
+        var cumulative: Float = 0.0
+        let threshold = Float.random(in: 0..<1)
+        
+        for (index, value) in probabilities.data.enumerated() {
+            cumulative += value
+            if threshold <= cumulative {
+                return index
+            }
+        }
+        
+        return config.vocabSize - 1
     }
 }
 
+// MARK: - Private helpers
+
+private extension ModelRunner {
+    func applyLayer(_ hiddenRow: Tensor<Float>,
+                    layerWeights: TransformerLayerWeights,
+                    layerIndex: Int) -> Tensor<Float> {
+        let attentionOutput = attention(hiddenRow: hiddenRow,
+                                        layerWeights: layerWeights.attention,
+                                        layerIndex: layerIndex)
+        let residual = hiddenRow + attentionOutput
+        
+        let ffnUp = layerWeights.feedForward.up.apply(toRow: residual).gelu()
+        let ffnDown = layerWeights.feedForward.down.apply(toRow: ffnUp)
+        return residual + ffnDown
+    }
+    
+    func attention(hiddenRow: Tensor<Float>,
+                   layerWeights: AttentionProjectionWeights,
+                   layerIndex: Int) -> Tensor<Float> {
+        let query = layerWeights.query.apply(toRow: hiddenRow)
+        let keyVec = layerWeights.key.apply(toRow: hiddenRow).squeezedRowVector()
+        let valueVec = layerWeights.value.apply(toRow: hiddenRow).squeezedRowVector()
+        
+        kvCache.append(layer: layerIndex, key: keyVec, value: valueVec, position: currentPosition)
+        
+        let sequenceLength = currentPosition + 1
+        let allKeys = kvCache.getKeys(layer: layerIndex, range: 0..<sequenceLength)
+        let allValues = kvCache.getValues(layer: layerIndex, range: 0..<sequenceLength)
+        
+        let scalingFactor = 1.0 / sqrt(max(1.0, Float(config.hiddenDim) / Float(config.numHeads)))
+        let scores = (query.matmul(allKeys.transpose())) * scalingFactor
+        let attentionWeights = scores.softmax()
+        let context = attentionWeights.matmul(allValues)
+        
+        return layerWeights.output.apply(toRow: context)
+    }
+}

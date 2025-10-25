@@ -198,7 +198,19 @@ let normalized = x.layerNorm()
 
 **Test Coverage:** 24 tests, all passing with < 1e-5 numerical accuracy
 
-### 3.4 Model Format (.tbf)
+### 3.4 ModelRunner + Quantized Weights
+
+- `ModelWeights` bundles token embeddings, INT8 projections for every Q/K/V/FFN matrix, and the LM head.
+- `LinearLayerWeights` perform per-channel quantization once and reuse GPU-resident buffers via stable UUIDs.
+- `ModelRunner.step(tokenId:)` now executes the real transformer program:
+  1. Embed the incoming token id (`embedding(for:)`)
+  2. Run quantized Q/K/V projections and append them to the paged `KVCache`
+  3. Perform scaled dot-product attention using cached keys/values
+  4. Apply quantized feed-forward blocks (GELU + down projection)
+  5. Project to logits and sample with `generateStream(prompt:maxTokens:)`
+- `Tests/TinyBrainRuntimeTests/ModelRunnerQuantizationTests.swift` keeps INT8 outputs within 5% relative error of an FP32 reference.
+
+### 3.5 Model Format (.tbf)
 
 **TinyBrain Binary Format** contains:
 
@@ -509,4 +521,3 @@ See `AGENTS.md` for agent-specific rules and `docs/tasks/` for implementation ro
 
 **Maintained by**: Vivek Pattanaik  
 **License**: MIT
-

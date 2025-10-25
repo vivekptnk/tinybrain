@@ -90,7 +90,7 @@ import TinyBrain
 // Enable GPU acceleration
 TinyBrainBackend.enableMetal()
 
-// Create model runner with KV cache
+// Create quantized weights (toy generator or load from disk)
 let config = ModelConfig(
     numLayers: 6,
     hiddenDim: 768,
@@ -98,7 +98,8 @@ let config = ModelConfig(
     vocabSize: 32000,
     maxSeqLen: 2048
 )
-let runner = ModelRunner(config: config)
+let weights = ModelWeights.makeToyModel(config: config)
+let runner = ModelRunner(weights: weights)
 
 // Stream tokens with KV cache reuse
 let promptTokens = [1, 2, 3]  // Tokenized prompt

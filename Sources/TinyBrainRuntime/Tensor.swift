@@ -1415,11 +1415,20 @@ extension Tensor where Element == Float {
     /// let weights = Tensor<Float>.random(shape: TensorShape(768, 3072))
     /// ```
     public static func random(shape: TensorShape, mean: Float = 0.0, std: Float = 1.0) -> Tensor<Float> {
+        var generator: any RandomNumberGenerator = SystemRandomNumberGenerator()
+        return random(shape: shape, mean: mean, std: std, using: &generator)
+    }
+    
+    /// Deterministic variant of ``random(shape:mean:std:)`` using a custom RNG
+    public static func random(shape: TensorShape,
+                              mean: Float = 0.0,
+                              std: Float = 1.0,
+                              using generator: inout any RandomNumberGenerator) -> Tensor<Float> {
         var data = [Float](repeating: 0.0, count: shape.count)
         
         for i in Swift.stride(from: 0, to: shape.count, by: 2) {
-            let u1 = max(Float.random(in: 0..<1), Float.leastNonzeroMagnitude)
-            let u2 = Float.random(in: 0..<1)
+            let u1 = max(Float.random(in: 0..<1, using: &generator), Float.leastNonzeroMagnitude)
+            let u2 = Float.random(in: 0..<1, using: &generator)
             
             let r = sqrt(-2.0 * log(u1))
             let theta = 2.0 * Float.pi * u2
@@ -1448,6 +1457,41 @@ extension Tensor where Element == Float {
     /// ```
     public var isOnGPU: Bool {
         storage.isOnGPU
+    }
+    
+    /// Returns this vector as a `[1, N]` row matrix (zero-copy when possible)
+    public func asRowMatrix() -> Tensor {
+        switch shape.dimensions.count {
+        case 1:
+            return reshape(TensorShape(1, shape.dimensions[0]))
+        case 2 where shape.dimensions[0] == 1:
+            return self
+        default:
+            preconditionFailure("Cannot treat tensor with shape \(shape) as a row matrix")
+        }
+    }
+    
+    /// Squeezes a `[1, N]` matrix back into a `[N]` vector
+    public func squeezedRowVector() -> Tensor {
+        switch shape.dimensions.count {
+        case 1:
+            return self
+        case 2 where shape.dimensions[0] == 1:
+            return Tensor(shape: TensorShape(shape.dimensions[1]), data: data)
+        default:
+            preconditionFailure("Expected row matrix shape [1, N], got \(shape)")
+        }
+    }
+    
+    /// Returns a copy of the specified row from a 2D tensor
+    public func row(_ index: Int) -> Tensor {
+        precondition(shape.dimensions.count == 2, "row() only valid for 2D tensors")
+        precondition(index >= 0 && index < shape.dimensions[0], "Row index \(index) out of bounds")
+        
+        let cols = shape.dimensions[1]
+        let start = index * cols
+        let end = start + cols
+        return Tensor(shape: TensorShape(cols), data: Array(data[start..<end]))
     }
     
     /// Move tensor data to GPU
@@ -1570,4 +1614,3 @@ enum TensorError: Error {
 /// let a = Tensor.zeros(shape: TensorShape(10, 10))  // Infers Tensor<Float>
 /// ```
 public typealias FloatTensor = Tensor<Float>
-

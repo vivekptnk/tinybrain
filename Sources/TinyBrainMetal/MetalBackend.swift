@@ -27,6 +27,10 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     /// **TB-004:** Persistent buffer pool to eliminate 0.45ms allocation overhead
     public let bufferPool: MetalBufferPool
     
+    /// Cache for GPU-resident quantized weight buffers (keyed by QuantizedTensor.identifier)
+    private var quantizedBufferCache: [UUID: QuantizedBufferEntry] = [:]
+    private let quantizedCacheLock = NSLock()
+    
     /// Initialize the Metal backend
     /// - Throws: `MetalError` if Metal is unavailable
     public init() throws {
@@ -609,11 +613,10 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         // Create buffers
         let (bufferA, releaseA) = try createBufferWithTracking(from: inputContiguous)
         
-        // INT8 weights buffer
-        let bufferB = device.makeBuffer(bytes: quantized.data, length: quantized.data.count, options: .storageModeShared)!
-        
-        // Scales buffer (per-channel)
-        let bufferScales = device.makeBuffer(bytes: quantized.scales, length: quantized.scales.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
+        // Upload or reuse GPU-resident quantized buffers
+        let cacheEntry = try cachedQuantizedBuffers(for: quantized)
+        let bufferB = cacheEntry.weights
+        let bufferScales = cacheEntry.scales
         
         // Output buffer
         let bufferC = try createBuffer(elementCount: Int(M * N))
@@ -666,6 +669,43 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     }
 }
 
+// MARK: - Quantized Buffer Cache
+
+private extension MetalBackend {
+    struct QuantizedBufferEntry {
+        let weights: MTLBuffer
+        let scales: MTLBuffer
+    }
+    
+    func cachedQuantizedBuffers(for tensor: QuantizedTensor) throws -> QuantizedBufferEntry {
+        quantizedCacheLock.lock()
+        defer { quantizedCacheLock.unlock() }
+        
+        if let cached = quantizedBufferCache[tensor.identifier] {
+            return cached
+        }
+        
+        guard let weightsBuffer = device.makeBuffer(length: tensor.data.count, options: .storageModeShared) else {
+            throw MetalError.bufferCreationFailed
+        }
+        tensor.data.withUnsafeBytes { src in
+            memcpy(weightsBuffer.contents(), src.baseAddress!, tensor.data.count)
+        }
+        
+        let scalesLength = tensor.scales.count * MemoryLayout<Float>.stride
+        guard let scalesBuffer = device.makeBuffer(length: scalesLength, options: .storageModeShared) else {
+            throw MetalError.bufferCreationFailed
+        }
+        tensor.scales.withUnsafeBytes { src in
+            memcpy(scalesBuffer.contents(), src.baseAddress!, scalesLength)
+        }
+        
+        let entry = QuantizedBufferEntry(weights: weightsBuffer, scales: scalesBuffer)
+        quantizedBufferCache[tensor.identifier] = entry
+        return entry
+    }
+}
+
 // Helper extension for making contiguous copies
 extension Tensor<Float> {
     /// Make a contiguous copy of this tensor (public for Metal backend)
@@ -703,4 +743,3 @@ public enum MetalError: Error {
     case bufferCreationFailed
     case invalidKernelConfiguration(String)
 }
-

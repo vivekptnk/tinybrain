@@ -60,6 +60,15 @@ public enum QuantizationPrecision {
 ///
 /// Stores Int8 or packed Int4 values + scaling information needed to convert back to Float32
 public struct QuantizedTensor {
+    /// Stable identifier used for GPU cache lookups
+    ///
+    /// INT8 buffers are immutable after creation, so we can safely upload them
+    /// to the GPU once and reuse the same Metal buffers for the lifetime of
+    /// the tensor. Whenever a quantized tensor is (re)created we stamp it with
+    /// a new UUID so caches can differentiate between different blobs that
+    /// might share the same shape or data length.
+    public let identifier: UUID
+    
     /// Shape of the original tensor
     public let shape: TensorShape
     
@@ -92,7 +101,13 @@ public struct QuantizedTensor {
     /// Memory: Just the INT8 data (1 byte) - no Float32 materialization!
     
     /// Create quantized tensor
-    public init(shape: TensorShape, data: [Int8], scales: [Float], zeroPoints: [Int8]? = nil, mode: QuantizationMode, precision: QuantizationPrecision = .int8) {
+    public init(shape: TensorShape,
+                data: [Int8],
+                scales: [Float],
+                zeroPoints: [Int8]? = nil,
+                mode: QuantizationMode,
+                precision: QuantizationPrecision = .int8,
+                identifier: UUID = UUID()) {
         // Validate data size based on precision
         switch precision {
         case .int8:
@@ -120,6 +135,7 @@ public struct QuantizedTensor {
         self.scales = scales
         self.zeroPoints = zeroPoints
         self.mode = mode
+        self.identifier = identifier
     }
     
     /// Dequantize back to Float32
@@ -393,4 +409,3 @@ extension Tensor where Element == Float {
         return self.matmulCPU(weights)
     }
 }
-
