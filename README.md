@@ -5,9 +5,7 @@
 [![Swift](https://img.shields.io/badge/Swift-5.10+-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/platform-iOS%2017%2B%20%7C%20macOS%2014%2B-lightgrey.svg)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-<!-- Uncomment when pushed to GitHub:
-[![CI](https://github.com/YOUR_USERNAME/tinybrain/workflows/CI/badge.svg)](https://github.com/YOUR_USERNAME/tinybrain/actions)
--->
+[![CI](https://github.com/vivekptnktinybrain/workflows/CI/badge.svg)](https://github.com/vivekptnk/tinybrain/actions)
 
 TinyBrain is a **Swift-native runtime** for running large language models (LLMs) entirely on-device on iOS and macOS. It combines **educational transparency** with **practical performance**, making transformer inference hackable and efficient on Apple Silicon.
 
