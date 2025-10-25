@@ -53,14 +53,5 @@ public enum ModelError: Error {
     case outOfMemory
 }
 
-/// Placeholder for model runner
-public struct ModelRunner {
-    /// Generate text from a prompt with streaming output
-    /// - Parameter prompt: Input text prompt
-    /// - Returns: AsyncSequence of generated tokens
-    public func generateStream(prompt: String) async throws -> AsyncThrowingStream<String, Error> {
-        // Placeholder implementation
-        fatalError("Not yet implemented – tracked in TB-002")
-    }
-}
+// ModelRunner moved to ModelRunner.swift (TB-004 Phase 5)
 
