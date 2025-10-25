@@ -583,6 +583,16 @@ public struct Tensor {
         shape.isContiguous
     }
     
+    /// Access raw data for GPU/Accelerate operations
+    ///
+    /// **Internal use only!** Exposes the underlying data array for backend implementations.
+    /// Needed by Metal and Accelerate to access tensor data efficiently.
+    ///
+    /// - Returns: The underlying Float array
+    public var rawData: [Float] {
+        data
+    }
+    
     // MARK: - Shape Manipulation
     
     /// Transpose the tensor (swap dimensions without copying data)
