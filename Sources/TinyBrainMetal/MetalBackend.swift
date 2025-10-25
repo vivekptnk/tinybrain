@@ -8,7 +8,7 @@ import Foundation
 import TinyBrainRuntime
 
 /// Metal backend for accelerated tensor operations
-public final class MetalBackend {
+public final class MetalBackend: MatMulBackend {
     /// Shared Metal device (the GPU)
     private let device: MTLDevice
     
@@ -243,9 +243,11 @@ public final class MetalBackend {
         return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
     
-    // MARK: - Matrix Operations
+    // MARK: - Matrix Operations (MatMulBackend Protocol)
     
-    /// Perform matrix multiplication on GPU using Metal
+    /// Perform matrix multiplication on GPU using Metal (MatMulBackend protocol)
+    ///
+    /// Uses the optimized tiled kernel by default for best performance.
     ///
     /// Computes: **C = A × B** using the GPU
     ///
@@ -261,6 +263,15 @@ public final class MetalBackend {
     /// let c = try backend.matmul(a, b)  // Runs on GPU!
     /// ```
     public func matmul(_ a: Tensor, _ b: Tensor) throws -> Tensor {
+        // Use optimized tiled version for best performance
+        return try matmulOptimized(a, b)
+    }
+    
+    /// Perform matrix multiplication using naive kernel (for debugging/comparison)
+    ///
+    /// Uses the simpler naive kernel instead of tiled.
+    /// Useful for debugging or comparing performance.
+    public func matmulNaive(_ a: Tensor, _ b: Tensor) throws -> Tensor {
         precondition(a.shape.dimensions.count == 2, "A must be 2D")
         precondition(b.shape.dimensions.count == 2, "B must be 2D")
         precondition(a.shape.dimensions[1] == b.shape.dimensions[0], "Inner dimensions must match")

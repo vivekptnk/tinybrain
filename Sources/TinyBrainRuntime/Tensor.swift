@@ -791,31 +791,48 @@ public struct Tensor {
         precondition(self.shape.dimensions[1] == other.shape.dimensions[0],
                     "Inner dimensions must match: \(self.shape.dimensions[1]) ≠ \(other.shape.dimensions[0])")
         
+        // Try Metal backend if configured (auto-selection!)
+        if TinyBrainBackend.preferred == .metal || TinyBrainBackend.preferred == .auto,
+           let metalBackend = TinyBrainBackend.metalBackend as? MatMulBackend {
+            
+            TinyBrainBackend.log("Using Metal backend for matmul \(self.shape) × \(other.shape)")
+            
+            do {
+                return try metalBackend.matmul(self, other)
+            } catch {
+                // Metal failed, fall back to CPU
+                TinyBrainBackend.log("Metal failed (\(error)), falling back to CPU")
+            }
+        }
+        
+        // CPU path (Accelerate)
+        TinyBrainBackend.log("Using CPU backend for matmul \(self.shape) × \(other.shape)")
+        return matmulCPU(other)
+    }
+    
+    /// CPU-only matrix multiplication using Accelerate
+    ///
+    /// This is the fallback when Metal is unavailable or fails.
+    /// Also used when backend preference is explicitly set to .cpu.
+    private func matmulCPU(_ other: Tensor) -> Tensor {
         // Ensure both tensors are contiguous for BLAS
-        // If not contiguous (e.g., transposed), make a contiguous copy
-        // TODO: Optimize this in TB-003 Metal - GPU can handle non-contiguous
         let a = self.isContiguous ? self : self.makeContiguous()
         let b = other.isContiguous ? other : other.makeContiguous()
         
-        let m = Int32(a.shape.dimensions[0])   // Rows in A
-        let k = Int32(a.shape.dimensions[1])   // Cols in A, Rows in B
-        let n = Int32(b.shape.dimensions[1])   // Cols in B
+        let m = Int32(a.shape.dimensions[0])
+        let k = Int32(a.shape.dimensions[1])
+        let n = Int32(b.shape.dimensions[1])
         
-        // Create result tensor
         var result = Tensor.zeros(shape: TensorShape(Int(m), Int(n)))
         
-        // Call Accelerate's optimized BLAS
-        // Both tensors are now contiguous, so use simple NoTrans flags
         cblas_sgemm(
-            CblasRowMajor,        // Our data is stored row-major
-            CblasNoTrans,         // A is contiguous
-            CblasNoTrans,         // B is contiguous
-            m, n, k,              // Dimensions: M×K, K×N → M×N
-            1.0,                  // alpha: scaling factor for A×B
-            a.data, k,            // A matrix, leading dimension = K
-            b.data, n,            // B matrix, leading dimension = N  
-            0.0,                  // beta: scaling factor for C (0 = ignore old C)
-            &result.data, n       // C matrix (result), leading dimension = N
+            CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            m, n, k,
+            1.0,
+            a.data, k,
+            b.data, n,
+            0.0,
+            &result.data, n
         )
         
         return result

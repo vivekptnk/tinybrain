@@ -24,11 +24,27 @@ public final class TinyBrainBackend {
     /// Enable debug logging to see which backend is used
     public static var debugLogging: Bool = false
     
+    /// Shared Metal backend instance (lazy-initialized)
+    /// Type-erased to avoid circular dependency (TinyBrainRuntime → TinyBrainMetal)
+    public static var metalBackend: Any?
+    
+    /// Check if Metal backend is available and configured
+    public static var isMetalConfigured: Bool {
+        metalBackend != nil
+    }
+    
     /// Log backend selection (if debugging enabled)
     static func log(_ message: String) {
         if debugLogging {
             print("[TinyBrain Backend] \(message)")
         }
     }
+}
+
+/// Protocol for backend implementations to conform to
+///
+/// Allows runtime polymorphism without compile-time dependency
+public protocol MatMulBackend {
+    func matmul(_ a: Tensor, _ b: Tensor) throws -> Tensor
 }
 
