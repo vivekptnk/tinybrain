@@ -275,7 +275,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 ## 👨‍💻 Author
 
 **Vivek Pattanaik**  
-GitHub: [@vivekp](https://github.com/vivekp)
+GitHub: [@vivekptnk](https://github.com/vivekptnk)
 
 ---
 
@@ -289,10 +289,5 @@ GitHub: [@vivekp](https://github.com/vivekp)
 
 ## 📮 Contact
 
-- Issues: [GitHub Issues](https://github.com/vivekp/tinybrain/issues)
-- Discussions: [GitHub Discussions](https://github.com/vivekp/tinybrain/discussions)
-
----
-
-**TinyBrain** – Making on-device AI transparent and practical. 🧠✨
-
+- Issues: [GitHub Issues](https://github.com/vivekptnk/tinybrain/issues)
+- Discussions: [GitHub Discussions](https://github.com/vivekptnk/tinybrain/discussions)

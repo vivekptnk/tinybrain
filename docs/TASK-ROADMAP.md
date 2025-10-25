@@ -43,6 +43,48 @@ This section tracks what we're **intentionally deferring** to later tasks to kee
 
 ---
 
+## 📝 TB-003 Detailed Scope (MatMul GPU Acceleration)
+
+### ✅ INCLUDED in TB-003
+
+**Metal MatMul Kernel:**
+- Tiled implementation (16×16 threadgroups)
+- Threadgroup memory optimization
+- Custom .metal shader (educational!)
+
+**Backend Abstraction:**
+- Transparent CPU/GPU selection
+- Automatic fallback to Accelerate
+- Logging for debugging
+
+**Stride-Aware Tensors:**
+- Support transpose without copy
+- Reshape operations
+- Non-contiguous memory layouts
+
+**Testing & Benchmarks:**
+- TDD tests for numerical parity
+- Performance benchmarks (3-10× speedup target)
+- Metal vs CPU comparison
+
+### ❌ DEFERRED from TB-003
+
+**To TB-004 or later:**
+- GPU Softmax kernel
+- GPU LayerNorm kernel
+- GPU GELU kernel
+- INT8 dequantization kernel
+- KV-cache GPU operations
+
+**To TB-007:**
+- Device-specific autotuning
+- JSON config for tile sizes
+- Fused operations (bias+activation)
+
+**Rationale:** MatMul is 70% of compute time - focus on the big win!
+
+---
+
 ## 📝 TB-002 Detailed Scope
 
 ### ✅ INCLUDED in TB-002
