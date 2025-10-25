@@ -87,13 +87,9 @@ public struct QuantizedTensor {
     /// Quantization mode used
     public let mode: QuantizationMode
     
-    /// **REVIEW HITLER HONEST:** Caching dequantized result makes memory WORSE
-    /// - Stores INT8: 1 byte
-    /// - Stores cached Float32: 4 bytes  
-    /// - Total: 5 bytes (worse than just Float32!)
-    ///
-    /// Real fix: Implement INT8 matmul Metal kernel (TB-005)
-    /// For now: Accept the repeated dequantization cost
+    /// **REVIEW HITLER FIX COMPLETE:** NO cache needed!
+    /// We have INT8 Metal kernel that computes directly from quantized data.
+    /// Memory: Just the INT8 data (1 byte) - no Float32 materialization!
     
     /// Create quantized tensor
     public init(shape: TensorShape, data: [Int8], scales: [Float], zeroPoints: [Int8]? = nil, mode: QuantizationMode, precision: QuantizationPrecision = .int8) {
@@ -128,17 +124,18 @@ public struct QuantizedTensor {
     
     /// Dequantize back to Float32
     ///
-    /// **REVIEW HITLER HONEST:** This converts on every call (inefficient)
-    ///
-    /// Real solution: INT8 matmul Metal kernel that operates directly on quantized data
-    /// For now: Accept conversion cost, get memory savings from storage
+    /// **NOTE:** This is only for debugging/testing. 
+    /// Inference uses INT8 Metal kernel via matmul(quantized) - NO dequantization!
     ///
     /// Converts Int8 → Float32 using stored scales/zero-points
     ///
     /// Example:
     /// ```swift
-    /// let quantized = weights.quantize()
-    /// let float = quantized.dequantize()  // Converts each time
+    /// // For inference: Use INT8 kernel (no dequantization!)
+    /// let output = input.matmul(quantized)  // INT8 Metal kernel
+    ///
+    /// // For debugging: Explicit dequantization
+    /// let float = quantized.dequantize()  // Converts to Float32
     /// ```
     public func dequantize() -> Tensor<Float> {
         var floatData = [Float](repeating: 0.0, count: shape.count)  // Use shape.count, not data.count!
