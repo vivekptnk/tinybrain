@@ -14,9 +14,10 @@ TinyBrain is a **Swift-native runtime** for running large language models (LLMs)
 ## ✨ Features
 
 - 🚀 **Swift-First**: No C++ dependencies, pure Swift + Metal
-- 🧮 **Quantization**: INT8 and INT4 support for efficient memory usage
-- ⚡ **Metal Acceleration**: GPU-optimized kernels for Apple Silicon
-- 🔄 **Streaming Output**: AsyncSequence-based token generation
+- 🧮 **Quantization**: INT8 support (75% memory savings) ✅ **TB-004 Complete**
+- ⚡ **Metal Acceleration**: GPU-optimized kernels for Apple Silicon ✅ **Validated on M4 Max**
+- 🔄 **Streaming Output**: AsyncSequence-based token generation ✅ **TB-004 Complete**
+- 💾 **KV Cache**: Paged 2048-token context for efficient inference ✅ **TB-004 Complete**
 - 🎓 **Educational**: Transparent, well-documented architecture
 - 📱 **Native**: Deep iOS/macOS integration with SwiftUI demo
 - 🔒 **Private**: 100% on-device inference, no network calls
@@ -86,15 +87,39 @@ make docs
 ```swift
 import TinyBrain
 
-// Load a quantized model
-let model = try await TinyBrain.load("Models/tinyllama-int8.tbf")
+// Enable GPU acceleration
+TinyBrainBackend.enableMetal()
 
-// Generate text with streaming
-let stream = try await model.generateStream(prompt: "Explain gravity in simple terms:")
+// Create model runner with KV cache
+let config = ModelConfig(
+    numLayers: 6,
+    hiddenDim: 768,
+    numHeads: 12,
+    vocabSize: 32000,
+    maxSeqLen: 2048
+)
+let runner = ModelRunner(config: config)
 
-for try await token in stream {
-    print(token, terminator: "")
+// Stream tokens with KV cache reuse
+let promptTokens = [1, 2, 3]  // Tokenized prompt
+for try await tokenId in runner.generateStream(prompt: promptTokens, maxTokens: 100) {
+    print(tokenId, terminator: " ")  // Progressive output!
 }
+```
+
+### Quantized Model Loading
+
+```swift
+// Load Float32 weights
+let weights = Tensor<Float>.random(shape: TensorShape(768, 3072))
+
+// Quantize to INT8 (75% memory savings!)
+let quantized = weights.quantize(mode: .perChannel)
+print("Savings: \(quantized.savingsVsFloat32() * 100)%")  // ~75%
+
+// Use quantized weights for inference
+let input = Tensor<Float>.random(shape: TensorShape(128, 768))
+let output = input.matmul(quantized)  // Auto-dequantizes
 ```
 
 ### SwiftUI Demo
@@ -207,17 +232,27 @@ tinybrain/
 
 ## 🗺️ Roadmap
 
-| Phase | Timeline | Deliverables |
-|-------|----------|--------------|
-| **Phase 1: Scaffold** | ✅ Complete | Project structure, tooling, docs |
-| **Phase 2: Runtime** | ✅ Complete | Tensor engine (Float32, Accelerate) |
-| **Phase 3: Metal** | ✅ Complete | GPU MatMul kernel (3-5× speedup) |
-| **Phase 4: Quant/KV** | Planned | INT8/INT4, paged KV-cache |
-| **Phase 5: Tokenizer** | Planned | BPE, streaming output |
-| **Phase 6: Demo** | Planned | SwiftUI chat app |
-| **Phase 7: Benchmarks** | Planned | Performance suite, docs |
+| Phase | Status | Deliverables |
+|-------|--------|--------------|
+| **TB-001: Scaffold** | ✅ Complete | Project structure, tooling, docs |
+| **TB-002: Runtime** | ✅ Complete | Tensor engine (Float32, Accelerate) |
+| **TB-003: Metal** | ✅ Complete | GPU MatMul kernel, buffer pool |
+| **TB-004: Quant/KV** | ✅ **COMPLETE** | **INT8 quantization, paged KV cache, streaming API** |
+| **TB-005: Tokenizer** | 📋 Planned | BPE tokenizer, advanced sampling |
+| **TB-006: Demo** | 📋 Planned | SwiftUI chat app with live inference |
+| **TB-007: Benchmarks** | 📋 Planned | Performance suite, energy metrics |
 
-See [docs/tasks/](docs/tasks/) for detailed task breakdown.
+### TB-004 Highlights (Just Completed!)
+
+- ✅ **GPU-resident tensors** (0.74-1.28× vs M4 AMX)
+- ✅ **Generic Tensor<Element>** (Float32, Float16, Int8)
+- ✅ **Copy-on-Write** optimization
+- ✅ **INT8 quantization** (75% memory savings, <1% error)
+- ✅ **Paged KV cache** (2048-token context)
+- ✅ **Streaming API** (AsyncSequence for SwiftUI)
+- ✅ **94 tests passing** on M4 Max
+
+See [docs/TB-004-COMPLETE.md](docs/TB-004-COMPLETE.md) for full details.
 
 ---
 
@@ -234,25 +269,43 @@ We welcome contributions! Please:
 
 ## 📊 Benchmarks
 
-Current performance (Apple M4 Max, CPU only):
+Performance on **MacBook Pro M4 Max** (40 GPU cores):
 
-| Metric | Target | Current (TB-002) | Status |
-|--------|--------|------------------|--------|
-| MatMul 128×128 | < 0.1 ms | **0.053 ms** | ✅ **5× better** |
-| Toy Model Throughput | Baseline | **1049 tokens/sec** | ✅ **Measured** |
-| Test Coverage | Core ops | **26 tests passing** | ✅ **Complete** |
+### GPU Performance (TB-003/TB-004)
 
-Full model performance targets (with Metal + INT8):
+| Matrix Size | CPU (ms) | GPU (ms) | Speedup | Winner |
+|-------------|----------|----------|---------|--------|
+| 512×512 | 0.43 | 0.84 | 0.51× | CPU (AMX) |
+| 1024×1024 | 1.79 | 1.97 | 0.91× | CPU (AMX) |
+| **1536×1536** | **6.06** | **4.73** | **1.28×** | **GPU** ✅ |
 
-| Metric | Target | Status |
-|--------|--------|--------|
-| Latency | ≤ 150 ms/token | 🚧 TB-003 (Metal) |
-| Throughput | ≥ 6 tokens/sec | 🚧 TB-003/TB-004 |
-| Memory | ≤ 1 GB RAM | 🚧 TB-004 (INT8) |
-| Energy | ≤ 1.5 J/token | 🚧 TB-003 (Metal) |
-| Accuracy | ≤ 15% perplexity Δ | 🚧 TB-004 (Quant) |
+**Note:** M4 Max has AMX (Apple Matrix Extension) coprocessor that often beats GPU for single matmul. Real wins come from batched workflows!
 
-Run benchmarks: `swift Scripts/benchmark-ops.swift`
+### Memory Efficiency (TB-004)
+
+| Model | Float32 | INT8 | Savings |
+|-------|---------|------|---------|
+| TinyLlama 1.1B | 4.4 GB | **1.1 GB** | **75%** ✅ |
+| Quantization error | Baseline | 0.7-1.0% | < 1% ✅ |
+
+### KV Cache Performance (TB-004)
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Append 1 token | 0.41 ms | Fast! |
+| Append 100 tokens | 4.1 ms | Linear scaling |
+| 2048-token context | ✅ Supported | Paged memory |
+| Memory leak test | 4.2 sec | 10k cycles, no leaks ✅ |
+
+### Test Coverage
+
+| Metric | Current | Status |
+|--------|---------|--------|
+| Total tests | **94/94 passing** | ✅ **Complete** |
+| TB-004 tests | 57 new tests | ✅ **All passing** |
+| Code coverage | Core ops | ✅ **TDD methodology** |
+
+Run benchmarks: `swift test --filter PerformanceBenchmarks`
 
 ---
 

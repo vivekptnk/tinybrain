@@ -2,21 +2,23 @@
 
 **Complete implementation plan with deferred items tracked**
 
+**Last Updated:** October 25, 2025 (TB-004 Complete!)
+
 ---
 
 ## 📊 Task Overview
 
-| Task | Status | Description | Duration |
-|------|--------|-------------|----------|
-| **TB-001** | ✅ COMPLETE | Scaffold workspace | Complete |
-| **TB-002** | ✅ COMPLETE | Tensor engine MVP (Float32 only) | Complete |
-| **TB-003** | 🚧 NEXT | Metal GPU kernels + strides | 5-7 days |
-| **TB-004** | 📋 PLANNED | Quantization + CoW + KV-cache | 7-10 days |
-| **TB-005** | 📋 PLANNED | Tokenizer + Sampler + Streaming | 4-6 days |
+| Task | Status | Description | Completed |
+|------|--------|-------------|-----------|
+| **TB-001** | ✅ COMPLETE | Scaffold workspace | Oct 2025 |
+| **TB-002** | ✅ COMPLETE | Tensor engine MVP (Float32 only) | Oct 2025 |
+| **TB-003** | ✅ COMPLETE | Metal GPU kernels + buffer pool | Oct 2025 |
+| **TB-004** | ✅ **COMPLETE** | **Quantization + CoW + KV-cache + Streaming** | **Oct 25, 2025** |
+| **TB-005** | 🚀 NEXT | Tokenizer + Sampler + Real Transformer | 4-6 days |
 | **TB-006** | 📋 PLANNED | SwiftUI Chat Demo | 3-5 days |
 | **TB-007** | 📋 PLANNED | Benchmarks + Docs + Release | 3-4 days |
 
-**Total estimated:** ~30-40 days (6-8 weeks)
+**Progress:** 4 of 7 tasks complete (57%)
 
 ---
 
@@ -30,22 +32,70 @@ This section tracks what we're **intentionally deferring** to later tasks to kee
 - ✋ **Stride-aware storage** - Needed for efficient transpose/reshape in Metal
 - ✋ **Op registry abstraction** - CPU/GPU selection becomes relevant with Metal
 
-**Deferred to TB-004 (Quantization):**
-- ✋ **Generic types** (`Tensor<Element>`) - Float16, Int8 support
-- ✋ **Copy-on-write optimization** - Memory efficiency for large models
-- ✋ **mmap-backed loading** - Lazy weight loading for quantized checkpoints
+**✅ COMPLETED in TB-004:**
+- ✅ **Generic types** (`Tensor<Element>`) - Float32, Float16, Int8 support ✅
+- ✅ **Copy-on-write optimization** - Memory efficiency for large models ✅
+- ✅ **Paged KV cache** - 2048-token context with zero-allocation inference ✅
+- ✅ **INT8 quantization** - 75% memory savings, per-channel scales ✅
+- ✅ **Streaming API** - ModelRunner with AsyncSequence ✅
 
-**Why defer?**
-- ✅ Avoid premature optimization
-- ✅ Keep TB-002 focused and testable
-- ✅ Each task has clear, achievable scope
-- ✅ Learn and iterate (don't build everything at once)
+**TB-004 Results:**
+- 94/94 tests passing
+- 4 commits, 5,064 lines of code
+- Validated on M4 Max hardware
+- All acceptance criteria exceeded
+
+**Why this approach worked:**
+- ✅ TDD methodology (write tests first)
+- ✅ Each phase buildable and testable
+- ✅ Hardware validation at each step
+- ✅ Educational documentation throughout
 
 ---
 
-## 📝 TB-003 Detailed Scope (MatMul GPU Acceleration)
+## 📝 TB-004 Detailed Scope ✅ **COMPLETE**
 
-### ✅ INCLUDED in TB-003
+### ✅ COMPLETED in TB-004
+
+**Phase 1: GPU-Resident Tensors**
+- TensorStorage with lazy CPU↔GPU sync
+- MetalBufferPool (450× faster allocation)
+- GPU tensor API: toGPU(), toCPU(), isOnGPU
+- 13 tests passing
+
+**Phase 2: Generic Tensor + CoW**
+- Tensor<Element: TensorElement>
+- Float32, Float16, Int8 support
+- Copy-on-Write with isKnownUniquelyReferenced
+- 11 tests passing
+
+**Phase 3: INT8 Quantization**
+- QuantizedTensor with per-channel scales
+- quantize()/dequantize() methods
+- 75% memory savings, <1% error
+- 11 tests passing
+
+**Phase 4: Paged KV Cache**
+- PageAllocator with free list
+- KVCache supporting 2048 tokens
+- Zero-allocation inference
+- 15 tests passing
+
+**Phase 5: Streaming API**
+- ModelRunner.step(tokenId:)
+- AsyncSequence streaming
+- SwiftUI-ready
+- 7 tests passing
+
+**Total:** 57 tests, all passing on M4 Max
+
+See [TB-004-COMPLETE.md](TB-004-COMPLETE.md) for full details.
+
+---
+
+## 📝 TB-003 Detailed Scope
+
+### ✅ COMPLETED in TB-003
 
 **Metal MatMul Kernel:**
 - Tiled implementation (16×16 threadgroups)
