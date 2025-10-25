@@ -53,9 +53,10 @@
 - Surface telemetry/UX copy ("TinyBrain Chat", "Energy Overlay") consistently across UI and docs.
 
 ## 9. Collaboration Protocol
-- Reference TB task IDs in issues/PRs (e.g., “Implements TB-003”).
+- Reference TB task IDs in issues/PRs (e.g., "Implements TB-003").
 - Discuss major API or architecture changes in design docs before coding; store them under `docs/rfcs/`.
 - When blocked, document the issue in the task file and propose mitigation paths aligned with PRD risk table.
 - Keep responses concise and action-focused; summarize deviations from the plan in AGENTS.md if they become permanent rules.
+- **NEVER commit changes without explicit permission from the product owner.** Always stage changes and ask for approval before running `git commit`.
 
 Following these rules keeps TinyBrain aligned with the PRD vision while enabling future agents to contribute confidently.

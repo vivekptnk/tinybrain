@@ -9,8 +9,8 @@
 | Task | Status | Description | Duration |
 |------|--------|-------------|----------|
 | **TB-001** | ✅ COMPLETE | Scaffold workspace | Complete |
-| **TB-002** | 🚧 NEXT | Tensor engine MVP (Float32 only) | 3-4 days |
-| **TB-003** | 📋 PLANNED | Metal GPU kernels + strides | 5-7 days |
+| **TB-002** | ✅ COMPLETE | Tensor engine MVP (Float32 only) | Complete |
+| **TB-003** | 🚧 NEXT | Metal GPU kernels + strides | 5-7 days |
 | **TB-004** | 📋 PLANNED | Quantization + CoW + KV-cache | 7-10 days |
 | **TB-005** | 📋 PLANNED | Tokenizer + Sampler + Streaming | 4-6 days |
 | **TB-006** | 📋 PLANNED | SwiftUI Chat Demo | 3-5 days |

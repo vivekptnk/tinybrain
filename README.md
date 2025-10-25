@@ -210,8 +210,8 @@ tinybrain/
 | Phase | Timeline | Deliverables |
 |-------|----------|--------------|
 | **Phase 1: Scaffold** | ✅ Complete | Project structure, tooling, docs |
-| **Phase 2: Runtime** | In Progress | Tensor engine, model runner |
-| **Phase 3: Metal** | Planned | GPU kernels, optimization |
+| **Phase 2: Runtime** | ✅ Complete | Tensor engine (Float32, Accelerate) |
+| **Phase 3: Metal** | 🚧 Next | GPU kernels, optimization |
 | **Phase 4: Quant/KV** | Planned | INT8/INT4, paged KV-cache |
 | **Phase 5: Tokenizer** | Planned | BPE, streaming output |
 | **Phase 6: Demo** | Planned | SwiftUI chat app |
@@ -234,15 +234,25 @@ We welcome contributions! Please:
 
 ## 📊 Benchmarks
 
-Performance targets (iPhone 15 Pro / M3 MacBook):
+Current performance (Apple M4 Max, CPU only):
+
+| Metric | Target | Current (TB-002) | Status |
+|--------|--------|------------------|--------|
+| MatMul 128×128 | < 0.1 ms | **0.053 ms** | ✅ **5× better** |
+| Toy Model Throughput | Baseline | **1049 tokens/sec** | ✅ **Measured** |
+| Test Coverage | Core ops | **26 tests passing** | ✅ **Complete** |
+
+Full model performance targets (with Metal + INT8):
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| Latency | ≤ 150 ms/token | 🚧 Planned |
-| Throughput | ≥ 6 tokens/sec | 🚧 Planned |
-| Memory | ≤ 1 GB RAM | 🚧 Planned |
-| Energy | ≤ 1.5 J/token | 🚧 Planned |
-| Accuracy | ≤ 15% perplexity Δ | 🚧 Planned |
+| Latency | ≤ 150 ms/token | 🚧 TB-003 (Metal) |
+| Throughput | ≥ 6 tokens/sec | 🚧 TB-003/TB-004 |
+| Memory | ≤ 1 GB RAM | 🚧 TB-004 (INT8) |
+| Energy | ≤ 1.5 J/token | 🚧 TB-003 (Metal) |
+| Accuracy | ≤ 15% perplexity Δ | 🚧 TB-004 (Quant) |
+
+Run benchmarks: `swift Scripts/benchmark-ops.swift`
 
 ---
 
