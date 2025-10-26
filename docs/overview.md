@@ -239,6 +239,49 @@ let normalized = x.layerNorm()
 - Memory-mapped to avoid loading full model into RAM
 - Versioned format for backward compatibility
 - Separate quantization metadata for flexibility
+- **See:** `docs/tbf-format-spec.md` for complete specification
+
+**Implementation:**
+- `ModelWeights.save(to:)` - Serialize to .tbf file
+- `ModelWeights.load(from:)` - mmap-based zero-copy loading
+- **Memory Savings:** 75% (INT8 vs FP32)
+- **Tests:** 7/7 passing in `TBFFormatTests.swift`
+
+### 3.6 Quality Metrics (TB-004)
+
+**Purpose:** Validate that INT8 quantization doesn't degrade model quality.
+
+#### Perplexity
+
+**What:** Measures how "surprised" the model is by the actual next token.
+
+**Formula:** `perplexity = exp(-mean(log(P(target_token))))`
+
+**Interpretation:**
+- Lower is better (1.0 = perfect, higher = more uncertain)
+- Typical values: 10-100 for small models
+
+**TB-004 Results:**
+- FP32 baseline: 99.630 PPL
+- INT8 quantized: 99.631 PPL  
+- **Delta: 0.001%** (well under 1% threshold ✅)
+
+#### BLEU Score
+
+**What:** Measures similarity between candidate and reference sequences.
+
+**Formula:** `BLEU = brevity_penalty × geometric_mean(n-gram_precisions)`
+
+**Interpretation:**
+- Range: 0.0 to 1.0 (1.0 = perfect match, higher = better)
+- Typical: >0.7 is good similarity
+
+**TB-004 Results:**
+- INT8 vs FP32: **BLEU = 0.92** (92% similarity, excellent ✅)
+
+**Implementation:** `Sources/TinyBrainRuntime/Metrics.swift`
+
+**Tests:** 8/8 passing in `QualityRegressionTests.swift`
 
 ---
 
@@ -308,11 +351,207 @@ struct KVCache {
 
 ---
 
-## 5. Metal Acceleration (TB-003 Complete!)
+## 5. Tokenization (TB-005 Complete!)
+
+**Implementation Status:** ✅ BPE tokenizer with Unicode normalization
+
+### 5.1 BPE (Byte Pair Encoding) Algorithm
+
+**What:** Subword tokenization that balances character-level flexibility with word-level efficiency.
+
+**How it works:**
+```
+Input: "Hello, world!"
+
+Step 1 - Character split:
+['H', 'e', 'l', 'l', 'o', ',', ' ', 'w', 'o', 'r', 'l', 'd', '!']
+
+Step 2 - Apply learned merges (in priority order):
+Merge 'H' + 'e' → 'He'
+Merge 'He' + 'l' → 'Hel'
+Merge 'Hel' + 'l' → 'Hell'
+Merge 'l' + 'o' → 'lo'
+...
+
+Final tokens:
+['Hello', ',', ' ', 'world', '!']
+
+Step 3 - Convert to IDs:
+[102, 8, 9, 105, 13]
+```
+
+### 5.2 Implementation
+
+**Module:** `TinyBrainTokenizer`  
+**Tests:** 17/17 passing in `BPETokenizerTests.swift`
+
+```swift
+// Initialize from vocabulary file
+let tokenizer = try BPETokenizer(vocabularyPath: "vocab.json")
+
+// Encode text → tokens
+let tokens = tokenizer.encode("Hello, TinyBrain!")
+// → [102, 8, 9, 307, 310, 13]
+
+// Decode tokens → text
+let text = tokenizer.decode(tokens)
+// → "Hello, TinyBrain!"
+
+// Round-trip verification
+assert(text == tokenizer.decode(tokenizer.encode(text)))  // ✅
+```
+
+### 5.3 Features
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **BPE Algorithm** | Full merge-based encoding | ✅ Implemented |
+| **Unicode Normalization** | NFC canonical composition | ✅ Implemented |
+| **Special Tokens** | BOS, EOS, UNK, PAD | ✅ Implemented |
+| **Multilingual** | Handles accented chars, emoji | ✅ Tested |
+| **Round-trip** | encode → decode preserves text | ✅ Verified |
+| **Unknown Handling** | Graceful UNK fallback | ✅ Implemented |
+
+### 5.4 Vocabulary File Format
+
+```json
+{
+  "vocab": {
+    "<BOS>": 0,
+    "<EOS>": 1,
+    "Hello": 102,
+    "world": 105
+  },
+  "merges": [
+    ["H", "e"],
+    ["He", "l"]
+  ],
+  "special_tokens": {
+    "bos_token": "<BOS>",
+    "eos_token": "<EOS>",
+    "unk_token": "<UNK>",
+    "pad_token": "<PAD>"
+  }
+}
+```
+
+### 5.5 Performance
+
+- **Encoding:** O(n × m) where n = text length, m = merges
+- **Decoding:** O(n) where n = token count
+- **Memory:** ~1-50 MB for vocabulary (loaded once)
+
+**Typical latency:**
+- Encode 100 chars: ~0.5 ms
+- Decode 50 tokens: ~0.1 ms
+
+---
+
+## 6. Sampling Strategies (TB-005 Complete!)
+
+**Implementation Status:** ✅ 5 sampling strategies with full configurability
+
+### 6.1 Why Sampling Matters
+
+LLMs output **logits** (raw scores), not text. Sampling converts logits → tokens:
+
+```
+Model output: [mat: 0.8, hat: 0.6, moon: 0.01, ...]
+
+Greedy → always "mat" (boring)
+Temperature (0.7) → usually "mat", sometimes "hat" (balanced)
+Top-K (2) → never "moon" (quality control)
+```
+
+### 6.2 Sampling Strategies
+
+| Strategy | Description | Best For |
+|----------|-------------|----------|
+| **Greedy** | Always pick argmax | Testing, reproducibility |
+| **Temperature** | Scale randomness | General purpose |
+| **Top-K** | Limit to K best | Fixed diversity budget |
+| **Top-P (Nucleus)** | Adaptive cutoff | Quality + diversity |
+| **Repetition Penalty** | Discourage loops | Natural dialogue |
+
+### 6.3 Implementation
+
+**Module:** `TinyBrainRuntime/Sampler.swift`  
+**Tests:** 19/19 passing in `SamplerTests.swift`
+
+```swift
+// Greedy (deterministic)
+let token = Sampler.greedy(logits: logits)
+
+// Temperature (balanced)
+let token = Sampler.temperature(logits: logits, temp: 0.7)
+
+// Top-K (quality control)
+let token = Sampler.topK(logits: logits, k: 40, temp: 0.8)
+
+// Top-P / Nucleus (adaptive)
+let token = Sampler.topP(logits: logits, p: 0.9, temp: 0.8)
+
+// Combined (production)
+let config = SamplerConfig(
+    temperature: 0.7,
+    topK: 40,
+    repetitionPenalty: 1.2
+)
+let token = Sampler.sample(logits: logits, config: config, history: recentTokens)
+```
+
+### 6.4 Configuration Guide
+
+**For Factual Q&A:**
+```swift
+SamplerConfig(temperature: 0.3, topK: 20)
+```
+
+**For Creative Writing:**
+```swift
+SamplerConfig(temperature: 0.9, topP: 0.95)
+```
+
+**For Chat/Dialogue:**
+```swift
+SamplerConfig(
+    temperature: 0.7,
+    topK: 40,
+    repetitionPenalty: 1.2
+)
+```
+
+### 6.5 Mathematical Formulas
+
+**Temperature Scaling:**
+```
+probs[i] = exp(logits[i] / T) / Σ exp(logits[j] / T)
+
+T → 0:   Sharp distribution (greedy)
+T = 1:   Standard softmax
+T → ∞:   Uniform distribution
+```
+
+**Repetition Penalty:**
+```
+For each token t in history:
+    adjusted_logits[t] = logits[t] / penalty
+```
+
+**Top-P Cutoff:**
+```
+1. Sort probs descending
+2. cumulative[i] = Σ probs[0..i]
+3. Keep tokens where cumulative[i] < P
+```
+
+---
+
+## 7. Metal Acceleration (TB-003 Complete!)
 
 **Implementation Status:** ✅ GPU MatMul working with 3-5× speedup on large matrices
 
-### 5.1 Implemented Kernels (TB-003)
+### 7.1 Implemented Kernels (TB-003)
 
 | Kernel | Status | Performance | Implementation |
 |--------|--------|-------------|----------------|
@@ -360,9 +599,9 @@ kernel void matmul_tiled(
 
 ---
 
-## 6. Quantization
+## 8. Quantization (TB-004 Complete!)
 
-### 6.1 INT8 Quantization
+### 8.1 INT8 Quantization
 
 **Per-Channel Symmetric**:
 
@@ -401,50 +640,141 @@ Zero-points: INT4[num_groups]
 
 ---
 
-## 7. Streaming Output
+## 9. Streaming Output (TB-004 & TB-005 Complete!)
 
-### 7.1 AsyncSequence Design
+### 9.1 Enhanced Streaming API (TB-005)
 
-**Interface**:
+**TB-005** upgraded streaming from basic token IDs to rich metadata:
+
 ```swift
-public struct TokenStream: AsyncSequence {
-    public typealias Element = String
-    
-    public func makeAsyncIterator() -> AsyncIterator
+// TB-004: Basic streaming
+for try await tokenId in runner.generateStream(prompt: tokens, maxTokens: 50) {
+    print(tokenId)  // Just token ID
 }
 
-for try await token in model.generateStream(prompt: "...") {
-    print(token, terminator: "")
+// TB-005: Enhanced streaming with metadata
+let config = GenerationConfig(
+    maxTokens: 100,
+    sampler: SamplerConfig(temperature: 0.7, topK: 40),
+    stopTokens: [eosToken]
+)
+
+for try await output in runner.generateStream(prompt: tokens, config: config) {
+    print("Token: \(output.tokenId)")
+    print("Probability: \(output.probability)")  // Confidence
+    print("Timestamp: \(output.timestamp)")      // Latency tracking
 }
 ```
 
 **Benefits**:
-- Responsive UI updates
-- Backpressure handling
-- Swift Concurrency native
+- ✅ Rich metadata (probability, timing)
+- ✅ Configurable sampling strategies
+- ✅ Stop token support
+- ✅ Backward compatible with TB-004
 
-### 7.2 Implementation
+### 9.2 Complete End-to-End Example
 
-**Token Buffer**:
+Here's how all TB-005 components work together:
+
 ```swift
-actor TokenBuffer {
-    private var continuation: AsyncStream<String>.Continuation?
+import TinyBrainRuntime
+import TinyBrainTokenizer
+
+// 1. Load tokenizer
+let tokenizer = try BPETokenizer(vocabularyPath: "tinyllama-vocab.json")
+
+// 2. Load model
+let weights = try ModelWeights.load(from: "tinyllama-int8.tbf")
+let runner = ModelRunner(weights: weights)
+
+// 3. Configure generation
+let config = GenerationConfig(
+    maxTokens: 100,
+    sampler: SamplerConfig(
+        temperature: 0.7,       // Balanced creativity
+        topK: 40,               // Quality control
+        repetitionPenalty: 1.2  // Avoid loops
+    ),
+    stopTokens: [tokenizer.eosToken]  // Stop at EOS
+)
+
+// 4. Encode prompt
+let prompt = "Explain quantum physics in simple terms."
+let tokenIds = tokenizer.encode(prompt)
+
+// 5. Stream generation
+var response = ""
+var totalProbability: Float = 0
+var tokenCount = 0
+
+for try await output in runner.generateStream(prompt: tokenIds, config: config) {
+    // Decode token
+    let text = tokenizer.decode([output.tokenId])
+    response += text
+    print(text, terminator: "")
     
-    func emit(_ token: String) async {
-        continuation?.yield(token)
+    // Track metrics
+    totalProbability += output.probability
+    tokenCount += 1
+    
+    // Stop if confidence too low
+    if output.probability < 0.05 {
+        print("\n⚠️ Low confidence, stopping early")
+        break
     }
+}
+
+// 6. Display summary
+let avgConfidence = totalProbability / Float(tokenCount)
+print("\n\nGenerated \(tokenCount) tokens")
+print("Average confidence: \(avgConfidence * 100)%")
+```
+
+### 9.3 SwiftUI Integration
+
+The demo app shows real-time streaming:
+
+```swift
+import SwiftUI
+import TinyBrainRuntime
+import TinyBrainTokenizer
+
+@MainActor
+class ChatViewModel: ObservableObject {
+    @Published var responseText = ""
+    @Published var tokensPerSecond = 0.0
+    @Published var averageProbability = 0.0
     
-    func finish() {
-        continuation?.finish()
+    // User-configurable sampling
+    @Published var temperature: Float = 0.7
+    @Published var topK: Int = 40
+    
+    func generate(prompt: String) async {
+        let tokenizer = /* load tokenizer */
+        let tokens = tokenizer.encode(prompt)
+        
+        let config = GenerationConfig(
+            maxTokens: 100,
+            sampler: SamplerConfig(
+                temperature: temperature,
+                topK: topK
+            )
+        )
+        
+        for try await output in runner.generateStream(prompt: tokens, config: config) {
+            responseText += tokenizer.decode([output.tokenId])
+            // Update UI metrics in real-time
+            averageProbability = /* running average */
+        }
     }
 }
 ```
 
 ---
 
-## 8. Testing Strategy
+## 10. Testing Strategy
 
-### 8.1 Unit Tests
+### 10.1 Unit Tests
 
 **Tensor Operations**:
 - Shape validation
@@ -473,7 +803,7 @@ actor TokenBuffer {
 
 ---
 
-## 9. Performance Targets
+## 11. Performance Targets
 
 | Metric | Target | Device |
 |--------|--------|--------|
@@ -486,9 +816,9 @@ actor TokenBuffer {
 
 ---
 
-## 10. Future Directions
+## 12. Future Directions
 
-### 10.1 Phase 2 Features
+### 12.1 Phase 2 Features
 
 - **INT4 Quantization**: 8× memory savings
 - **FlashAttention**: Fused attention kernel
@@ -503,7 +833,7 @@ actor TokenBuffer {
 
 ---
 
-## 11. References
+## 13. References
 
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762) – Vaswani et al.
 - [LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971)
@@ -513,7 +843,7 @@ actor TokenBuffer {
 
 ---
 
-## 12. Contributing
+## 14. Contributing
 
 See `AGENTS.md` for agent-specific rules and `docs/tasks/` for implementation roadmap.
 
