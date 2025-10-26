@@ -1,0 +1,23 @@
+# Test YAML scenario for benchmark harness tests
+
+scenarios:
+  - name: "Toy Model - Short Prompt"
+    model: "toy"  # Use built-in toy model
+    prompts:
+      - "Hello world"
+      - "Test prompt"
+    max_tokens: 10
+    backend: cpu
+    warmup: 2
+  
+  - name: "Toy Model - Temperature Test"
+    model: "toy"
+    prompts:
+      - "Creative writing test"
+    max_tokens: 20
+    backend: auto
+    sampler:
+      temperature: 0.8
+      top_k: 40
+      top_p: 0.9
+

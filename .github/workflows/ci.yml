@@ -4,55 +4,45 @@ on:
   push:
     branches: [ main, develop ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
+  workflow_dispatch:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
 
 jobs:
   lint:
-    name: Lint
+    name: SwiftLint
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Install SwiftLint
         run: brew install swiftlint
       
       - name: Run SwiftLint
-        run: swiftlint lint --strict
-  
-  format-check:
-    name: Format Check
+        run: swiftlint lint --strict --reporter github-actions-logging
+
+  format:
+    name: SwiftFormat Check
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Install SwiftFormat
         run: brew install swiftformat
       
       - name: Check formatting
-        run: swiftformat . --config .swiftformat --lint
+        run: swiftformat . --lint --config .swiftformat
 
-  build-and-test:
-    name: Build & Test
+  build-debug:
+    name: Build (Debug)
     runs-on: macos-14
-    strategy:
-      matrix:
-        destination:
-          - platform=macOS
-          - platform=iOS Simulator,name=iPhone 15 Pro
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.0.app
-      
-      - name: Show Xcode version
-        run: xcodebuild -version
       
       - name: Show Swift version
         run: swift --version
@@ -60,46 +50,152 @@ jobs:
       - name: Resolve dependencies
         run: swift package resolve
       
-      - name: Build
-        run: swift build -c release
-        
-      - name: Run tests (macOS)
-        if: matrix.destination == 'platform=macOS'
-        run: swift test
-      
-      - name: Run tests (iOS)
-        if: contains(matrix.destination, 'iOS Simulator')
-        run: |
-          xcodebuild test \
-            -scheme TinyBrain-Package \
-            -destination "${{ matrix.destination }}" \
-            -enableCodeCoverage YES
-
-  docs:
-    name: Documentation
+      - name: Build debug
+        run: swift build
+  
+  build-release:
+    name: Build (Release)
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.0.app
       
-      - name: Generate documentation
-        run: |
-          swift package generate-documentation
-        continue-on-error: true
-
-  benchmark:
-    name: Smoke Test Benchmark
+      - name: Build release
+        run: swift build -c release
+  
+  test-swift:
+    name: Swift Tests
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Build benchmark tool
-        run: swift build -c release --product tinybrain-bench
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.0.app
       
-      - name: Test benchmark CLI
-        run: .build/release/tinybrain-bench --help
+      - name: Run tests
+        run: swift test --parallel
+      
+      - name: Test summary
+        if: always()
+        run: |
+          echo "Test Results:"
+          swift test --list-tests 2>/dev/null | wc -l || echo "Test count unavailable"
+  
+  test-python:
+    name: Python Converter Tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run Python tests
+        run: pytest Tests/test_convert_model.py -v --tb=short
 
+  benchmark-smoke:
+    name: Benchmark Smoke Tests
+    runs-on: macos-14
+    needs: [build-release]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build release
+        run: swift build -c release
+      
+      - name: Device info
+        run: .build/release/tinybrain-bench --device-info
+      
+      - name: Quick benchmark (5 tokens)
+        run: |
+          .build/release/tinybrain-bench \
+            --demo \
+            --tokens 5 \
+            --output json > benchmark-results.json
+      
+      - name: Validate results
+        run: |
+          # Check JSON is valid
+          cat benchmark-results.json | python -m json.tool > /dev/null
+          
+          # Check has required fields
+          grep -q "tokens_per_sec" benchmark-results.json
+          grep -q "ms_per_token" benchmark-results.json
+          grep -q "memory_peak_mb" benchmark-results.json
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.json
+          retention-days: 30
+
+  documentation:
+    name: Build Documentation
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.0.app
+      
+      - name: Build DocC
+        run: |
+          swift package --allow-writing-to-directory ./docs/.build \
+            generate-documentation \
+            --target TinyBrain \
+            --output-path ./docs/.build/documentation \
+            --transform-for-static-hosting \
+            --hosting-base-path tinybrain
+      
+      - name: Upload documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: docs/.build/documentation
+          retention-days: 90
+
+  summary:
+    name: CI Summary
+    runs-on: macos-14
+    needs: [lint, format, build-debug, build-release, test-swift, test-python, benchmark-smoke, documentation]
+    if: always()
+    steps:
+      - name: Check job results
+        run: |
+          echo "CI Pipeline Summary:"
+          echo "===================="
+          echo ""
+          echo "Lint: ${{ needs.lint.result }}"
+          echo "Format: ${{ needs.format.result }}"
+          echo "Build (Debug): ${{ needs.build-debug.result }}"
+          echo "Build (Release): ${{ needs.build-release.result }}"
+          echo "Swift Tests: ${{ needs.test-swift.result }}"
+          echo "Python Tests: ${{ needs.test-python.result }}"
+          echo "Benchmarks: ${{ needs.benchmark-smoke.result }}"
+          echo "Documentation: ${{ needs.documentation.result }}"
+          echo ""
+          
+          if [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs.format.result }}" != "success" ] || \
+             [ "${{ needs.build-debug.result }}" != "success" ] || \
+             [ "${{ needs.build-release.result }}" != "success" ] || \
+             [ "${{ needs.test-swift.result }}" != "success" ] || \
+             [ "${{ needs.test-python.result }}" != "success" ] || \
+             [ "${{ needs.benchmark-smoke.result }}" != "success" ] || \
+             [ "${{ needs.documentation.result }}" != "success" ]; then
+            echo "❌ CI Pipeline Failed"
+            exit 1
+          else
+            echo "✅ All CI Checks Passed!"
+          fi

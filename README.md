@@ -58,6 +58,10 @@ This will:
 
 ### Building
 
+**Two workflows:** SPM command-line OR Xcode IDE
+
+#### Option 1: Command Line (SPM)
+
 ```bash
 # Build all targets
 make build
@@ -77,6 +81,20 @@ make lint
 # Generate documentation
 make docs
 ```
+
+#### Option 2: Xcode IDE (Recommended for Demo App)
+
+```bash
+# Open in Xcode
+open Package.swift
+```
+
+**Note for macOS Tahoe users:** The ChatDemo app requires proper app bundle configuration to enable TextField input. When running in Xcode:
+1. Select the `ChatDemo` scheme
+2. Edit Scheme → Run → Options
+3. Uncheck "Use the sandbox" (or run on a real iOS device where this isn't an issue)
+
+This is a known limitation of SPM executables on macOS 15.x. The `Info.plist` is included for future app bundle support.
 
 ---
 

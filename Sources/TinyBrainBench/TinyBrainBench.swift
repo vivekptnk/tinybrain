@@ -6,6 +6,7 @@ import ArgumentParser
 import Foundation
 import TinyBrainRuntime
 import TinyBrainMetal
+import Yams
 
 @main
 struct TinyBrainBench: AsyncParsableCommand {
@@ -33,7 +34,35 @@ struct TinyBrainBench: AsyncParsableCommand {
     @Flag(name: .long, help: "Run interactive chat mode")
     var chat: Bool = false
     
+    // TB-007 Phase 3: New benchmark harness features
+    @Option(name: .long, help: "Load YAML scenario file")
+    var scenario: String?
+    
+    @Option(name: .long, help: "Output format (json or markdown)")
+    var output: String?
+    
+    @Flag(name: .long, help: "Show device information")
+    var deviceInfo: Bool = false
+    
+    @Option(name: .long, help: "Number of warmup iterations")
+    var warmup: Int = 3
+    
+    @Flag(name: .long, help: "Dry run (parse scenario without execution)")
+    var dryRun: Bool = false
+    
     func run() async throws {
+        // TB-007 Phase 3: New features
+        if deviceInfo {
+            showDeviceInfo()
+            return
+        }
+        
+        if let scenarioPath = scenario {
+            try await runScenario(path: scenarioPath)
+            return
+        }
+        
+        // Existing features
         if chat {
             try await runInteractiveChat()
             return
@@ -45,7 +74,7 @@ struct TinyBrainBench: AsyncParsableCommand {
         }
         
         if demo {
-            try await runStreamingDemo()
+            try await runBenchmark()
             return
         }
         
@@ -421,11 +450,324 @@ struct TinyBrainBench: AsyncParsableCommand {
             print()
         }
     }
+    
+    // MARK: - TB-007 Phase 3: New Benchmark Features
+    
+    func showDeviceInfo() {
+        print("🔍 Device Information")
+        print("=" * 50)
+        print()
+        
+        // System info
+        let processInfo = ProcessInfo.processInfo
+        print("Device: \(processInfo.hostName)")
+        print("OS: \(processInfo.operatingSystemVersionString)")
+        print("CPU Count: \(processInfo.activeProcessorCount) cores")
+        print("Memory: \(String(format: "%.2f", Double(processInfo.physicalMemory) / (1024 * 1024 * 1024))) GB")
+        print()
+        
+        // Metal availability
+        if MetalBackend.isAvailable {
+            do {
+                let backend = try MetalBackend()
+                print("GPU: \(backend.deviceInfo)")
+                print("Metal: ✅ Available")
+            } catch {
+                print("Metal: ⚠️ Error initializing: \(error)")
+            }
+        } else {
+            print("Metal: ❌ Not available")
+        }
+        print()
+        
+        // Memory usage
+        let memoryMB = MemoryTracker.currentMemoryUsageMB()
+        print("Current Memory Usage: \(String(format: "%.2f", memoryMB)) MB")
+    }
+    
+    func runScenario(path: String) async throws {
+        print("📋 Loading scenario: \(path)")
+        print()
+        
+        guard FileManager.default.fileExists(atPath: path) else {
+            print("❌ Error: Scenario file not found: \(path)", to: &standardError)
+            throw ExitCode.failure
+        }
+        
+        let yamlString = try String(contentsOfFile: path, encoding: .utf8)
+        let decoder = YAMLDecoder()
+        let scenarioFile = try decoder.decode(ScenarioFile.self, from: yamlString)
+        
+        if dryRun {
+            print("✅ Scenario loaded: \(scenarioFile.scenarios.count) scenarios")
+            for (idx, scenario) in scenarioFile.scenarios.enumerated() {
+                print("  \(idx + 1). \(scenario.name)")
+                print("     Model: \(scenario.model)")
+                print("     Prompts: \(scenario.prompts.count)")
+            }
+            return
+        }
+        
+        // Run scenarios
+        var results: [BenchmarkResult] = []
+        
+        for scenario in scenarioFile.scenarios {
+            if verbose {
+                print("Running scenario: \(scenario.name)")
+            }
+            
+            let result = try await runSingleScenario(scenario)
+            results.append(result)
+            
+            if verbose {
+                print("  ✓ Complete")
+                print()
+            }
+        }
+        
+        // Output results
+        outputResults(results)
+    }
+    
+    func runSingleScenario(_ scenario: BenchmarkScenario) async throws -> BenchmarkResult {
+        // Create toy model (real models would be loaded here)
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+        
+        // Warmup
+        let actualWarmup = scenario.warmup ?? warmup
+        if verbose && actualWarmup > 0 {
+            print("  Warmup: \(actualWarmup) iterations...")
+        }
+        
+        for _ in 0..<actualWarmup {
+            let prompt = [1, 2, 3]
+            let config = GenerationConfig(maxTokens: 5, sampler: SamplerConfig(), stopTokens: [])
+            for try await _ in runner.generateStream(prompt: prompt, config: config) {
+                // Discard warmup tokens
+            }
+            runner.reset()
+        }
+        
+        // Actual benchmark
+        let memoryBefore = MemoryTracker.currentMemoryUsageMB()
+        var peakMemory = memoryBefore
+        var totalTokens = 0
+        let startTime = Date()
+        
+        for promptText in scenario.prompts {
+            // Simple tokenization (character-based for toy model)
+            let prompt = Array(promptText.prefix(10)).map { Int($0.unicodeScalars.first!.value) % 100 }
+            
+            let samplerConfig = SamplerConfig(
+                temperature: scenario.sampler?.temperature ?? 0.7,
+                topK: scenario.sampler?.topK,
+                topP: scenario.sampler?.topP,
+                repetitionPenalty: scenario.sampler?.repetitionPenalty ?? 1.0
+            )
+            
+            let genConfig = GenerationConfig(
+                maxTokens: scenario.maxTokens,
+                sampler: samplerConfig,
+                stopTokens: []
+            )
+            
+            for try await _ in runner.generateStream(prompt: prompt, config: genConfig) {
+                totalTokens += 1
+                
+                // Track peak memory
+                let currentMemory = MemoryTracker.currentMemoryUsageMB()
+                peakMemory = max(peakMemory, currentMemory)
+            }
+            
+            runner.reset()
+        }
+        
+        let elapsed = Date().timeIntervalSince(startTime)
+        
+        // Build result
+        let deviceInfo = BenchmarkResult.DeviceInfo(
+            name: ProcessInfo.processInfo.hostName,
+            os: ProcessInfo.processInfo.operatingSystemVersionString,
+            metalAvailable: MetalBackend.isAvailable
+        )
+        
+        let metrics = BenchmarkResult.Metrics(
+            tokensPerSec: Double(totalTokens) / elapsed,
+            msPerToken: (elapsed * 1000) / Double(totalTokens),
+            memoryPeakMB: peakMemory,
+            totalTokens: totalTokens,
+            elapsedSeconds: elapsed
+        )
+        
+        let dateFormatter = ISO8601DateFormatter()
+        
+        return BenchmarkResult(
+            device: deviceInfo,
+            scenario: scenario.name,
+            metrics: metrics,
+            timestamp: dateFormatter.string(from: Date())
+        )
+    }
+    
+    func runBenchmark() async throws {
+        // Unified benchmark for --demo flag with new output format support
+        if verbose {
+            print("🧠 Running benchmark...")
+            print()
+        }
+        
+        // Initialize Metal backend if available
+        if MetalBackend.isAvailable {
+            do {
+                TinyBrainBackend.metalBackend = try MetalBackend()
+                if verbose {
+                    print("🚀 Metal GPU initialized")
+                }
+            } catch {
+                if verbose {
+                    print("⚠️  Metal init failed, using CPU: \(error)")
+                }
+            }
+        }
+        
+        if verbose {
+            print()
+        }
+        
+        // Create toy model
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+        
+        // Warmup
+        if verbose {
+            print("Warmup: \(warmup) iterations...")
+        }
+        for _ in 0..<warmup {
+            let prompt = [1, 2, 3]
+            let config = GenerationConfig(maxTokens: 5, sampler: SamplerConfig(), stopTokens: [])
+            for try await _ in runner.generateStream(prompt: prompt, config: config) {}
+            runner.reset()
+        }
+        
+        // Benchmark run
+        let memoryBefore = MemoryTracker.currentMemoryUsageMB()
+        var peakMemory = memoryBefore
+        let prompt = [1, 2, 3, 4, 5]
+        let samplerConfig = SamplerConfig(temperature: 0.8, topK: 40, topP: 0.9, repetitionPenalty: 1.1)
+        let genConfig = GenerationConfig(maxTokens: tokens, sampler: samplerConfig, stopTokens: [])
+        
+        var tokenCount = 0
+        let startTime = Date()
+        
+        for try await _ in runner.generateStream(prompt: prompt, config: genConfig) {
+            tokenCount += 1
+            let currentMemory = MemoryTracker.currentMemoryUsageMB()
+            peakMemory = max(peakMemory, currentMemory)
+        }
+        
+        let elapsed = Date().timeIntervalSince(startTime)
+        
+        // Build result
+        let deviceInfo = BenchmarkResult.DeviceInfo(
+            name: ProcessInfo.processInfo.hostName,
+            os: ProcessInfo.processInfo.operatingSystemVersionString,
+            metalAvailable: MetalBackend.isAvailable
+        )
+        
+        let metrics = BenchmarkResult.Metrics(
+            tokensPerSec: Double(tokenCount) / elapsed,
+            msPerToken: (elapsed * 1000) / Double(tokenCount),
+            memoryPeakMB: peakMemory,
+            totalTokens: tokenCount,
+            elapsedSeconds: elapsed
+        )
+        
+        let dateFormatter = ISO8601DateFormatter()
+        let result = BenchmarkResult(
+            device: deviceInfo,
+            scenario: nil,
+            metrics: metrics,
+            timestamp: dateFormatter.string(from: Date())
+        )
+        
+        outputResults([result])
+    }
+    
+    func outputResults(_ results: [BenchmarkResult]) {
+        if output == "json" {
+            // JSON output
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            
+            if let jsonData = try? encoder.encode(results.first!),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                print(jsonString)
+            }
+        } else if output == "markdown" {
+            // Markdown table output
+            print("| Metric | Value |")
+            print("|--------|-------|")
+            
+            for result in results {
+                if let scenario = result.scenario {
+                    print("| Scenario | \(scenario) |")
+                }
+                print("| Device | \(result.device.name) |")
+                print("| Tokens/sec | \(String(format: "%.2f", result.metrics.tokensPerSec)) |")
+                print("| ms/token | \(String(format: "%.2f", result.metrics.msPerToken)) |")
+                print("| Peak Memory (MB) | \(String(format: "%.2f", result.metrics.memoryPeakMB)) |")
+                print("| Total Tokens | \(result.metrics.totalTokens) |")
+                print("| Elapsed (s) | \(String(format: "%.2f", result.metrics.elapsedSeconds)) |")
+            }
+        } else {
+            // Human-readable output (default)
+            for result in results {
+                if let scenario = result.scenario {
+                    print("📊 Scenario: \(scenario)")
+                }
+                print("📊 Benchmark Results")
+                print("=" * 50)
+                print("Device: \(result.device.name)")
+                print("Tokens generated: \(result.metrics.totalTokens)")
+                print("Time elapsed: \(String(format: "%.2f", result.metrics.elapsedSeconds))s")
+                print("Speed: \(String(format: "%.1f", result.metrics.tokensPerSec)) tokens/sec")
+                print("Latency: \(String(format: "%.1f", result.metrics.msPerToken)) ms/token")
+                print("Peak Memory: \(String(format: "%.2f", result.metrics.memoryPeakMB)) MB")
+                print()
+            }
+        }
+    }
 }
 
 extension String {
     static func *(lhs: String, rhs: Int) -> String {
         String(repeating: lhs, count: rhs)
+    }
+}
+
+var standardError = FileHandle.standardError
+
+extension FileHandle: TextOutputStream {
+    public func write(_ string: String) {
+        guard let data = string.data(using: .utf8) else { return }
+        self.write(data)
     }
 }
 

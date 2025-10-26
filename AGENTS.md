@@ -47,12 +47,19 @@
 - Benchmark harness (`tinybrain-bench`) should support scripted scenarios and run smoke tests in CI (reduced workloads) while full runs are manual/weekly.
 - Never merge failing CI; if CI lacks required device features, gate tests with availability checks and document the manual validation plan.
 
-## 8. Documentation & Developer Experience
+## 8. Development Workflows (TB-007)
+- **SPM Command Line:** Use `swift build`, `swift test`, and `make` commands for CI/CD, linting, testing, and library development.
+- **Xcode IDE:** Open `Package.swift` directly in Xcode (modern approach). Do NOT use deprecated `swift package generate-xcodeproj`.
+- **ChatDemo App:** Run in Xcode with sandbox disabled (Edit Scheme → Run → Options → Uncheck "Use the sandbox") to fix TextField input on macOS 15.x Tahoe. This is a known SPM executable limitation.
+- **Info.plist:** Included in `Examples/ChatDemo/Info.plist` for future app bundle support and proper CFBundleIdentifier configuration.
+- **iOS Development:** TextField works fine on iOS; macOS-specific workaround only needed for SPM executables on macOS 15.x.
+
+## 9. Documentation & Developer Experience
 - Keep `docs/overview.md`, DocC articles, and `README.md` current with architectural diagrams and setup instructions.
 - Every feature task must update docs: architecture narratives, troubleshooting, and API examples.
 - Surface telemetry/UX copy ("TinyBrain Chat", "Energy Overlay") consistently across UI and docs.
 
-## 9. Collaboration Protocol
+## 10. Collaboration Protocol
 - Reference TB task IDs in issues/PRs (e.g., "Implements TB-003").
 - Discuss major API or architecture changes in design docs before coding; store them under `docs/rfcs/`.
 - When blocked, document the issue in the task file and propose mitigation paths aligned with PRD risk table.

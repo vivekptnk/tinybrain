@@ -1,0 +1,57 @@
+# TinyBrain Benchmark Scenarios
+# TB-007 Phase 4: Baseline performance measurements
+
+scenarios:
+  - name: "TinyLlama INT8 - Short Prompt (10 tokens)"
+    model: "Models/tinyllama-1.1b-int8.tbf"
+    prompts:
+      - "Explain quantum physics"
+      - "Write a haiku about code"
+      - "What is machine learning?"
+    max_tokens: 10
+    backend: auto
+    warmup: 3
+    sampler:
+      temperature: 0.7
+      top_k: 40
+      top_p: 0.9
+
+  - name: "TinyLlama INT8 - Medium Prompt (50 tokens)"
+    model: "Models/tinyllama-1.1b-int8.tbf"
+    prompts:
+      - "Explain how neural networks work in detail"
+      - "Write a short story about a robot"
+    max_tokens: 50
+    backend: auto
+    warmup: 2
+    sampler:
+      temperature: 0.8
+      top_k: 50
+
+  - name: "TinyLlama INT8 - Long Prompt (100 tokens)"
+    model: "Models/tinyllama-1.1b-int8.tbf"
+    prompts:
+      - "Write a comprehensive guide to Swift programming"
+    max_tokens: 100
+    backend: auto
+    warmup: 1
+    sampler:
+      temperature: 0.9
+      top_p: 0.95
+
+  - name: "Toy Model - Smoke Test"
+    model: "toy"
+    prompts:
+      - "Test prompt"
+    max_tokens: 20
+    backend: cpu
+    warmup: 2
+
+  - name: "CPU vs Metal Comparison"
+    model: "toy"
+    prompts:
+      - "Benchmark test"
+    max_tokens: 30
+    backend: metal
+    warmup: 3
+

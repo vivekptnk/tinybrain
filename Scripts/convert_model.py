@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""
+PyTorch → TBF (TinyBrain Binary Format) Model Converter
+
+Converts PyTorch checkpoints to TinyBrain's optimized binary format with INT8 quantization.
+
+Usage:
+    python convert_model.py --input model.pt --output model.tbf --quantize int8
+
+References:
+    - docs/tbf-format-spec.md for format specification
+    - TB-007 Phase 2 implementation plan
+"""
+
+import argparse
+import struct
+import json
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass, asdict
+
+import numpy as np
+from tqdm import tqdm
+
+
+@dataclass
+class ModelConfig:
+    """Model architecture configuration"""
+    num_layers: int
+    hidden_dim: int
+    num_heads: int
+    vocab_size: int
+    intermediate_dim: int = None  # FFN intermediate size (default: 4 * hidden_dim)
+    max_seq_len: int = 2048
+    
+    def __post_init__(self):
+        if self.intermediate_dim is None:
+            self.intermediate_dim = 4 * self.hidden_dim
+
+
+@dataclass
+class TBFHeader:
+    """TBF file header structure"""
+    magic: bytes = b'TBFM'  # Magic bytes
+    version: int = 1
+    model_type: str = "llama"
+    config: Dict = None
+    
+    def to_bytes(self) -> bytes:
+        """Serialize header to bytes"""
+        # Magic bytes (4 bytes)
+        data = self.magic
+        
+        # Version (UInt32, little-endian)
+        data += struct.pack('<I', self.version)
+        
+        # Model type length + string
+        model_type_bytes = self.model_type.encode('utf-8')
+        data += struct.pack('<I', len(model_type_bytes))
+        data += model_type_bytes
+        
+        # Config JSON
+        config_json = json.dumps(self.config if self.config else {}).encode('utf-8')
+        data += struct.pack('<I', len(config_json))
+        data += config_json
+        
+        return data
+
+
+def load_pytorch_checkpoint(checkpoint_path: str) -> Dict:
+    """
+    Load PyTorch checkpoint and extract state_dict
+    
+    Args:
+        checkpoint_path: Path to .pt or .safetensors file
+    
+    Returns:
+        state_dict: Dictionary of weight tensors
+    """
+    try:
+        import torch
+    except ImportError:
+        print("Error: PyTorch not installed. Run: pip install torch", file=sys.stderr)
+        sys.exit(1)
+    
+    checkpoint_path = Path(checkpoint_path)
+    
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    print(f"Loading checkpoint: {checkpoint_path}")
+    
+    if checkpoint_path.suffix == '.safetensors':
+        try:
+            from safetensors import safe_open
+            
+            state_dict = {}
+            with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    state_dict[key] = f.get_tensor(key)
+            
+            return state_dict
+        except ImportError:
+            print("Error: safetensors not installed. Run: pip install safetensors", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Standard PyTorch checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict):
+            if 'model_state_dict' in checkpoint:
+                return checkpoint['model_state_dict']
+            elif 'state_dict' in checkpoint:
+                return checkpoint['state_dict']
+            elif 'model' in checkpoint:
+                return checkpoint['model']
+            else:
+                # Assume the checkpoint itself is the state_dict
+                return checkpoint
+        else:
+            raise ValueError(f"Unknown checkpoint format: {type(checkpoint)}")
+
+
+def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
+    """
+    Extract and organize weights from PyTorch state_dict
+    
+    Args:
+        state_dict: Raw state dict from checkpoint
+        config: Model configuration
+    
+    Returns:
+        Organized weights dictionary
+    """
+    print("Extracting weights...")
+    
+    def to_numpy(tensor) -> np.ndarray:
+        """Convert PyTorch tensor to numpy"""
+        if hasattr(tensor, 'detach'):
+            # Convert BFloat16 to Float32 first (numpy doesn't support bf16)
+            if hasattr(tensor, 'dtype') and 'bfloat16' in str(tensor.dtype):
+                tensor = tensor.float()
+            return tensor.detach().cpu().numpy()
+        return np.array(tensor)
+    
+    # Helper to find key in state_dict (handles different naming conventions)
+    def find_key(patterns: List[str]) -> Optional[str]:
+        for pattern in patterns:
+            for key in state_dict.keys():
+                if pattern in key:
+                    return key
+        return None
+    
+    weights = {}
+    
+    # 1. Extract embeddings
+    embed_key = find_key(['embed_tokens.weight', 'tok_embeddings.weight', 'embeddings.weight'])
+    if embed_key:
+        weights['embeddings'] = to_numpy(state_dict[embed_key])
+        print(f"  ✓ Embeddings: {weights['embeddings'].shape}")
+    else:
+        raise ValueError("Could not find embedding weights")
+    
+    # 2. Extract transformer layers
+    weights['layers'] = []
+    for layer_idx in range(config.num_layers):
+        layer_weights = {}
+        
+        # Attention projections
+        for proj in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
+            key = find_key([
+                f'layers.{layer_idx}.self_attn.{proj}.weight',
+                f'layers.{layer_idx}.attention.{proj}.weight',
+                f'h.{layer_idx}.attn.{proj}.weight',
+            ])
+            if key:
+                layer_weights[proj] = to_numpy(state_dict[key])
+        
+        # MLP projections
+        for proj in ['gate_proj', 'up_proj', 'down_proj']:
+            key = find_key([
+                f'layers.{layer_idx}.mlp.{proj}.weight',
+                f'layers.{layer_idx}.feed_forward.{proj}.weight',
+                f'h.{layer_idx}.mlp.{proj}.weight',
+            ])
+            if key:
+                layer_weights[proj] = to_numpy(state_dict[key])
+        
+        # Handle merged gate+up projection (some models combine these)
+        if 'gate_proj' not in layer_weights and 'up_proj' not in layer_weights:
+            key = find_key([f'layers.{layer_idx}.mlp.fc1.weight'])
+            if key:
+                # Split into gate and up
+                full_weight = to_numpy(state_dict[key])
+                mid = full_weight.shape[0] // 2
+                layer_weights['gate_proj'] = full_weight[:mid]
+                layer_weights['up_proj'] = full_weight[mid:]
+        
+        # Layer norms
+        for norm in ['input_layernorm', 'post_attention_layernorm']:
+            key = find_key([
+                f'layers.{layer_idx}.{norm}.weight',
+                f'h.{layer_idx}.ln_{1 if "input" in norm else 2}.weight',
+            ])
+            if key:
+                layer_weights[norm] = to_numpy(state_dict[key])
+        
+        weights['layers'].append(layer_weights)
+        print(f"  ✓ Layer {layer_idx}: {len(layer_weights)} weight tensors")
+    
+    # 3. Extract LM head
+    lm_head_key = find_key(['lm_head.weight', 'output.weight', 'head.weight'])
+    if lm_head_key:
+        weights['lm_head'] = to_numpy(state_dict[lm_head_key])
+        print(f"  ✓ LM Head: {weights['lm_head'].shape}")
+    else:
+        # Some models tie embeddings and LM head
+        print("  ⚠ LM head not found, using tied embeddings")
+        weights['lm_head'] = weights['embeddings'].copy()
+    
+    return weights
+
+
+def quantize_int8_per_channel(tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Quantize tensor to INT8 with per-channel symmetric quantization
+    
+    Args:
+        tensor: Float32 tensor of shape [out_channels, in_channels] or [dim]
+    
+    Returns:
+        quantized: INT8 tensor
+        scales: Per-channel scale factors (float32)
+        zero_points: Per-channel zero points (int8, all zeros for symmetric)
+    """
+    # Handle 1D tensors (layer norms, biases)
+    if tensor.ndim == 1:
+        max_val = np.abs(tensor).max()
+        scale = max_val / 127.0  # INT8 range: -127 to 127
+        
+        quantized = np.round(tensor / scale).astype(np.int8)
+        return quantized, np.array([scale], dtype=np.float32), np.array([0], dtype=np.int8)
+    
+    # 2D tensors: per-channel (per output channel)
+    num_channels = tensor.shape[0]
+    scales = np.zeros(num_channels, dtype=np.float32)
+    quantized = np.zeros_like(tensor, dtype=np.int8)
+    
+    for ch in range(num_channels):
+        max_val = np.abs(tensor[ch]).max()
+        scale = max_val / 127.0 if max_val > 0 else 1.0
+        scales[ch] = scale
+        quantized[ch] = np.round(tensor[ch] / scale).astype(np.int8)
+    
+    zero_points = np.zeros(num_channels, dtype=np.int8)  # Symmetric quantization
+    
+    return quantized, scales, zero_points
+
+
+def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str, quantize: bool = True):
+    """
+    Write weights to TBF binary format
+    
+    Args:
+        weights: Extracted and organized weights
+        config: Model configuration
+        output_path: Output .tbf file path
+        quantize: Whether to quantize to INT8
+    """
+    output_path = Path(output_path)
+    print(f"\nWriting TBF format to: {output_path}")
+    
+    # Create header
+    header = TBFHeader(
+        version=1,
+        model_type="llama",
+        config=asdict(config),
+    )
+    
+    with open(output_path, 'wb') as f:
+        # 1. Write header
+        header_bytes = header.to_bytes()
+        f.write(header_bytes)
+        print(f"  ✓ Header: {len(header_bytes)} bytes")
+        
+        # 2. Write quantization metadata
+        quant_mode = b'int8' if quantize else b'fp32'
+        f.write(struct.pack('<I', len(quant_mode)))
+        f.write(quant_mode)
+        
+        # 3. Write weights with progress bar
+        total_tensors = 1 + len(weights['layers']) * 8 + 1  # embeddings + layers + lm_head
+        pbar = tqdm(total=total_tensors, desc="Writing tensors")
+        
+        # Helper to write tensor
+        def write_tensor(name: str, tensor: np.ndarray):
+            if quantize and tensor.dtype != np.int8:
+                q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
+                
+                # Write quantized data
+                f.write(struct.pack('<I', len(q_tensor.tobytes())))
+                f.write(q_tensor.tobytes())
+                
+                # Write scales
+                f.write(struct.pack('<I', len(scales.tobytes())))
+                f.write(scales.tobytes())
+                
+                # Write shape
+                f.write(struct.pack('<I', len(q_tensor.shape)))
+                for dim in q_tensor.shape:
+                    f.write(struct.pack('<I', dim))
+            else:
+                # Write float32 data
+                tensor_bytes = tensor.astype(np.float32).tobytes()
+                f.write(struct.pack('<I', len(tensor_bytes)))
+                f.write(tensor_bytes)
+                
+                # Write shape
+                f.write(struct.pack('<I', len(tensor.shape)))
+                for dim in tensor.shape:
+                    f.write(struct.pack('<I', dim))
+            
+            pbar.update(1)
+        
+        # Embeddings
+        write_tensor('embeddings', weights['embeddings'])
+        
+        # Layers
+        for layer_idx, layer in enumerate(weights['layers']):
+            for key in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 
+                       'gate_proj', 'down_proj',
+                       'input_layernorm', 'post_attention_layernorm']:
+                if key in layer:
+                    write_tensor(f'layer_{layer_idx}_{key}', layer[key])
+        
+        # LM head
+        write_tensor('lm_head', weights['lm_head'])
+        
+        pbar.close()
+    
+    file_size_mb = output_path.stat().st_size / (1024 * 1024)
+    print(f"\n✅ Conversion complete! Output: {output_path} ({file_size_mb:.2f} MB)")
+
+
+def infer_config_from_weights(state_dict: Dict) -> ModelConfig:
+    """
+    Attempt to infer model configuration from weight shapes
+    """
+    # Find embedding weight to get vocab size and hidden dim
+    embed_key = None
+    for key in state_dict.keys():
+        if 'embed' in key and 'weight' in key:
+            embed_key = key
+            break
+    
+    if embed_key is None:
+        raise ValueError("Could not find embedding weights to infer config")
+    
+    embed_shape = state_dict[embed_key].shape
+    vocab_size, hidden_dim = embed_shape
+    
+    # Count number of layers
+    num_layers = 0
+    while True:
+        if any(f'layers.{num_layers}.' in key or f'h.{num_layers}.' in key for key in state_dict.keys()):
+            num_layers += 1
+        else:
+            break
+    
+    # Get num_heads from attention projection shapes
+    # hidden_dim = num_heads * head_dim
+    # Typical head_dim: 64 or 128
+    num_heads = 8  # Default guess
+    if hidden_dim % 128 == 0:
+        num_heads = hidden_dim // 128
+    elif hidden_dim % 64 == 0:
+        num_heads = hidden_dim // 64
+    
+    # Get intermediate_dim from MLP
+    intermediate_dim = 4 * hidden_dim  # Default
+    for key in state_dict.keys():
+        if 'mlp' in key and ('gate_proj' in key or 'up_proj' in key or 'fc1' in key):
+            if len(state_dict[key].shape) == 2:
+                intermediate_dim = state_dict[key].shape[0]
+                break
+    
+    print("\nInferred configuration:")
+    print(f"  Vocab size: {vocab_size}")
+    print(f"  Hidden dim: {hidden_dim}")
+    print(f"  Num layers: {num_layers}")
+    print(f"  Num heads: {num_heads}")
+    print(f"  Intermediate dim: {intermediate_dim}")
+    
+    return ModelConfig(
+        num_layers=num_layers,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        vocab_size=vocab_size,
+        intermediate_dim=intermediate_dim,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert PyTorch checkpoints to TinyBrain Binary Format (TBF)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Convert with INT8 quantization
+  python convert_model.py --input tinyllama.pt --output tinyllama-int8.tbf --quantize int8
+  
+  # Convert without quantization (FP32)
+  python convert_model.py --input model.pt --output model.tbf --quantize none
+  
+  # Auto-infer configuration
+  python convert_model.py --input model.pt --output model.tbf --auto-config
+        """
+    )
+    
+    parser.add_argument('--input', '-i', required=True, help='Input PyTorch checkpoint (.pt or .safetensors)')
+    parser.add_argument('--output', '-o', required=True, help='Output TBF file path')
+    parser.add_argument('--quantize', choices=['int8', 'none'], default='int8', help='Quantization mode')
+    parser.add_argument('--auto-config', action='store_true', help='Auto-infer model config from weights')
+    
+    # Manual config overrides
+    parser.add_argument('--num-layers', type=int, help='Number of transformer layers')
+    parser.add_argument('--hidden-dim', type=int, help='Hidden dimension size')
+    parser.add_argument('--num-heads', type=int, help='Number of attention heads')
+    parser.add_argument('--vocab-size', type=int, help='Vocabulary size')
+    
+    args = parser.parse_args()
+    
+    # Load checkpoint
+    state_dict = load_pytorch_checkpoint(args.input)
+    
+    # Determine config
+    if args.auto_config or not all([args.num_layers, args.hidden_dim, args.num_heads, args.vocab_size]):
+        config = infer_config_from_weights(state_dict)
+    else:
+        config = ModelConfig(
+            num_layers=args.num_layers,
+            hidden_dim=args.hidden_dim,
+            num_heads=args.num_heads,
+            vocab_size=args.vocab_size,
+        )
+    
+    # Extract weights
+    weights = extract_weights(state_dict, config)
+    
+    # Write TBF format
+    quantize = (args.quantize == 'int8')
+    write_tbf_format(weights, config, args.output, quantize=quantize)
+
+
+if __name__ == '__main__':
+    main()
+

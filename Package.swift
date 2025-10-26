@@ -45,7 +45,9 @@ let package = Package(
     ],
     dependencies: [
         // Swift Argument Parser for CLI tools
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0")
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
+        // YAML parsing for benchmark scenarios
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
     ],
     targets: [
         // MARK: - Umbrella Module
@@ -114,6 +116,11 @@ let package = Package(
             ],
             path: "Sources/TinyBrainDemo"
         ),
+        .testTarget(
+            name: "TinyBrainDemoTests",
+            dependencies: ["TinyBrainDemo"],
+            path: "Tests/TinyBrainDemoTests"
+        ),
         
         // MARK: - Chat Demo Executable
         .executableTarget(
@@ -129,9 +136,18 @@ let package = Package(
                 "TinyBrainRuntime",
                 "TinyBrainMetal",
                 "TinyBrainTokenizer",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Yams", package: "Yams")
             ],
             path: "Sources/TinyBrainBench"
+        ),
+        .testTarget(
+            name: "TinyBrainBenchTests",
+            dependencies: ["TinyBrainBench"],
+            path: "Tests/TinyBrainBenchTests",
+            resources: [
+                .process("Fixtures")
+            ]
         )
     ]
 )
