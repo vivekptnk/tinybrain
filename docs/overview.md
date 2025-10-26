@@ -1,10 +1,10 @@
 # TinyBrain Architecture Overview
 
 **Version:** 2.0  
-**Last Updated:** 2025-10-25 (TB-004 Complete)  
+**Last Updated:** 2025-10-26 (TB-005 Complete)  
 **Status:** Living Document
 
-**Latest Milestone:** TB-004 Complete - INT8 Quantization, KV Cache, Streaming API
+**Latest Milestone:** TB-005 Complete - Tokenizer, Sampler, Enhanced Streaming
 
 ---
 

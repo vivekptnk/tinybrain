@@ -392,7 +392,7 @@ extension Tensor where Element == Float {
         if let metalBackend = TinyBrainBackend.metalBackend as? QuantizedMatMulBackend {
             do {
                 // Use fused INT8 dequant+matmul kernel (THE REAL FIX!)
-                print("🔥 Using INT8 Metal kernel (no Float32 materialization!)")
+                TinyBrainBackend.log("🔥 Using INT8 Metal kernel (no Float32 materialization!)")
                 return try metalBackend.matmulQuantized(self, quantized)
             } catch {
                 // Metal failed, fall back to CPU
@@ -400,11 +400,11 @@ extension Tensor where Element == Float {
                 TinyBrainBackend.log("INT8 kernel failed: \(error), falling back to dequant+CPU")
             }
         } else {
-            print("⚠️ No QuantizedMatMulBackend available, falling back to CPU")
+            TinyBrainBackend.log("⚠️ No QuantizedMatMulBackend available, falling back to CPU")
         }
         
         // Fallback: Dequantize then CPU matmul
-        print("📉 Falling back to dequant+CPU matmul")
+        TinyBrainBackend.log("📉 Falling back to dequant+CPU matmul")
         let weights = quantized.dequantize()
         return self.matmulCPU(weights)
     }

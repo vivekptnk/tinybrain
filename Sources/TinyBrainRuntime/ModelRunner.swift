@@ -21,6 +21,7 @@
 /// **Result:** O(n) instead of O(n²) complexity!
 
 import Foundation
+import Combine
 
 /// Configuration for model inference
 public struct ModelConfig: Codable {
@@ -175,36 +176,43 @@ public final class ModelRunner {
                     // Step 1: Forward pass to get logits
                     let logits = self.step(tokenId: currentToken)
                     
-                    // Step 2: Sample next token using configured sampler
-                    // **REVIEW HITLER FIX:** Pass config as inout to maintain RNG state
-                    let nextToken = Sampler.sample(
+                    // Step 2: Sample next token using detailed sampler (correct probability & entropy)
+                    let detailed = Sampler.sampleDetailed(
                         logits: logits,
                         config: &mutableConfig.sampler,
                         history: history
                     )
                     
-                    // Step 3: Get probability for telemetry
-                    let probs = logits.softmax()
-                    let probability = probs.data[nextToken]
+                    // Step 3: Create output with metadata
+                    let strategySummary: String? = {
+                        var parts: [String] = []
+                        parts.append(String(format: "temp=%.2f", mutableConfig.sampler.temperature))
+                        if let k = mutableConfig.sampler.topK { parts.append("topK=\(k)") }
+                        if let p = mutableConfig.sampler.topP { parts.append(String(format: "topP=%.2f", p)) }
+                        if mutableConfig.sampler.repetitionPenalty != 1.0 { parts.append(String(format: "penalty=%.2f", mutableConfig.sampler.repetitionPenalty)) }
+                        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+                    }()
                     
-                    // Step 4: Create output with metadata
                     let output = TokenOutput(
-                        tokenId: nextToken,
-                        probability: probability,
-                        timestamp: Date()
+                        tokenId: detailed.tokenId,
+                        probability: detailed.probability,
+                        entropy: detailed.entropy,
+                        timestamp: Date(),
+                        strategy: strategySummary,
+                        energyJoules: nil
                     )
                     
                     // Step 5: Yield token to consumer
                     continuation.yield(output)
                     
                     // Step 6: Check for stop tokens
-                    if mutableConfig.stopTokens.contains(nextToken) {
+                    if mutableConfig.stopTokens.contains(detailed.tokenId) {
                         break
                     }
                     
                     // Step 7: Update state for next iteration
-                    currentToken = nextToken
-                    history.append(nextToken)
+                    currentToken = detailed.tokenId
+                    history.append(detailed.tokenId)
                     generated += 1
                 }
                 
@@ -231,6 +239,28 @@ public final class ModelRunner {
                 continuation.finish()
             }
         }
+    }
+    
+    /// Combine publisher wrapper for `generateStream` for UI pipelines
+    ///
+    /// Bridges the AsyncThrowingStream into a `AnyPublisher<TokenOutput, Error>`.
+    public func generatePublisher(
+        prompt: [Int],
+        config: GenerationConfig = GenerationConfig()
+    ) -> AnyPublisher<TokenOutput, Error> {
+        let subject = PassthroughSubject<TokenOutput, Error>()
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                for try await output in self.generateStream(prompt: prompt, config: config) {
+                    subject.send(output)
+                }
+                subject.send(completion: .finished)
+            } catch {
+                subject.send(completion: .failure(error))
+            }
+        }
+        return subject.eraseToAnyPublisher()
     }
 }
 

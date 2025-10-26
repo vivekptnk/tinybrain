@@ -6,11 +6,120 @@
 import SwiftUI
 import TinyBrainDemo
 
+#if os(macOS)
+import AppKit
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Ensure the app activates properly
+        NSApp.activate(ignoringOtherApps: true)
+        
+        // Make sure the first window becomes key
+        if let window = NSApp.windows.first {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+}
+
+// Native NSTextField wrapper for reliable input on macOS
+struct MacTextField: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+    var onCommit: () -> Void
+    var isDisabled: Bool = false
+    
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField()
+        textField.placeholderString = placeholder
+        textField.delegate = context.coordinator
+        textField.isBordered = true
+        textField.bezelStyle = .roundedBezel
+        textField.focusRingType = .default
+        
+        // CRITICAL: Enable text input
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.allowsEditingTextAttributes = false
+        textField.importsGraphics = false
+        
+        // Force focus on next run loop
+        DispatchQueue.main.async {
+            textField.window?.makeFirstResponder(textField)
+            // Force the field to become active
+            textField.currentEditor()?.selectedRange = NSRange(location: 0, length: 0)
+        }
+        
+        return textField
+    }
+    
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        nsView.stringValue = text
+        nsView.isEditable = !isDisabled
+        nsView.isEnabled = !isDisabled
+        
+        // Try to grab focus if we're not disabled and text changed from outside
+        if context.coordinator.shouldAutoFocus && !isDisabled {
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+            }
+            context.coordinator.shouldAutoFocus = false
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onCommit: onCommit)
+    }
+    
+    class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding var text: String
+        var onCommit: () -> Void
+        var shouldAutoFocus = true
+        
+        init(text: Binding<String>, onCommit: @escaping () -> Void) {
+            _text = text
+            self.onCommit = onCommit
+        }
+        
+        func controlTextDidChange(_ obj: Notification) {
+            if let textField = obj.object as? NSTextField {
+                text = textField.stringValue
+            }
+        }
+        
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                onCommit()
+                return true
+            }
+            return false
+        }
+    }
+}
+#endif
+
 @main
 struct ChatDemoApp: App {
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    #endif
+    
     var body: some Scene {
         WindowGroup {
             ChatView()
+        }
+        #if os(macOS)
+        .defaultSize(width: 600, height: 500)
+        #endif
+        .commands {
+            // Enable standard text editing commands
+            CommandGroup(replacing: .textEditing) {
+                Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("x", modifiers: .command)
+                Button("Copy") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("c", modifiers: .command)
+                Button("Paste") { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("v", modifiers: .command)
+            }
         }
     }
 }
@@ -116,10 +225,34 @@ struct ChatView: View {
             
             // Input area
             HStack(alignment: .bottom, spacing: 12) {
-                TextField("Enter your prompt...", text: $viewModel.promptText, axis: .vertical)
+                #if os(macOS)
+                MacTextField(
+                    text: $viewModel.promptText,
+                    placeholder: "Enter your prompt...",
+                    onCommit: {
+                        Task {
+                            await viewModel.generate()
+                        }
+                    },
+                    isDisabled: viewModel.isGenerating
+                )
+                .frame(minHeight: 28)  // Ensure visible height
+                .background(Color.white)  // Debug: make sure field is visible
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.blue, lineWidth: 2)  // Debug: visible border
+                )
+                #else
+                TextField("Enter your prompt...", text: $viewModel.promptText)
                     .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...5)
                     .disabled(viewModel.isGenerating)
+                    .onSubmit {
+                        Task {
+                            await viewModel.generate()
+                        }
+                    }
+                #endif
                 
                 Button(action: {
                     Task {
@@ -130,6 +263,7 @@ struct ChatView: View {
                         .font(.title2)
                 }
                 .disabled(viewModel.promptText.isEmpty || viewModel.isGenerating)
+                .keyboardShortcut(.return, modifiers: .command)
             }
             .padding()
             .background(.background)
@@ -138,7 +272,8 @@ struct ChatView: View {
     }
 }
 
-#Preview {
-    ChatView()
-}
+// Preview disabled for command-line builds
+// #Preview {
+//     ChatView()
+// }
 

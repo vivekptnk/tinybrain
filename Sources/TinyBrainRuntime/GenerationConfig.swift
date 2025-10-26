@@ -120,6 +120,12 @@ public struct TokenOutput {
     /// For greedy, this will be the max probability.
     public let probability: Float
     
+    /// Shannon entropy (nats) of the final sampling distribution
+    ///
+    /// Higher entropy indicates a flatter, more uncertain distribution.
+    /// Lower entropy indicates a peaked, confident distribution.
+    public let entropy: Float
+    
     /// When this token was generated
     ///
     /// **Uses:**
@@ -128,16 +134,33 @@ public struct TokenOutput {
     /// - Performance debugging: Identify bottlenecks
     public let timestamp: Date
     
+    /// Optional summary of the sampling strategy used for this token
+    /// Example: "temp=0.7, topK=40, penalty=1.2"
+    public let strategy: String?
+    
+    /// Optional energy sample for this token (Joules), if available
+    public let energyJoules: Double?
+    
     /// Initialize token output
     ///
     /// - Parameters:
     ///   - tokenId: Generated token ID
     ///   - probability: Confidence/probability (0.0-1.0)
     ///   - timestamp: Generation timestamp (default: now)
-    public init(tokenId: Int, probability: Float, timestamp: Date = Date()) {
+    public init(
+        tokenId: Int,
+        probability: Float,
+        entropy: Float = 0.0,
+        timestamp: Date = Date(),
+        strategy: String? = nil,
+        energyJoules: Double? = nil
+    ) {
         self.tokenId = tokenId
         self.probability = probability
+        self.entropy = entropy
         self.timestamp = timestamp
+        self.strategy = strategy
+        self.energyJoules = energyJoules
     }
 }
 

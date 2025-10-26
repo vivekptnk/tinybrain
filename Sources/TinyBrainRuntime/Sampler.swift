@@ -43,7 +43,6 @@ import Foundation
 /// )
 /// ```
 ///
-/// **REVIEW HITLER FIX:** Now manages RNG state for deterministic sequences
 public struct SamplerConfig {
     /// Temperature scaling (higher = more random)
     ///
@@ -79,7 +78,6 @@ public struct SamplerConfig {
     /// - nil: Non-deterministic
     /// - 42: Reproducible results
     ///
-    /// **REVIEW HITLER FIX:** RNG state persists across calls for deterministic sequences
     public var seed: UInt64? = nil
     
     /// Internal RNG state (managed automatically)
@@ -212,7 +210,6 @@ public struct Sampler {
             return temperature(logits: logits, temp: temp, rng: &rng)
         }
         
-        // **REVIEW HITLER FIX:** Keep EXACTLY K tokens (not threshold-based)
         // Sort and take top K indices (handles ties correctly)
         let sorted = logits.data.enumerated().sorted { $0.element > $1.element }
         let topKIndices = Set(sorted.prefix(k).map { $0.offset })
@@ -308,8 +305,6 @@ public struct Sampler {
     /// 3. Apply temperature scaling
     /// 4. Sample from resulting distribution
     ///
-    /// **REVIEW HITLER FIX:** Config is inout to maintain RNG state
-    ///
     /// - Parameters:
     ///   - logits: Model output logits
     ///   - config: Sampling configuration (inout for RNG state)
@@ -320,31 +315,9 @@ public struct Sampler {
         config: inout SamplerConfig,
         history: [Int]
     ) -> Int {
-        var adjustedData = logits.data
-        
-        // Step 1: Apply repetition penalty
-        if config.repetitionPenalty != 1.0 && !history.isEmpty {
-            for tokenId in history {
-                if tokenId >= 0 && tokenId < adjustedData.count {
-                    adjustedData[tokenId] /= config.repetitionPenalty
-                }
-            }
-        }
-        
-        let adjustedLogits = Tensor<Float>(shape: logits.shape, data: adjustedData)
-        
-        // Step 2 & 3: Apply filtering + temperature (with RNG state)
-        // Extract RNG to local var to pass as inout
-        var rng = config.rng
-        defer { config.rng = rng }  // Write back
-        
-        if let k = config.topK {
-            return topK(logits: adjustedLogits, k: k, temp: config.temperature, rng: &rng)
-        } else if let p = config.topP {
-            return topP(logits: adjustedLogits, p: p, temp: config.temperature, rng: &rng)
-        } else {
-            return temperature(logits: adjustedLogits, temp: config.temperature, rng: &rng)
-        }
+        // Use detailed sampler to maintain one source of truth
+        let result = sampleDetailed(logits: logits, config: &config, history: history)
+        return result.tokenId
     }
     
     // MARK: - Helper Functions
@@ -360,8 +333,6 @@ public struct Sampler {
     /// → Sample index 1 (0.5 < 0.65 <= 0.8)
     /// ```
     ///
-    /// **REVIEW HITLER FIX:** Mutates RNG to produce different values in sequence
-    ///
     /// - Parameters:
     ///   - probs: Probability distribution (should sum to ~1.0)
     ///   - rng: Inout RNG for stateful deterministic sampling
@@ -369,7 +340,6 @@ public struct Sampler {
     private static func sampleFromDistribution(_ probs: [Float], rng: inout SeededRandomGenerator?) -> Int {
         let threshold: Float
         if rng != nil {
-            // **REVIEW HITLER FIX:** Mutate RNG state to get next value in sequence
             threshold = Float(rng!.next()) / Float(UInt64.max)
         } else {
             threshold = Float.random(in: 0..<1)
@@ -396,7 +366,6 @@ public struct Sampler {
 /// **Educational:** Linear Congruential Generator (LCG)
 /// Not cryptographically secure, but good enough for reproducible sampling.
 ///
-/// **REVIEW HITLER FIX:** Now public so it can be stored in SamplerConfig
 public struct SeededRandomGenerator {
     internal var state: UInt64
     
@@ -408,6 +377,99 @@ public struct SeededRandomGenerator {
         // LCG parameters (from Numerical Recipes)
         state = state &* 6364136223846793005 &+ 1442695040888963407
         return state
+    }
+}
+
+// MARK: - Detailed Sampling API
+
+/// Result of a detailed sampling step
+public struct SamplerResult {
+    /// Selected token ID
+    public let tokenId: Int
+    /// Probability of selected token under the final sampling distribution
+    public let probability: Float
+    /// Shannon entropy (nats) of the final sampling distribution
+    public let entropy: Float
+}
+
+extension Sampler {
+    /// Detailed sampling that returns token, probability, and entropy
+    ///
+    /// This method applies repetition penalty, optional top-k/top-p filtering,
+    /// temperature scaling, then samples from the resulting softmax distribution.
+    /// It maintains RNG state via `SamplerConfig` for deterministic sequences.
+    public static func sampleDetailed(
+        logits: Tensor<Float>,
+        config: inout SamplerConfig,
+        history: [Int]
+    ) -> SamplerResult {
+        // Step 1: Apply repetition penalty (sign-aware, per docs)
+        var adjustedData = logits.data
+        if config.repetitionPenalty != 1.0 && !history.isEmpty {
+            let penalty = config.repetitionPenalty
+            for tokenId in history {
+                if tokenId >= 0 && tokenId < adjustedData.count {
+                    if adjustedData[tokenId] > 0 {
+                        adjustedData[tokenId] /= penalty
+                    } else {
+                        adjustedData[tokenId] *= penalty
+                    }
+                }
+            }
+        }
+        var workingLogits = Tensor<Float>(shape: logits.shape, data: adjustedData)
+
+        // Extract RNG to local var to pass as inout and persist back
+        var rng = config.rng
+        defer { config.rng = rng }
+
+        // Step 2: Apply top-k or top-p filtering if configured
+        if let k = config.topK {
+            // Filter to top-K by setting others to -inf
+            let sorted = workingLogits.data.enumerated().sorted { $0.element > $1.element }
+            let keep = Set(sorted.prefix(max(0, k)).map { $0.offset })
+            var filtered = workingLogits.data
+            for i in 0..<filtered.count { if !keep.contains(i) { filtered[i] = -Float.infinity } }
+            workingLogits = Tensor<Float>(shape: workingLogits.shape, data: filtered)
+        } else if let p = config.topP {
+            // Convert to probabilities to compute nucleus, then zero out others
+            let probs = workingLogits.softmax().data
+            let sorted = probs.enumerated().sorted { $0.element > $1.element }
+            var cumulative: Float = 0
+            var cutoff = sorted.count
+            for (i, (_, prob)) in sorted.enumerated() {
+                cumulative += prob
+                if cumulative >= p { cutoff = i + 1; break }
+            }
+            let keep = Set(sorted.prefix(cutoff).map { $0.offset })
+            var filtered = workingLogits.data
+            for i in 0..<filtered.count { if !keep.contains(i) { filtered[i] = -Float.infinity } }
+            workingLogits = Tensor<Float>(shape: workingLogits.shape, data: filtered)
+        }
+
+        // Step 3: Temperature scaling
+        let temperature = max(0, config.temperature)
+        let scaledData: [Float]
+        if temperature < 0.01 {
+            // Near-greedy
+            scaledData = workingLogits.data
+        } else {
+            scaledData = workingLogits.data.map { $0 / temperature }
+        }
+        let scaledLogits = Tensor<Float>(shape: workingLogits.shape, data: scaledData)
+
+        // Step 4: Compute final probabilities and entropy
+        let finalProbs = scaledLogits.softmax().data
+        var entropy: Float = 0
+        for p in finalProbs where p > 0 {
+            entropy -= p * log(p)
+        }
+
+        // Step 5: Sample token from final distribution
+        let tokenId = sampleFromDistribution(finalProbs, rng: &rng)
+        let probability = finalProbs[tokenId]
+
+        return SamplerResult(tokenId: tokenId, probability: probability, entropy: entropy)
     }
 }
 

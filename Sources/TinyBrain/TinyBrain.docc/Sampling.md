@@ -275,7 +275,7 @@ For each token t in history:
 ```
 
 **Why the sign check?**
-Negative logits mean "very unlikely" - multiplying makes them even more negative (stronger penalty).
+Negative logits mean "very unlikely" - multiplying makes them even more negative (stronger penalty). This matches the implementation.
 
 ## Topics
 
