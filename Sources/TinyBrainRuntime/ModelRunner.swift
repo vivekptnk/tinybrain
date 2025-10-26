@@ -23,7 +23,7 @@
 import Foundation
 
 /// Configuration for model inference
-public struct ModelConfig {
+public struct ModelConfig: Codable {
     /// Number of transformer layers
     public let numLayers: Int
     
@@ -127,36 +127,80 @@ public final class ModelRunner {
     
     /// Generate stream of tokens using AsyncSequence
     ///
-    /// **TB-004:** SwiftUI-friendly streaming API
+    /// **TB-005:** Production-ready streaming with rich configuration
     ///
     /// Example:
     /// ```swift
-    /// for try await tokenId in runner.generateStream(prompt: [1, 2, 3]) {
-    ///     print(tokenId, terminator: " ")
+    /// let config = GenerationConfig(
+    ///     maxTokens: 100,
+    ///     sampler: SamplerConfig(temperature: 0.7, topK: 40),
+    ///     stopTokens: [eosToken]
+    /// )
+    ///
+    /// for try await output in runner.generateStream(prompt: [1, 2, 3], config: config) {
+    ///     print("Token: \(output.tokenId), Prob: \(output.probability)")
     /// }
     /// ```
     ///
     /// - Parameters:
     ///   - prompt: Initial token IDs
-    ///   - maxTokens: Maximum tokens to generate
-    /// - Returns: AsyncThrowingStream of token IDs
-    public func generateStream(prompt: [Int], maxTokens: Int = 100) -> AsyncThrowingStream<Int, Error> {
+    ///   - config: Generation configuration (max tokens, sampling, stop tokens)
+    /// - Returns: AsyncThrowingStream of TokenOutput with rich metadata
+    public func generateStream(
+        prompt: [Int],
+        config: GenerationConfig = GenerationConfig()
+    ) -> AsyncThrowingStream<TokenOutput, Error> {
         AsyncThrowingStream { continuation in
             Task {
-                var currentToken = prompt.last ?? 0
+                // Sanitize prompt tokens (clip to valid range)
+                let sanitizedPrompt = prompt.map { max(0, min($0, self.config.vocabSize - 1)) }
                 
-                if !prompt.isEmpty {
-                    for token in prompt.dropLast() {
+                // Process prompt (all except last token)
+                var currentToken = sanitizedPrompt.last ?? 0
+                if !sanitizedPrompt.isEmpty {
+                    for token in sanitizedPrompt.dropLast() {
                         _ = self.step(tokenId: token)
                     }
                 }
                 
+                // Track generation history for repetition penalty
+                var history: [Int] = Array(sanitizedPrompt)
+                
+                // Generate tokens
                 var generated = 0
-                while generated < maxTokens {
+                while generated < config.maxTokens {
+                    // Step 1: Forward pass to get logits
                     let logits = self.step(tokenId: currentToken)
-                    let nextToken = self.sampleToken(from: logits)
-                    continuation.yield(nextToken)
+                    
+                    // Step 2: Sample next token using configured sampler
+                    let nextToken = Sampler.sample(
+                        logits: logits,
+                        config: config.sampler,
+                        history: history
+                    )
+                    
+                    // Step 3: Get probability for telemetry
+                    let probs = logits.softmax()
+                    let probability = probs.data[nextToken]
+                    
+                    // Step 4: Create output with metadata
+                    let output = TokenOutput(
+                        tokenId: nextToken,
+                        probability: probability,
+                        timestamp: Date()
+                    )
+                    
+                    // Step 5: Yield token to consumer
+                    continuation.yield(output)
+                    
+                    // Step 6: Check for stop tokens
+                    if config.stopTokens.contains(nextToken) {
+                        break
+                    }
+                    
+                    // Step 7: Update state for next iteration
                     currentToken = nextToken
+                    history.append(nextToken)
                     generated += 1
                 }
                 
@@ -165,23 +209,24 @@ public final class ModelRunner {
         }
     }
     
-    /// Sample token from logits distribution
+    // MARK: - Legacy API (TB-004 compatibility)
+    
+    /// Generate stream of tokens (simple version)
     ///
-    /// **TB-004 MVP:** Simple argmax sampling
-    /// Real implementation would use top-k, top-p, temperature
-    private func sampleToken(from logits: Tensor<Float>) -> Int {
-        let probabilities = logits.softmax()
-        var cumulative: Float = 0.0
-        let threshold = Float.random(in: 0..<1)
-        
-        for (index, value) in probabilities.data.enumerated() {
-            cumulative += value
-            if threshold <= cumulative {
-                return index
+    /// **Deprecated:** Use `generateStream(prompt:config:)` instead
+    ///
+    /// This legacy method is kept for backward compatibility with TB-004 tests.
+    @available(*, deprecated, message: "Use generateStream(prompt:config:) instead")
+    public func generateStream(prompt: [Int], maxTokens: Int = 100) -> AsyncThrowingStream<Int, Error> {
+        let config = GenerationConfig(maxTokens: maxTokens)
+        return AsyncThrowingStream { continuation in
+            Task {
+                for try await output in self.generateStream(prompt: prompt, config: config) {
+                    continuation.yield(output.tokenId)
+                }
+                continuation.finish()
             }
         }
-        
-        return config.vocabSize - 1
     }
 }
 

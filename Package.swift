@@ -68,7 +68,10 @@ let package = Package(
         .testTarget(
             name: "TinyBrainRuntimeTests",
             dependencies: ["TinyBrainRuntime"],
-            path: "Tests/TinyBrainRuntimeTests"
+            path: "Tests/TinyBrainRuntimeTests",
+            resources: [
+                .process("Fixtures")
+            ]
         ),
         
         // MARK: - Metal Backend
@@ -95,7 +98,10 @@ let package = Package(
         .testTarget(
             name: "TinyBrainTokenizerTests",
             dependencies: ["TinyBrainTokenizer"],
-            path: "Tests/TinyBrainTokenizerTests"
+            path: "Tests/TinyBrainTokenizerTests",
+            resources: [
+                .process("Fixtures")
+            ]
         ),
         
         // MARK: - Demo App Library
