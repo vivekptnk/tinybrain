@@ -152,6 +152,9 @@ public final class ModelRunner {
     ) -> AsyncThrowingStream<TokenOutput, Error> {
         AsyncThrowingStream { continuation in
             Task {
+                // **REVIEW HITLER FIX:** Make config mutable for RNG state
+                var mutableConfig = config
+                
                 // Sanitize prompt tokens (clip to valid range)
                 let sanitizedPrompt = prompt.map { max(0, min($0, self.config.vocabSize - 1)) }
                 
@@ -168,14 +171,15 @@ public final class ModelRunner {
                 
                 // Generate tokens
                 var generated = 0
-                while generated < config.maxTokens {
+                while generated < mutableConfig.maxTokens {
                     // Step 1: Forward pass to get logits
                     let logits = self.step(tokenId: currentToken)
                     
                     // Step 2: Sample next token using configured sampler
+                    // **REVIEW HITLER FIX:** Pass config as inout to maintain RNG state
                     let nextToken = Sampler.sample(
                         logits: logits,
-                        config: config.sampler,
+                        config: &mutableConfig.sampler,
                         history: history
                     )
                     
@@ -194,7 +198,7 @@ public final class ModelRunner {
                     continuation.yield(output)
                     
                     // Step 6: Check for stop tokens
-                    if config.stopTokens.contains(nextToken) {
+                    if mutableConfig.stopTokens.contains(nextToken) {
                         break
                     }
                     

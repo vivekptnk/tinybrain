@@ -35,13 +35,15 @@ import Foundation
 ///
 /// **Usage:**
 /// ```swift
-/// let config = SamplerConfig(
+/// var config = SamplerConfig(
 ///     temperature: 0.8,     // Slightly creative
 ///     topK: 40,             // Limit to 40 best tokens
 ///     topP: 0.95,           // Or use nucleus sampling
 ///     repetitionPenalty: 1.2  // Discourage repeats
 /// )
 /// ```
+///
+/// **REVIEW HITLER FIX:** Now manages RNG state for deterministic sequences
 public struct SamplerConfig {
     /// Temperature scaling (higher = more random)
     ///
@@ -76,7 +78,12 @@ public struct SamplerConfig {
     ///
     /// - nil: Non-deterministic
     /// - 42: Reproducible results
+    ///
+    /// **REVIEW HITLER FIX:** RNG state persists across calls for deterministic sequences
     public var seed: UInt64? = nil
+    
+    /// Internal RNG state (managed automatically)
+    internal var rng: SeededRandomGenerator? = nil
     
     public init(
         temperature: Float = 1.0,
@@ -90,6 +97,11 @@ public struct SamplerConfig {
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
+        
+        // Initialize RNG if seed provided
+        if let seed = seed {
+            self.rng = SeededRandomGenerator(seed: seed)
+        }
     }
 }
 
@@ -148,9 +160,9 @@ public struct Sampler {
     /// - Parameters:
     ///   - logits: Model output logits
     ///   - temp: Temperature (higher = more random)
-    ///   - seed: Optional seed for deterministic sampling
+    ///   - rng: Inout RNG for stateful deterministic sampling
     /// - Returns: Sampled token ID
-    public static func temperature(logits: Tensor<Float>, temp: Float, seed: UInt64? = nil) -> Int {
+    internal static func temperature(logits: Tensor<Float>, temp: Float, rng: inout SeededRandomGenerator?) -> Int {
         // Handle edge case: temp ≈ 0 → greedy
         if temp < 0.01 {
             return greedy(logits: logits)
@@ -163,8 +175,14 @@ public struct Sampler {
         // Convert to probabilities via softmax
         let probs = scaledLogits.softmax()
         
-        // Sample from distribution
-        return sampleFromDistribution(probs.data, seed: seed)
+        // Sample from distribution (mutates RNG)
+        return sampleFromDistribution(probs.data, rng: &rng)
+    }
+    
+    /// Public wrapper for temperature sampling (non-seeded)
+    public static func temperature(logits: Tensor<Float>, temp: Float) -> Int {
+        var nilRng: SeededRandomGenerator? = nil
+        return temperature(logits: logits, temp: temp, rng: &nilRng)
     }
     
     // MARK: - Top-K Sampling
@@ -184,30 +202,37 @@ public struct Sampler {
     ///   - logits: Model output logits
     ///   - k: Number of top logits to keep
     ///   - temp: Temperature for sampling
-    ///   - seed: Optional seed for deterministic sampling
+    ///   - rng: Inout RNG for stateful deterministic sampling
     /// - Returns: Sampled token ID
-    public static func topK(logits: Tensor<Float>, k: Int, temp: Float, seed: UInt64? = nil) -> Int {
+    internal static func topK(logits: Tensor<Float>, k: Int, temp: Float, rng: inout SeededRandomGenerator?) -> Int {
         let vocabSize = logits.data.count
         
         // If k >= vocab_size, just use temperature sampling
         if k >= vocabSize {
-            return temperature(logits: logits, temp: temp, seed: seed)
+            return temperature(logits: logits, temp: temp, rng: &rng)
         }
         
-        // Find k-th largest value
+        // **REVIEW HITLER FIX:** Keep EXACTLY K tokens (not threshold-based)
+        // Sort and take top K indices (handles ties correctly)
         let sorted = logits.data.enumerated().sorted { $0.element > $1.element }
-        let threshold = k < sorted.count ? sorted[k - 1].element : -Float.infinity
+        let topKIndices = Set(sorted.prefix(k).map { $0.offset })
         
-        // Zero out logits below threshold
+        // Zero out all but top K tokens
         var filteredData = logits.data
         for i in 0..<filteredData.count {
-            if filteredData[i] < threshold {
+            if !topKIndices.contains(i) {
                 filteredData[i] = -Float.infinity
             }
         }
         
         let filteredLogits = Tensor<Float>(shape: logits.shape, data: filteredData)
-        return temperature(logits: filteredLogits, temp: temp, seed: seed)
+        return temperature(logits: filteredLogits, temp: temp, rng: &rng)
+    }
+    
+    /// Public wrapper for top-k sampling (non-seeded)
+    public static func topK(logits: Tensor<Float>, k: Int, temp: Float) -> Int {
+        var nilRng: SeededRandomGenerator? = nil
+        return topK(logits: logits, k: k, temp: temp, rng: &nilRng)
     }
     
     // MARK: - Top-P (Nucleus) Sampling
@@ -232,9 +257,9 @@ public struct Sampler {
     ///   - logits: Model output logits
     ///   - p: Cumulative probability threshold (0.0-1.0)
     ///   - temp: Temperature for sampling
-    ///   - seed: Optional seed for deterministic sampling
+    ///   - rng: Inout RNG for stateful deterministic sampling
     /// - Returns: Sampled token ID
-    public static func topP(logits: Tensor<Float>, p: Float, temp: Float, seed: UInt64? = nil) -> Int {
+    internal static func topP(logits: Tensor<Float>, p: Float, temp: Float, rng: inout SeededRandomGenerator?) -> Int {
         // Convert to probabilities
         let probs = logits.softmax()
         
@@ -264,7 +289,13 @@ public struct Sampler {
         }
         
         let filteredLogits = Tensor<Float>(shape: logits.shape, data: filteredData)
-        return temperature(logits: filteredLogits, temp: temp, seed: seed)
+        return temperature(logits: filteredLogits, temp: temp, rng: &rng)
+    }
+    
+    /// Public wrapper for top-p sampling (non-seeded)
+    public static func topP(logits: Tensor<Float>, p: Float, temp: Float) -> Int {
+        var nilRng: SeededRandomGenerator? = nil
+        return topP(logits: logits, p: p, temp: temp, rng: &nilRng)
     }
     
     // MARK: - Combined Sampling
@@ -277,14 +308,16 @@ public struct Sampler {
     /// 3. Apply temperature scaling
     /// 4. Sample from resulting distribution
     ///
+    /// **REVIEW HITLER FIX:** Config is inout to maintain RNG state
+    ///
     /// - Parameters:
     ///   - logits: Model output logits
-    ///   - config: Sampling configuration
+    ///   - config: Sampling configuration (inout for RNG state)
     ///   - history: Recently generated token IDs
     /// - Returns: Sampled token ID
     public static func sample(
         logits: Tensor<Float>,
-        config: SamplerConfig,
+        config: inout SamplerConfig,
         history: [Int]
     ) -> Int {
         var adjustedData = logits.data
@@ -300,13 +333,17 @@ public struct Sampler {
         
         let adjustedLogits = Tensor<Float>(shape: logits.shape, data: adjustedData)
         
-        // Step 2 & 3: Apply filtering + temperature (with seed)
+        // Step 2 & 3: Apply filtering + temperature (with RNG state)
+        // Extract RNG to local var to pass as inout
+        var rng = config.rng
+        defer { config.rng = rng }  // Write back
+        
         if let k = config.topK {
-            return topK(logits: adjustedLogits, k: k, temp: config.temperature, seed: config.seed)
+            return topK(logits: adjustedLogits, k: k, temp: config.temperature, rng: &rng)
         } else if let p = config.topP {
-            return topP(logits: adjustedLogits, p: p, temp: config.temperature, seed: config.seed)
+            return topP(logits: adjustedLogits, p: p, temp: config.temperature, rng: &rng)
         } else {
-            return temperature(logits: adjustedLogits, temp: config.temperature, seed: config.seed)
+            return temperature(logits: adjustedLogits, temp: config.temperature, rng: &rng)
         }
     }
     
@@ -323,14 +360,17 @@ public struct Sampler {
     /// → Sample index 1 (0.5 < 0.65 <= 0.8)
     /// ```
     ///
-    /// - Parameter probs: Probability distribution (should sum to ~1.0)
+    /// **REVIEW HITLER FIX:** Mutates RNG to produce different values in sequence
+    ///
+    /// - Parameters:
+    ///   - probs: Probability distribution (should sum to ~1.0)
+    ///   - rng: Inout RNG for stateful deterministic sampling
     /// - Returns: Sampled index
-    private static func sampleFromDistribution(_ probs: [Float], seed: UInt64? = nil) -> Int {
+    private static func sampleFromDistribution(_ probs: [Float], rng: inout SeededRandomGenerator?) -> Int {
         let threshold: Float
-        if let seed = seed {
-            // Use seeded random for deterministic sampling
-            var generator = SeededRandomGenerator(seed: seed)
-            threshold = Float(generator.next()) / Float(UInt64.max)
+        if rng != nil {
+            // **REVIEW HITLER FIX:** Mutate RNG state to get next value in sequence
+            threshold = Float(rng!.next()) / Float(UInt64.max)
         } else {
             threshold = Float.random(in: 0..<1)
         }
@@ -355,14 +395,16 @@ public struct Sampler {
 ///
 /// **Educational:** Linear Congruential Generator (LCG)
 /// Not cryptographically secure, but good enough for reproducible sampling.
-private struct SeededRandomGenerator {
-    private var state: UInt64
+///
+/// **REVIEW HITLER FIX:** Now public so it can be stored in SamplerConfig
+public struct SeededRandomGenerator {
+    internal var state: UInt64
     
-    init(seed: UInt64) {
+    public init(seed: UInt64) {
         self.state = seed
     }
     
-    mutating func next() -> UInt64 {
+    public mutating func next() -> UInt64 {
         // LCG parameters (from Numerical Recipes)
         state = state &* 6364136223846793005 &+ 1442695040888963407
         return state

@@ -203,12 +203,12 @@ final class SamplerTests: XCTestCase {
     /// discouraging the model from repeating itself.
     func testRepetitionPenaltyReducesRepeats() {
         let logits = Tensor<Float>(shape: TensorShape(3), data: [0.8, 0.1, 0.1])
-        let config = SamplerConfig(repetitionPenalty: 2.0)
+        var config = SamplerConfig(repetitionPenalty: 2.0)
         let history = [0, 0, 0]  // Token 0 repeated many times
         
         var seenTokens: Set<Int> = []
         for _ in 0..<50 {
-            let token = Sampler.sample(logits: logits, config: config, history: history)
+            let token = Sampler.sample(logits: logits, config: &config, history: history)
             seenTokens.insert(token)
         }
         
@@ -220,13 +220,13 @@ final class SamplerTests: XCTestCase {
     /// **Test:** Repetition penalty = 1.0 has no effect
     func testRepetitionPenaltyOne() {
         let logits = Tensor<Float>(shape: TensorShape(3), data: [0.8, 0.1, 0.1])
-        let config = SamplerConfig(repetitionPenalty: 1.0)
+        var config = SamplerConfig(repetitionPenalty: 1.0)
         let history = [0, 0, 0]
         
         // With penalty=1.0, should still prefer token 0
         var counts = [0, 0, 0]
         for _ in 0..<100 {
-            let token = Sampler.sample(logits: logits, config: config, history: history)
+            let token = Sampler.sample(logits: logits, config: &config, history: history)
             counts[token] += 1
         }
         
@@ -238,12 +238,12 @@ final class SamplerTests: XCTestCase {
     /// **Test:** Empty history means no penalty applied
     func testRepetitionPenaltyEmptyHistory() {
         let logits = Tensor<Float>(shape: TensorShape(3), data: [0.8, 0.1, 0.1])
-        let config = SamplerConfig(repetitionPenalty: 2.0)
+        var config = SamplerConfig(repetitionPenalty: 2.0)
         let history: [Int] = []
         
         var counts = [0, 0, 0]
         for _ in 0..<100 {
-            let token = Sampler.sample(logits: logits, config: config, history: history)
+            let token = Sampler.sample(logits: logits, config: &config, history: history)
             counts[token] += 1
         }
         
@@ -257,7 +257,7 @@ final class SamplerTests: XCTestCase {
     /// **Test:** Full sampler with all strategies combined
     func testCombinedSamplerConfig() {
         let logits = Tensor<Float>(shape: TensorShape(5), data: [0.5, 0.6, 0.7, 0.8, 0.9])
-        let config = SamplerConfig(
+        var config = SamplerConfig(
             temperature: 0.8,
             topK: 3,
             topP: 0.95,
@@ -267,7 +267,7 @@ final class SamplerTests: XCTestCase {
         
         var seenTokens: Set<Int> = []
         for _ in 0..<100 {
-            let token = Sampler.sample(logits: logits, config: config, history: history)
+            let token = Sampler.sample(logits: logits, config: &config, history: history)
             seenTokens.insert(token)
         }
         
@@ -279,30 +279,31 @@ final class SamplerTests: XCTestCase {
     
     /// **Test:** Deterministic sampling with seed
     ///
-    /// **Note:** Our sampler is stateless, so same inputs + same seed = same output
+    /// **REVIEW HITLER FIX:** RNG is now stateful, so sequence is deterministic but advances
     func testDeterministicWithSeed() {
         let logits = Tensor<Float>(shape: TensorShape(5), data: [0.1, 0.5, 0.2, 0.8, 0.3])
-        let config = SamplerConfig(temperature: 1.0, seed: 42)
         
-        // Same seed should produce same token for same inputs
-        let token1 = Sampler.sample(logits: logits, config: config, history: [])
-        let token2 = Sampler.sample(logits: logits, config: config, history: [])
-        
-        XCTAssertEqual(token1, token2, "Same seed + same inputs should produce same output")
-        
-        // Different seed should produce different results (with high probability)
-        let configDifferentSeed = SamplerConfig(temperature: 1.0, seed: 123)
-        var differentResults = false
-        for _ in 0..<10 {
-            let tokenDiff = Sampler.sample(logits: logits, config: configDifferentSeed, history: [])
-            if tokenDiff != token1 {
-                differentResults = true
-                break
-            }
+        // First sequence with seed=42
+        var config1 = SamplerConfig(temperature: 1.0, seed: 42)
+        var sequence1: [Int] = []
+        for _ in 0..<5 {
+            let token = Sampler.sample(logits: logits, config: &config1, history: [])
+            sequence1.append(token)
         }
         
-        // This might fail occasionally due to randomness, but very unlikely
-        XCTAssertTrue(differentResults || true, "Different seeds can produce different outputs")
+        // Second sequence with same seed - should match
+        var config2 = SamplerConfig(temperature: 1.0, seed: 42)
+        var sequence2: [Int] = []
+        for _ in 0..<5 {
+            let token = Sampler.sample(logits: logits, config: &config2, history: [])
+            sequence2.append(token)
+        }
+        
+        XCTAssertEqual(sequence1, sequence2, "Same seed should produce same deterministic sequence")
+        
+        // Sequence should have diversity (not all same token)
+        let uniqueTokens = Set(sequence1)
+        XCTAssertGreaterThan(uniqueTokens.count, 1, "Should produce diverse sequence")
     }
     
     // MARK: - Edge Cases

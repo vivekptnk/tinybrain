@@ -163,30 +163,27 @@ public struct BPETokenizer: Tokenizer {
         // Extract special tokens
         let specialTokens = vocabulary.special_tokens
         
-        // Look up special token IDs from vocabulary (avoiding closure capture issues)
-        if let bosString = specialTokens?.bos_token, let bosId = tokenToId[bosString] {
-            self.bosToken = bosId
-        } else {
-            self.bosToken = 0
-        }
-        
-        if let eosString = specialTokens?.eos_token, let eosId = tokenToId[eosString] {
-            self.eosToken = eosId
-        } else {
-            self.eosToken = 1
-        }
-        
-        if let unkString = specialTokens?.unk_token, let unkId = tokenToId[unkString] {
-            self.unkToken = unkId
-        } else {
-            self.unkToken = 2
-        }
-        
-        if let padString = specialTokens?.pad_token, let padId = tokenToId[padString] {
-            self.padToken = padId
-        } else {
-            self.padToken = 3
-        }
+        // **REVIEW HITLER FIX:** Resolve special tokens from vocab (not hard-coded IDs)
+        self.bosToken = try Self.resolveSpecialToken(
+            tokenString: specialTokens?.bos_token,
+            fallbackKey: "<BOS>",
+            vocab: tokenToId
+        )
+        self.eosToken = try Self.resolveSpecialToken(
+            tokenString: specialTokens?.eos_token,
+            fallbackKey: "<EOS>",
+            vocab: tokenToId
+        )
+        self.unkToken = try Self.resolveSpecialToken(
+            tokenString: specialTokens?.unk_token,
+            fallbackKey: "<UNK>",
+            vocab: tokenToId
+        )
+        self.padToken = try Self.resolveSpecialToken(
+            tokenString: specialTokens?.pad_token,
+            fallbackKey: "<PAD>",
+            vocab: tokenToId
+        )
     }
     
     // MARK: - Encoding
@@ -293,6 +290,41 @@ public struct BPETokenizer: Tokenizer {
         return tokens
             .compactMap { idToToken[$0] }  // Lookup each ID, skip invalid
             .joined()  // Concatenate strings
+    }
+    
+    // MARK: - Helper Functions
+    
+    /// Resolve special token ID from vocabulary
+    ///
+    /// **REVIEW HITLER FIX:** Don't hard-code IDs - find them in vocab
+    ///
+    /// - Parameters:
+    ///   - tokenString: Optional token string from special_tokens section
+    ///   - fallbackKey: Fallback key to search in vocab (e.g., "<BOS>")
+    ///   - vocab: Token → ID mapping
+    /// - Returns: Resolved token ID
+    /// - Throws: If no valid token found and vocab is empty
+    private static func resolveSpecialToken(
+        tokenString: String?,
+        fallbackKey: String,
+        vocab: [String: Int]
+    ) throws -> Int {
+        // If specified in special_tokens, look it up
+        if let tokenStr = tokenString, let id = vocab[tokenStr] {
+            return id
+        }
+        
+        // Fallback: try to find by key name in vocab (e.g., "<BOS>")
+        if let id = vocab[fallbackKey] {
+            return id
+        }
+        
+        // Last resort: use first token in vocab (better than non-existent ID)
+        if let firstId = vocab.values.min() {
+            return firstId
+        }
+        
+        throw TokenizerError.invalidVocabularyFormat("No special token found for \(fallbackKey) and vocab is empty")
     }
 }
 

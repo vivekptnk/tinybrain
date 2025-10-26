@@ -1,0 +1,33 @@
+[
+  {
+    "id": "simple_sequence",
+    "prompt": [1, 2, 3, 4, 5],
+    "reference": [6, 7, 8, 9, 10],
+    "description": "Simple sequential token prediction"
+  },
+  {
+    "id": "repeat_pattern",
+    "prompt": [10, 20, 30, 10, 20],
+    "reference": [30, 10, 20, 30, 10],
+    "description": "Repeating pattern recognition"
+  },
+  {
+    "id": "alternating",
+    "prompt": [1, 0, 1, 0, 1],
+    "reference": [0, 1, 0, 1, 0],
+    "description": "Alternating tokens"
+  },
+  {
+    "id": "increasing",
+    "prompt": [5, 10, 15, 20, 25],
+    "reference": [30, 35, 40, 45, 50],
+    "description": "Arithmetic sequence continuation"
+  },
+  {
+    "id": "constant",
+    "prompt": [42, 42, 42, 42, 42],
+    "reference": [42, 42, 42, 42, 42],
+    "description": "Constant value prediction"
+  }
+]
+
