@@ -48,14 +48,67 @@ struct ChatView: View {
             
             Divider()
             
-            // Metrics
+            // Metrics - TB-005: Now with probability!
             if viewModel.tokensPerSecond > 0 {
                 HStack {
                     Label("\(String(format: "%.1f", viewModel.tokensPerSecond)) tokens/sec",
                           systemImage: "gauge.medium")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    
                     Spacer()
+                    
+                    // TB-005: Confidence indicator
+                    if viewModel.averageProbability > 0 {
+                        Label("\(String(format: "%.0f", viewModel.averageProbability * 100))% confidence",
+                              systemImage: "chart.bar.fill")
+                            .font(.caption)
+                            .foregroundColor(viewModel.averageProbability > 0.5 ? .green : .orange)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            }
+            
+            Divider()
+            
+            // TB-005: Sampling Controls
+            if !viewModel.isGenerating {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Sampling Settings")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    HStack {
+                        Text("Temperature:")
+                            .font(.caption)
+                        Slider(value: Binding(
+                            get: { Double(viewModel.temperature) },
+                            set: { viewModel.temperature = Float($0) }
+                        ), in: 0.1...2.0, step: 0.1)
+                        Text(String(format: "%.1f", viewModel.temperature))
+                            .font(.caption)
+                            .frame(width: 30)
+                    }
+                    
+                    Toggle(isOn: $viewModel.useTopK) {
+                        Text("Use Top-K (\(viewModel.topK))")
+                            .font(.caption)
+                    }
+                    
+                    if viewModel.useTopK {
+                        HStack {
+                            Text("K:")
+                                .font(.caption)
+                            Slider(value: Binding(
+                                get: { Double(viewModel.topK) },
+                                set: { viewModel.topK = Int($0) }
+                            ), in: 1...100, step: 1)
+                            Text("\(viewModel.topK)")
+                                .font(.caption)
+                                .frame(width: 30)
+                        }
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
