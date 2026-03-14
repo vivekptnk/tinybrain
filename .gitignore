@@ -57,6 +57,15 @@ docs/REVIEW-HITLER-*
 docs/TB-*
 docs/tasks/
 
+# Internal project files (kept locally, not published)
+CLAUDE.md
+AGENTS.md
+Scripts/diagnose_model_dims.swift
+Scripts/fix_model_vocab.swift
+Scripts/fix_vocab_size.swift
+Scripts/inspect_model.swift
+Scripts/test_model_loading.swift
+
 # IDE
 .vscode/
 .idea/
