@@ -1,8 +1,8 @@
 # AGENTS – TinyBrain Project Rules
 
 ## 1. Mission & Canonical Sources
-- **Primary goal:** build a Swift-native, on-device LLM runtime that is transparent, educational, and fast on Apple Silicon (per `docs/prd.md`).
-- **Truth hierarchy:** PRD → tasks in `docs/tasks/` → code comments/DocC → other docs. Resolve conflicts by updating upstream documents first.
+- **Primary goal:** build a Swift-native, on-device LLM runtime that is transparent, educational, and fast on Apple Silicon.
+- **Truth hierarchy:** `docs/overview.md` → code comments/DocC → other docs. Resolve conflicts by updating upstream documents first.
 - **Deliverable cadence:** follow the roadmap phases (Scaffold → Runtime → Metal → Quant/KV → Tokenizer/Streaming → Demo App → Benchmarks/Docs) unless the product owner reprioritizes.
 
 ## 2. Repository Expectations

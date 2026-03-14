@@ -48,6 +48,15 @@ env/
 .docc-build/
 docs/.build/
 
+# Internal planning docs (kept locally, not published)
+docs/prd.md
+docs/TASK-ROADMAP.md
+docs/release-checklist.md
+docs/v0.2.0-PLAN.md
+docs/REVIEW-HITLER-*
+docs/TB-*
+docs/tasks/
+
 # IDE
 .vscode/
 .idea/

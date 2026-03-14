@@ -4,9 +4,9 @@
 Swift-native on-device LLM inference runtime for Apple Silicon. Educational + practical. The "micrograd of on-device inference."
 
 ## Quick Reference
-- **PRD:** `docs/prd.md`
 - **Architecture:** `docs/overview.md`
 - **Project rules:** `AGENTS.md`
+- **Internal planning docs:** kept locally in `docs/` but gitignored (PRD, task specs, completion reports)
 
 ## Build & Test
 ```bash

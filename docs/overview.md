@@ -848,7 +848,7 @@ class ChatViewModel: ObservableObject {
 
 ## 14. Contributing
 
-See `AGENTS.md` for agent-specific rules and `docs/tasks/` for implementation roadmap.
+See `AGENTS.md` for project conventions.
 
 ---
 
