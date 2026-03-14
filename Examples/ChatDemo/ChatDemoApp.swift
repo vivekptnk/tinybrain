@@ -13,6 +13,12 @@ import TinyBrainTokenizer
 import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Force the process to be a regular app with full responder chain.
+        // Without this, SPM executables on macOS Tahoe don't get keyboard input.
+        NSApp.setActivationPolicy(.regular)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {

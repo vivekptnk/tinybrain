@@ -187,67 +187,70 @@ public struct ChatView: View {
         VStack(spacing: 0) {
             Divider()
             VStack(spacing: 8) {
-                // Selected prompt preview + send
-                if !viewModel.promptText.isEmpty {
-                    HStack(spacing: 10) {
-                        Text(viewModel.promptText)
-                            .font(.system(size: 14))
-                            .lineLimit(2)
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.accentColor.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                        Button {
-                            sendMessage()
-                        } label: {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.system(size: 26))
-                                .foregroundStyle(.blue)
-                        }
-                        .buttonStyle(.plain)
+                // Text input + send button
+                HStack(spacing: 8) {
+                    #if os(macOS)
+                    NativeTextField(
+                        text: $viewModel.promptText,
+                        isDisabled: viewModel.isGenerating,
+                        onSubmit: { sendMessage() }
+                    )
+                    .frame(height: 22)
+                    #else
+                    TextField("Message TinyBrain...", text: $viewModel.promptText)
+                        .textFieldStyle(.plain)
                         .disabled(viewModel.isGenerating)
-                        .keyboardShortcut(.return, modifiers: .command)
-                    }
-                }
-
-                // Demo prompt pills
-                HStack(spacing: 6) {
-                    ForEach(demoPrompts, id: \.label) { prompt in
-                        Button {
-                            viewModel.promptText = prompt.text
-                        } label: {
-                            Text(prompt.label)
-                                .font(.system(size: 12, weight: .medium))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Color.primary.opacity(0.06))
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(viewModel.isGenerating)
-                    }
-
-                    Spacer()
+                    #endif
 
                     if viewModel.isGenerating {
                         Button {
                             viewModel.clearConversation()
                         } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "stop.fill")
-                                    .font(.system(size: 8))
-                                Text("Stop")
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color.red.opacity(0.1))
-                            .clipShape(Capsule())
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 22))
+                                .foregroundStyle(.red.opacity(0.8))
                         }
                         .buttonStyle(.plain)
+                    } else {
+                        Button {
+                            sendMessage()
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 22))
+                                .foregroundStyle(viewModel.promptText.isEmpty ? Color.secondary.opacity(0.4) : Color.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.promptText.isEmpty)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+
+                // Quick prompt pills
+                if viewModel.messages.isEmpty && viewModel.promptText.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Try:")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+
+                        ForEach(demoPrompts, id: \.label) { prompt in
+                            Button {
+                                viewModel.promptText = prompt.text
+                            } label: {
+                                Text(prompt.label)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.primary.opacity(0.05))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Spacer()
                     }
                 }
             }
@@ -260,8 +263,8 @@ public struct ChatView: View {
     private var demoPrompts: [(label: String, text: String)] {
         [
             ("Hello", "Hello, TinyBrain!"),
-            ("Explain LLMs", "Can you explain how large language models work?"),
-            ("Tell a story", "Tell me a short story about a neural network"),
+            ("Explain LLMs", "Explain how large language models work"),
+            ("Story", "Tell me a short story about a neural network"),
         ]
     }
 
