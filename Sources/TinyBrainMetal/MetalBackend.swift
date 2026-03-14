@@ -10,7 +10,8 @@ import TinyBrainRuntime
 /// Metal backend for accelerated tensor operations
 ///
 /// **REVIEW HITLER FIX:** Now includes INT8 quantized operations!
-public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader, QuantizedMatMulBackend {
+public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader, QuantizedMatMulBackend,
+                                  SoftmaxBackend, RMSNormBackend, ActivationBackend {
     /// Shared Metal device (the GPU)
     private let device: MTLDevice
     
@@ -104,10 +105,11 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     /// - Throws: `MetalError.shaderCompilationFailed` if compilation fails
     private func compileShaderLibrary() throws -> MTLLibrary {
         // Metal shader source (embedded for SPM compatibility)
+        // Includes matmul kernels + Phase 3 ops: softmax, rmsnorm, silu, gelu
         let source = """
         #include <metal_stdlib>
         using namespace metal;
-        
+
         // Naive kernel (simple, slower)
         kernel void matmul_naive(
             device const float* A [[buffer(0)]],
@@ -118,17 +120,17 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         ) {
             uint M = dims.x, N = dims.y, K = dims.z;
             uint row = gid.y, col = gid.x;
-            
+
             if (row >= M || col >= N) return;
-            
+
             float sum = 0.0;
             for (uint k = 0; k < K; k++) {
                 sum += A[row * K + k] * B[k * N + col];
             }
-            
+
             C[row * N + col] = sum;
         }
-        
+
         // Tiled kernel (optimized with threadgroup memory)
         kernel void matmul_tiled(
             device const float* A [[buffer(0)]],
@@ -142,12 +144,12 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         ) {
             uint M = dims.x, N = dims.y, K = dims.z;
             const uint TILE_SIZE = 16;
-            
+
             uint row = gid.y;
             uint col = gid.x;
-            
+
             float sum = 0.0;
-            
+
             for (uint t = 0; t < K; t += TILE_SIZE) {
                 // Load tiles into shared memory
                 if (row < M && (t + tid.x) < K) {
@@ -155,30 +157,30 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
                 } else {
                     tileA[tid.y * TILE_SIZE + tid.x] = 0.0;
                 }
-                
+
                 if ((t + tid.y) < K && col < N) {
                     tileB[tid.y * TILE_SIZE + tid.x] = B[(t + tid.y) * N + col];
                 } else {
                     tileB[tid.y * TILE_SIZE + tid.x] = 0.0;
                 }
-                
+
                 threadgroup_barrier(mem_flags::mem_threadgroup);
-                
+
                 // Compute using fast shared memory
                 for (uint k = 0; k < TILE_SIZE; k++) {
                     sum += tileA[tid.y * TILE_SIZE + k] * tileB[k * TILE_SIZE + tid.x];
                 }
-                
+
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            
+
             if (row < M && col < N) {
                 C[row * N + col] = sum;
             }
         }
-        
+
         // **REVIEW HITLER FIX:** INT8 dequant + fused matmul kernels
-        
+
         // Fused INT8 dequant + matmul (THE REAL FIX!)
         kernel void matmul_int8_dequant(
             device const float* A [[buffer(0)]],
@@ -190,23 +192,128 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         ) {
             uint M = dims.x, N = dims.y, K = dims.z;
             uint row = gid.y, col = gid.x;
-            
+
             if (row >= M || col >= N) return;
-            
+
             float sum = 0.0;
-            
+
             for (uint k = 0; k < K; k++) {
                 float a_val = A[row * K + k];
-                
+
                 // Dequantize on-the-fly (no Float32 materialization!)
                 char b_quant = B_quantized[k * N + col];
                 float b_scale = B_scales[k];
                 float b_val = float(b_quant) * b_scale;
-                
+
                 sum += a_val * b_val;
             }
-            
+
             C[row * N + col] = sum;
+        }
+
+        // ── Phase 3: Softmax ─────────────────────────────────────────────
+        // Numerically stable softmax using parallel max + sum reductions.
+        // One threadgroup per row. Uses threadgroup(0) scratch memory.
+        kernel void softmax(
+            device const float* input   [[buffer(0)]],
+            device float*       output  [[buffer(1)]],
+            constant uint2&     dims    [[buffer(2)]],
+            uint  tgid   [[threadgroup_position_in_grid]],
+            uint  lid    [[thread_position_in_threadgroup]],
+            uint  tgSize [[threads_per_threadgroup]],
+            threadgroup float* scratch  [[threadgroup(0)]]
+        ) {
+            uint numRows = dims.x;
+            uint rowLen  = dims.y;
+            uint row     = tgid;
+            if (row >= numRows) return;
+            device const float* in_row  = input  + row * rowLen;
+            device float*       out_row = output + row * rowLen;
+            // Step 1: parallel max
+            float thread_max = -INFINITY;
+            for (uint i = lid; i < rowLen; i += tgSize) thread_max = max(thread_max, in_row[i]);
+            scratch[lid] = thread_max;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = tgSize / 2; stride > 0; stride >>= 1) {
+                if (lid < stride) scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float row_max = scratch[0];
+            // Step 2+3: exp(x - max), accumulate sum
+            float thread_sum = 0.0;
+            for (uint i = lid; i < rowLen; i += tgSize) {
+                float e = exp(in_row[i] - row_max);
+                out_row[i] = e;
+                thread_sum += e;
+            }
+            scratch[lid] = thread_sum;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = tgSize / 2; stride > 0; stride >>= 1) {
+                if (lid < stride) scratch[lid] += scratch[lid + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float inv_sum = 1.0 / (scratch[0] + 1e-7);
+            // Step 4: normalize
+            for (uint i = lid; i < rowLen; i += tgSize) out_row[i] *= inv_sum;
+        }
+
+        // ── Phase 3: RMSNorm ─────────────────────────────────────────────
+        // out = (x / rms(x)) * weight,  rms(x) = sqrt(mean(x²) + eps)
+        kernel void rmsnorm(
+            device const float* input   [[buffer(0)]],
+            device const float* weight  [[buffer(1)]],
+            device float*       output  [[buffer(2)]],
+            constant uint2&     dims    [[buffer(3)]],
+            constant float&     eps     [[buffer(4)]],
+            uint  tgid   [[threadgroup_position_in_grid]],
+            uint  lid    [[thread_position_in_threadgroup]],
+            uint  tgSize [[threads_per_threadgroup]],
+            threadgroup float* scratch  [[threadgroup(0)]]
+        ) {
+            uint numTokens = dims.x;
+            uint hiddenDim = dims.y;
+            uint token     = tgid;
+            if (token >= numTokens) return;
+            device const float* in_row  = input  + token * hiddenDim;
+            device float*       out_row = output + token * hiddenDim;
+            float thread_ss = 0.0;
+            for (uint i = lid; i < hiddenDim; i += tgSize) { float x = in_row[i]; thread_ss += x * x; }
+            scratch[lid] = thread_ss;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = tgSize / 2; stride > 0; stride >>= 1) {
+                if (lid < stride) scratch[lid] += scratch[lid + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float inv_rms = rsqrt(scratch[0] / float(hiddenDim) + eps);
+            for (uint i = lid; i < hiddenDim; i += tgSize) out_row[i] = in_row[i] * inv_rms * weight[i];
+        }
+
+        // ── Phase 3: SiLU ────────────────────────────────────────────────
+        // out[i] = x[i] * sigmoid(x[i])
+        kernel void silu(
+            device const float* input   [[buffer(0)]],
+            device float*       output  [[buffer(1)]],
+            constant uint&      n       [[buffer(2)]],
+            uint gid [[thread_position_in_grid]]
+        ) {
+            if (gid >= n) return;
+            float x = input[gid];
+            output[gid] = x / (1.0 + exp(-x));
+        }
+
+        // ── Phase 3: GELU ────────────────────────────────────────────────
+        // Tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        kernel void gelu(
+            device const float* input   [[buffer(0)]],
+            device float*       output  [[buffer(1)]],
+            constant uint&      n       [[buffer(2)]],
+            uint gid [[thread_position_in_grid]]
+        ) {
+            if (gid >= n) return;
+            float x = input[gid];
+            float x3 = x * x * x;
+            float inner = 0.7978845608 * (x + 0.044715 * x3);
+            output[gid] = 0.5 * x * (1.0 + tanh(inner));
         }
         """
         
@@ -660,6 +767,229 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         }
         
         return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
+    }
+    // MARK: - Phase 3 helpers
+
+    /// Largest power-of-2 that is ≤ n, capped at maxVal.
+    ///
+    /// The tree-reduction used in softmax and rmsnorm kernels requires
+    /// that the threadgroup size is a power of 2, otherwise threads at
+    /// odd indices are silently skipped in the final reduction steps.
+    private func pow2ThreadCount(_ n: Int, max maxVal: Int = 256) -> Int {
+        var result = 1
+        while result * 2 <= min(n, maxVal) { result *= 2 }
+        return result
+    }
+
+    // MARK: - Phase 3: Softmax (SoftmaxBackend)
+
+    /// Apply numerically stable softmax along the last dimension.
+    ///
+    /// The kernel dispatches one threadgroup per row; threads collaborate via
+    /// threadgroup memory to find the row max, compute shifted exponentials,
+    /// then compute the sum and normalize — all without reading global memory
+    /// more than three times per element.
+    ///
+    /// - Parameter input: Tensor of shape [n] or [rows, cols] (any 1-D or 2-D)
+    /// - Returns: Tensor of same shape with rows summing to 1
+    public func softmax(_ input: Tensor<Float>) throws -> Tensor<Float> {
+        let elementCount = input.shape.count
+        guard elementCount > 0 else { return input }
+
+        // Treat any input as [numRows × rowLen] where rowLen = last dimension
+        let rowLen: Int
+        let numRows: Int
+        if input.shape.dimensions.count == 1 {
+            numRows = 1
+            rowLen  = input.shape.dimensions[0]
+        } else {
+            // Flatten all leading dims into rows
+            rowLen  = input.shape.dimensions.last!
+            numRows = elementCount / rowLen
+        }
+
+        let inputContiguous = input.isContiguous ? input : input.makeContiguousCopy()
+        let (bufferIn, releaseIn) = try createBufferWithTracking(from: inputContiguous)
+        let bufferOut = try createBuffer(elementCount: elementCount)
+
+        var dims = SIMD2<UInt32>(UInt32(numRows), UInt32(rowLen))
+        let dimsBuffer = device.makeBuffer(bytes: &dims,
+                                           length: MemoryLayout<SIMD2<UInt32>>.stride,
+                                           options: .storageModeShared)!
+
+        let pipeline = try loadKernel(named: "softmax")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.invalidKernelConfiguration("Failed to create command buffer/encoder")
+        }
+
+        // One threadgroup per row; power-of-2 thread count ≤ min(rowLen, 256).
+        // The tree reduction in the shader requires a power-of-2 threadgroup size
+        // so that every element is covered by the halving strides.
+        let threadsPerGroup = pow2ThreadCount(rowLen)
+        // Scratch memory: one float per thread
+        let scratchBytes = threadsPerGroup * MemoryLayout<Float>.stride
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(bufferIn,   offset: 0, index: 0)
+        encoder.setBuffer(bufferOut,  offset: 0, index: 1)
+        encoder.setBuffer(dimsBuffer, offset: 0, index: 2)
+        encoder.setThreadgroupMemoryLength(scratchBytes, index: 0)
+
+        let threadsPerThreadgroup = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        let threadgroupsPerGrid   = MTLSize(width: numRows, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if releaseIn { bufferPool.release(bufferIn, elementCount: elementCount) }
+
+        let storage = TensorStorage<Float>(gpuBuffer: bufferOut, count: elementCount)
+        let pool = self.bufferPool
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(bufferOut, elementCount: elementCount)
+        }
+        return Tensor<Float>(shape: input.shape, storage: storage)
+    }
+
+    // MARK: - Phase 3: RMSNorm (RMSNormBackend)
+
+    /// Apply RMSNorm: out = (x / rms(x)) * weight
+    ///
+    /// One threadgroup per token (row).  Threads cooperate to compute the
+    /// per-row sum-of-squares, then independently normalize and scale.
+    ///
+    /// - Parameters:
+    ///   - input:  [numTokens, hiddenDim]
+    ///   - weight: [hiddenDim] learnable scale (γ)
+    ///   - eps:    numerical stability epsilon (typically 1e-5 or 1e-6)
+    public func rmsnorm(_ input: Tensor<Float>, weight: Tensor<Float>, eps: Float = 1e-5) throws -> Tensor<Float> {
+        precondition(input.shape.dimensions.count == 2, "rmsnorm input must be 2-D [tokens, hidden]")
+        let numTokens = input.shape.dimensions[0]
+        let hiddenDim = input.shape.dimensions[1]
+        precondition(weight.shape.count == hiddenDim, "weight size must equal hiddenDim")
+
+        let elementCount = input.shape.count
+
+        let inputContiguous  = input.isContiguous  ? input  : input.makeContiguousCopy()
+        let weightContiguous = weight.isContiguous ? weight : weight.makeContiguousCopy()
+
+        let (bufferIn, releaseIn)     = try createBufferWithTracking(from: inputContiguous)
+        let (bufferW,  releaseW)      = try createBufferWithTracking(from: weightContiguous)
+        let bufferOut                 = try createBuffer(elementCount: elementCount)
+
+        var dims = SIMD2<UInt32>(UInt32(numTokens), UInt32(hiddenDim))
+        let dimsBuffer = device.makeBuffer(bytes: &dims,
+                                           length: MemoryLayout<SIMD2<UInt32>>.stride,
+                                           options: .storageModeShared)!
+        var epsVal = eps
+        let epsBuffer = device.makeBuffer(bytes: &epsVal,
+                                          length: MemoryLayout<Float>.stride,
+                                          options: .storageModeShared)!
+
+        let pipeline = try loadKernel(named: "rmsnorm")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.invalidKernelConfiguration("Failed to create command buffer/encoder")
+        }
+
+        // Power-of-2 thread count required for tree reduction correctness
+        let threadsPerGroup = pow2ThreadCount(hiddenDim)
+        let scratchBytes    = threadsPerGroup * MemoryLayout<Float>.stride
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(bufferIn,   offset: 0, index: 0)
+        encoder.setBuffer(bufferW,    offset: 0, index: 1)
+        encoder.setBuffer(bufferOut,  offset: 0, index: 2)
+        encoder.setBuffer(dimsBuffer, offset: 0, index: 3)
+        encoder.setBuffer(epsBuffer,  offset: 0, index: 4)
+        encoder.setThreadgroupMemoryLength(scratchBytes, index: 0)
+
+        let threadsPerThreadgroup = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        let threadgroupsPerGrid   = MTLSize(width: numTokens, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if releaseIn { bufferPool.release(bufferIn, elementCount: elementCount) }
+        if releaseW  { bufferPool.release(bufferW,  elementCount: hiddenDim) }
+
+        let storage = TensorStorage<Float>(gpuBuffer: bufferOut, count: elementCount)
+        let pool = self.bufferPool
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(bufferOut, elementCount: elementCount)
+        }
+        return Tensor<Float>(shape: input.shape, storage: storage)
+    }
+
+    // MARK: - Phase 3: Activations (ActivationBackend)
+
+    /// SiLU activation: out[i] = x[i] * sigmoid(x[i])
+    ///
+    /// Simple element-wise kernel — each thread handles one element.
+    public func silu(_ input: Tensor<Float>) throws -> Tensor<Float> {
+        return try elementWiseActivation(input, kernelName: "silu")
+    }
+
+    /// GELU activation (tanh approximation)
+    ///
+    /// Simple element-wise kernel — each thread handles one element.
+    public func gelu(_ input: Tensor<Float>) throws -> Tensor<Float> {
+        return try elementWiseActivation(input, kernelName: "gelu")
+    }
+
+    /// Shared helper for element-wise activation kernels (silu / gelu)
+    ///
+    /// Both kernels share the same buffer layout:
+    ///   [0] input  [1] output  [2] n (uint element count)
+    private func elementWiseActivation(_ input: Tensor<Float>, kernelName: String) throws -> Tensor<Float> {
+        let elementCount = input.shape.count
+        guard elementCount > 0 else { return input }
+
+        let inputContiguous = input.isContiguous ? input : input.makeContiguousCopy()
+        let (bufferIn, releaseIn) = try createBufferWithTracking(from: inputContiguous)
+        let bufferOut = try createBuffer(elementCount: elementCount)
+
+        var n = UInt32(elementCount)
+        let nBuffer = device.makeBuffer(bytes: &n,
+                                        length: MemoryLayout<UInt32>.stride,
+                                        options: .storageModeShared)!
+
+        let pipeline = try loadKernel(named: kernelName)
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.invalidKernelConfiguration("Failed to create command buffer/encoder")
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(bufferIn,  offset: 0, index: 0)
+        encoder.setBuffer(bufferOut, offset: 0, index: 1)
+        encoder.setBuffer(nBuffer,   offset: 0, index: 2)
+
+        let threadsPerGroup = min(256, elementCount)
+        let numGroups       = (elementCount + threadsPerGroup - 1) / threadsPerGroup
+        encoder.dispatchThreadgroups(MTLSize(width: numGroups, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if releaseIn { bufferPool.release(bufferIn, elementCount: elementCount) }
+
+        let storage = TensorStorage<Float>(gpuBuffer: bufferOut, count: elementCount)
+        let pool = self.bufferPool
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(bufferOut, elementCount: elementCount)
+        }
+        return Tensor<Float>(shape: input.shape, storage: storage)
     }
 }
 

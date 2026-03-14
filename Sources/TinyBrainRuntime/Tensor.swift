@@ -1088,10 +1088,16 @@ extension Tensor where Element == Float {
     ///
     /// - Returns: A new tensor with GELU applied element-wise
     public func gelu() -> Tensor {
+        // ── GPU fast-path (Phase 3) ──────────────────────────────────────
+        return TinyBrainBackend.dispatchGELU(self) { self.geluCPU() }
+    }
+
+    /// CPU-only GELU (used as GPU fallback)
+    func geluCPU() -> Tensor {
         var result = Tensor.zeros(shape: self.shape)
-        
+
         let sqrt2OverPi = sqrt(2.0 / Float.pi)
-        
+
         for i in 0..<self.data.count {
             let x = self.data[i]
             let x3 = x * x * x
@@ -1099,7 +1105,28 @@ extension Tensor where Element == Float {
             let tanhVal = tanh(inner)
             result.data[i] = 0.5 * x * (1.0 + tanhVal)
         }
-        
+
+        return result
+    }
+
+    /// Apply SiLU (Swish) activation function: out[i] = x[i] * sigmoid(x[i])
+    ///
+    /// SiLU is the activation function used in Llama-family FFN gate projections.
+    /// Unlike GELU, SiLU uses the element's own value as its gate weight.
+    ///
+    /// - Returns: A new tensor with SiLU applied element-wise
+    public func silu() -> Tensor {
+        // ── GPU fast-path (Phase 3) ──────────────────────────────────────
+        return TinyBrainBackend.dispatchSiLU(self) { self.siluCPU() }
+    }
+
+    /// CPU-only SiLU (used as GPU fallback)
+    func siluCPU() -> Tensor {
+        var result = Tensor.zeros(shape: self.shape)
+        for i in 0..<self.data.count {
+            let x = self.data[i]
+            result.data[i] = x / (1.0 + exp(-x))
+        }
         return result
     }
     
@@ -1220,6 +1247,17 @@ extension Tensor where Element == Float {
     /// - Parameter epsilon: Small value for numerical stability (default: 1e-7)
     /// - Returns: A new tensor with softmax applied along the last dimension
     public func softmax(epsilon: Float = 1e-7) -> Tensor {
+        precondition(shape.dimensions.count >= 1, "Cannot apply softmax to empty tensor")
+
+        // ── GPU fast-path (Phase 3) ──────────────────────────────────────
+        // Attempt Metal dispatch; falls back to the CPU closure if Metal is
+        // not configured or the element count is too small to be worth it.
+        let gpuResult = TinyBrainBackend.dispatchSoftmax(self) { self.softmaxCPU(epsilon: epsilon) }
+        return gpuResult
+    }
+
+    /// CPU-only softmax (used as GPU fallback)
+    func softmaxCPU(epsilon: Float = 1e-7) -> Tensor {
         precondition(shape.dimensions.count >= 1, "Cannot apply softmax to empty tensor")
         
         var result = Tensor.zeros(shape: self.shape)
@@ -1394,7 +1432,67 @@ extension Tensor where Element == Float {
                 result.data[startIdx + i] = vecResult[i]
             }
         }
-        
+
+        return result
+    }
+
+    /// Apply RMSNorm (Root Mean Square Layer Normalization)
+    ///
+    /// Simpler than LayerNorm: no mean subtraction, only RMS-based scaling.
+    /// Used by Llama, Mistral, Falcon, and most modern open-weight LLMs.
+    ///
+    /// Formula: **out = (x / rms(x)) * weight**
+    /// where rms(x) = sqrt(mean(x²) + ε)
+    ///
+    /// - Parameters:
+    ///   - weight: Per-feature scale parameter γ (same size as last dimension)
+    ///   - epsilon: Numerical stability constant (default: 1e-5)
+    /// - Returns: A new tensor of same shape with RMSNorm applied per row
+    public func rmsNorm(weight: Tensor<Float>, epsilon: Float = 1e-5) -> Tensor {
+        precondition(shape.dimensions.count >= 1, "rmsNorm requires at least 1D tensor")
+        let hiddenDim = shape.dimensions.last!
+        precondition(weight.shape.count == hiddenDim,
+                     "weight size \(weight.shape.count) must equal last dim \(hiddenDim)")
+
+        // For 1-D input, treat it as [1, hiddenDim] for the GPU kernel
+        let input2D: Tensor<Float>
+        if shape.dimensions.count == 1 {
+            input2D = self.reshape(TensorShape(1, hiddenDim))
+        } else {
+            // Flatten leading dims into a single batch dim
+            let numRows = shape.count / hiddenDim
+            input2D = self.reshape(TensorShape(numRows, hiddenDim))
+        }
+
+        // ── GPU fast-path (Phase 3) ──────────────────────────────────────
+        let result2D = TinyBrainBackend.dispatchRMSNorm(input2D, weight: weight, eps: epsilon) {
+            input2D.rmsNormCPU(weight: weight, epsilon: epsilon)
+        }
+
+        // Restore original shape
+        return result2D.reshape(self.shape)
+    }
+
+    /// CPU-only RMSNorm (used as GPU fallback)
+    func rmsNormCPU(weight: Tensor<Float>, epsilon: Float = 1e-5) -> Tensor {
+        let hiddenDim = shape.dimensions.last!
+        let numRows   = shape.count / hiddenDim
+        var result    = Tensor.zeros(shape: self.shape)
+
+        for row in 0..<numRows {
+            let startIdx = row * hiddenDim
+            // Compute sum of squares
+            var ss: Float = 0.0
+            for i in 0..<hiddenDim {
+                let x = self.data[startIdx + i]
+                ss += x * x
+            }
+            let invRMS = 1.0 / sqrt(ss / Float(hiddenDim) + epsilon)
+            // Normalize and scale
+            for i in 0..<hiddenDim {
+                result.data[startIdx + i] = self.data[startIdx + i] * invRMS * weight.data[i]
+            }
+        }
         return result
     }
 }

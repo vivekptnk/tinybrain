@@ -36,6 +36,56 @@ public final class TinyBrainBackend {
     public static var isMetalConfigured: Bool {
         metalBackend != nil
     }
+
+    // MARK: - New-op dispatch helpers (Phase 3)
+
+    /// Dispatch softmax to GPU if the backend supports it
+    ///
+    /// Falls back to the closure `cpuFallback` when Metal is unavailable.
+    public static func dispatchSoftmax(
+        _ input: Tensor<Float>,
+        cpuFallback: () -> Tensor<Float>
+    ) -> Tensor<Float> {
+        guard let backend = metalBackend as? SoftmaxBackend else {
+            return cpuFallback()
+        }
+        return (try? backend.softmax(input)) ?? cpuFallback()
+    }
+
+    /// Dispatch RMSNorm to GPU if the backend supports it
+    public static func dispatchRMSNorm(
+        _ input: Tensor<Float>,
+        weight: Tensor<Float>,
+        eps: Float,
+        cpuFallback: () -> Tensor<Float>
+    ) -> Tensor<Float> {
+        guard let backend = metalBackend as? RMSNormBackend else {
+            return cpuFallback()
+        }
+        return (try? backend.rmsnorm(input, weight: weight, eps: eps)) ?? cpuFallback()
+    }
+
+    /// Dispatch SiLU activation to GPU if the backend supports it
+    public static func dispatchSiLU(
+        _ input: Tensor<Float>,
+        cpuFallback: () -> Tensor<Float>
+    ) -> Tensor<Float> {
+        guard let backend = metalBackend as? ActivationBackend else {
+            return cpuFallback()
+        }
+        return (try? backend.silu(input)) ?? cpuFallback()
+    }
+
+    /// Dispatch GELU activation to GPU if the backend supports it
+    public static func dispatchGELU(
+        _ input: Tensor<Float>,
+        cpuFallback: () -> Tensor<Float>
+    ) -> Tensor<Float> {
+        guard let backend = metalBackend as? ActivationBackend else {
+            return cpuFallback()
+        }
+        return (try? backend.gelu(input)) ?? cpuFallback()
+    }
     
     /// Check if matrix is large enough to benefit from GPU
     ///
@@ -105,5 +155,37 @@ public protocol TensorDownloader {
 /// **REVIEW HITLER FIX:** Protocol for INT8 quantized operations
 public protocol QuantizedMatMulBackend {
     func matmulQuantized(_ input: Tensor<Float>, _ quantized: QuantizedTensor) throws -> Tensor<Float>
+}
+
+/// Protocol for GPU-accelerated softmax
+///
+/// Implementations should apply numerically stable softmax along the last dimension.
+public protocol SoftmaxBackend {
+    /// Apply softmax along last dimension
+    /// - Parameter input: Tensor of any shape; softmax is applied per-row (last dim)
+    /// - Returns: Tensor of same shape with rows summing to 1
+    func softmax(_ input: Tensor<Float>) throws -> Tensor<Float>
+}
+
+/// Protocol for GPU-accelerated RMSNorm
+///
+/// Used by Llama-family models for pre-normalization.
+public protocol RMSNormBackend {
+    /// Apply RMSNorm: out = (x / rms(x)) * weight
+    /// - Parameters:
+    ///   - input: Input tensor [numTokens, hiddenDim]
+    ///   - weight: Per-feature scale weights [hiddenDim]
+    ///   - eps: Epsilon for numerical stability (default 1e-5)
+    /// - Returns: Normalized tensor of same shape
+    func rmsnorm(_ input: Tensor<Float>, weight: Tensor<Float>, eps: Float) throws -> Tensor<Float>
+}
+
+/// Protocol for GPU-accelerated element-wise activation functions
+public protocol ActivationBackend {
+    /// SiLU activation: out[i] = x[i] * sigmoid(x[i])
+    func silu(_ input: Tensor<Float>) throws -> Tensor<Float>
+
+    /// GELU activation (tanh approximation)
+    func gelu(_ input: Tensor<Float>) throws -> Tensor<Float>
 }
 

@@ -27,34 +27,58 @@ import Combine
 public struct ModelConfig: Codable {
     /// Number of transformer layers
     public let numLayers: Int
-    
+
     /// Hidden dimension size
     public let hiddenDim: Int
-    
+
     /// Number of attention heads (for queries)
     public let numHeads: Int
-    
+
     /// Number of key-value heads (for GQA/MQA, defaults to numHeads for MHA)
     public let numKVHeads: Int
-    
+
     /// Vocabulary size
     public let vocabSize: Int
-    
+
     /// Maximum sequence length
     public let maxSeqLen: Int
-    
+
+    /// FFN intermediate dimension (defaults to 4 * hiddenDim)
+    public let intermediateDim: Int
+
     /// Computed: KV dimension (hiddenDim / numHeads * numKVHeads)
     public var kvDim: Int {
         return (hiddenDim / numHeads) * numKVHeads
     }
-    
-    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048, numKVHeads: Int? = nil) {
+
+    /// Computed: head dimension
+    public var headDim: Int {
+        return hiddenDim / numHeads
+    }
+
+    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil) {
         self.numLayers = numLayers
         self.hiddenDim = hiddenDim
         self.numHeads = numHeads
         self.numKVHeads = numKVHeads ?? numHeads  // Default to MHA if not specified
         self.vocabSize = vocabSize
         self.maxSeqLen = maxSeqLen
+        self.intermediateDim = intermediateDim ?? (4 * hiddenDim)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case numLayers, hiddenDim, numHeads, numKVHeads, vocabSize, maxSeqLen, intermediateDim
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        numLayers = try container.decode(Int.self, forKey: .numLayers)
+        hiddenDim = try container.decode(Int.self, forKey: .hiddenDim)
+        numHeads = try container.decode(Int.self, forKey: .numHeads)
+        numKVHeads = try container.decodeIfPresent(Int.self, forKey: .numKVHeads) ?? numHeads
+        vocabSize = try container.decode(Int.self, forKey: .vocabSize)
+        maxSeqLen = try container.decode(Int.self, forKey: .maxSeqLen)
+        intermediateDim = try container.decodeIfPresent(Int.self, forKey: .intermediateDim) ?? (4 * hiddenDim)
     }
 }
 
@@ -120,8 +144,13 @@ public final class ModelRunner {
         for (layerIndex, layerWeights) in weights.layers.enumerated() {
             hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
         }
-        
-        // 3. Output projection to logits
+
+        // 3. Final RMSNorm before output projection (LLaMA-style)
+        if let finalNorm = weights.finalNormWeights {
+            hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+        }
+
+        // 4. Output projection to logits
         let logitsRow = weights.output.apply(toRow: hiddenRow)
         let logits = logitsRow.squeezedRowVector()
 
@@ -294,24 +323,83 @@ private extension ModelRunner {
             position: currentPosition
         )
 
-        let attentionOutput = attention(hiddenRow: hiddenRow,
+        // Pre-attention RMSNorm (LLaMA-style pre-norm architecture)
+        let normedForAttn: Tensor<Float>
+        if let normWeights = layerWeights.inputNormWeights {
+            normedForAttn = hiddenRow.rmsNorm(weight: normWeights)
+        } else {
+            normedForAttn = hiddenRow
+        }
+
+        let attentionOutput = attention(hiddenRow: normedForAttn,
                                         layerWeights: layerWeights.attention,
                                         layerIndex: layerIndex)
-        let residual = hiddenRow + attentionOutput
-        
-        let ffnUp = layerWeights.feedForward.up.apply(toRow: residual).gelu()
-        let ffnDown = layerWeights.feedForward.down.apply(toRow: ffnUp)
-        return residual + ffnDown
+        let residual1 = hiddenRow + attentionOutput
+
+        // Pre-FFN RMSNorm
+        let normedForFFN: Tensor<Float>
+        if let normWeights = layerWeights.postAttentionNormWeights {
+            normedForFFN = residual1.rmsNorm(weight: normWeights)
+        } else {
+            normedForFFN = residual1
+        }
+
+        // Gated FFN: down_proj(silu(gate_proj(x)) * up_proj(x))
+        // Falls back to GELU-based FFN if no gate projection (toy models)
+        let ffnOutput: Tensor<Float>
+        if let gate = layerWeights.feedForward.gate {
+            let gateOut = gate.apply(toRow: normedForFFN).silu()
+            let upOut = layerWeights.feedForward.up.apply(toRow: normedForFFN)
+            let gated = gateOut * upOut
+            ffnOutput = layerWeights.feedForward.down.apply(toRow: gated)
+        } else {
+            let ffnUp = layerWeights.feedForward.up.apply(toRow: normedForFFN).gelu()
+            ffnOutput = layerWeights.feedForward.down.apply(toRow: ffnUp)
+        }
+
+        return residual1 + ffnOutput
     }
     
+    /// Apply Rotary Position Embeddings (RoPE) to a vector of shape [dim]
+    /// where dim = numHeads * headDim. RoPE is applied per-head.
+    func applyRoPE(_ vec: [Float], headDim: Int, numHeads: Int, position: Int) -> [Float] {
+        var result = vec
+        for head in 0..<numHeads {
+            let offset = head * headDim
+            for i in stride(from: 0, to: headDim, by: 2) {
+                let freqIdx = Float(i) / Float(headDim)
+                let theta = pow(10000.0, -freqIdx)
+                let angle = Float(position) * theta
+
+                let cosA = cos(angle)
+                let sinA = sin(angle)
+
+                let x0 = vec[offset + i]
+                let x1 = vec[offset + i + 1]
+
+                result[offset + i]     = x0 * cosA - x1 * sinA
+                result[offset + i + 1] = x0 * sinA + x1 * cosA
+            }
+        }
+        return result
+    }
+
     func attention(hiddenRow: Tensor<Float>,
                    layerWeights: AttentionProjectionWeights,
                    layerIndex: Int) -> Tensor<Float> {
-        let query = layerWeights.query.apply(toRow: hiddenRow)
+        var query = layerWeights.query.apply(toRow: hiddenRow)
         let keyRow = layerWeights.key.apply(toRow: hiddenRow)
         let valueRow = layerWeights.value.apply(toRow: hiddenRow)
 
-        let keyVec = keyRow.squeezedRowVector()
+        // Apply RoPE to query and key (not value)
+        let headDim = config.headDim
+        let queryData = applyRoPE(query.squeezedRowVector().data, headDim: headDim,
+                                   numHeads: config.numHeads, position: currentPosition)
+        query = Tensor<Float>(shape: query.shape, data: queryData)
+
+        let keyData = applyRoPE(keyRow.squeezedRowVector().data, headDim: headDim,
+                                 numHeads: config.numKVHeads, position: currentPosition)
+        let keyVec = Tensor<Float>(shape: TensorShape(config.kvDim), data: keyData)
         let valueVec = valueRow.squeezedRowVector()
 
         kvCache.append(layer: layerIndex, key: keyVec, value: valueVec, position: currentPosition)
@@ -320,7 +408,6 @@ private extension ModelRunner {
         let allKeys = kvCache.getKeys(layer: layerIndex, range: 0..<sequenceLength)
         let allValues = kvCache.getValues(layer: layerIndex, range: 0..<sequenceLength)
 
-        let headDim = config.hiddenDim / config.numHeads
         let scalingFactor = 1.0 / sqrt(Float(headDim))
 
         // Handle Grouped Query Attention (GQA):
