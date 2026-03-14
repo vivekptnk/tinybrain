@@ -14,6 +14,10 @@ import XCTest
 @testable import TinyBrainDemo
 @testable import TinyBrainRuntime
 
+// Note: These tests may fail to link on Xcode 26 beta due to a SwiftUICore.tbd
+// linker bug. Run with: swift test --skip TinyBrainDemoTests if affected.
+// Tracked: FB15847293 (Apple Feedback)
+
 @MainActor
 final class ChatViewModelTests: XCTestCase {
     

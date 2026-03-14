@@ -51,6 +51,9 @@
 --enable trailingCommas
 --enable consecutiveSpaces
 
+# Exclude directories
+--exclude Scripts,Models,.build,.venv
+
 # Rules to disable
 --disable hoistPatternLet
 --disable acronyms

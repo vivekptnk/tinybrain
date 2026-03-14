@@ -1,217 +1,269 @@
-# TinyBrain
-
-**Swift-Native On-Device LLM Inference Kit**
-
-[![Swift](https://img.shields.io/badge/Swift-5.10+-purple.svg)](https://swift.org)
-[![Platform](https://img.shields.io/badge/platform-iOS%2017%2B%20%7C%20macOS%2014%2B-lightgrey.svg)](https://developer.apple.com)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-195%20passing-brightgreen.svg)]()
-
-TinyBrain is a **Swift-native runtime** for running large language models entirely on-device on iOS and macOS. It combines **educational transparency** with **practical performance**, making transformer inference hackable and efficient on Apple Silicon.
-
-> *What [micrograd](https://github.com/karpathy/micrograd) did for understanding backprop, TinyBrain does for understanding on-device LLM inference.*
+<p align="center">
+  <h1 align="center">TinyBrain</h1>
+  <p align="center">
+    <strong>See inside an AI's mind as it thinks.</strong>
+    <br />
+    Swift-native LLM inference for Apple Silicon — with live visualization.
+  </p>
+  <p align="center">
+    <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.10+-F05138?logo=swift&logoColor=white" alt="Swift" /></a>
+    <a href="https://developer.apple.com"><img src="https://img.shields.io/badge/Apple_Silicon-M1_M2_M3_M4-000000?logo=apple&logoColor=white" alt="Apple Silicon" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
+    <img src="https://img.shields.io/badge/tests-195_passing-brightgreen.svg" alt="Tests" />
+  </p>
+</p>
 
 ---
 
-## Why TinyBrain?
+TinyBrain runs large language models **entirely on your device** — no server, no API key, no internet. It's written in pure Swift with Metal GPU acceleration, and it's the only tool that lets you **watch the transformer think in real-time**.
 
-| | TinyBrain | llama.cpp | MLC-LLM | Core ML |
-|---|---|---|---|---|
-| **Language** | Swift + Metal | C/C++ | C++ + TVM | Obj-C API |
-| **Educational** | Yes | No | No | No |
-| **Hackable internals** | Yes | Limited | No | Black box |
-| **X-Ray Mode** | **Yes** | No | No | No |
-| **iOS integration** | Native SwiftUI | Wrapper | Wrapper | Native |
-
-**No C++ dependencies.** No TVM compiler stack. No black-box ANE scheduling. Just Swift, Metal, and code you can read.
+> *What [micrograd](https://github.com/karpathy/micrograd) did for understanding backprop, TinyBrain does for on-device LLM inference.*
 
 ---
 
 ## X-Ray Mode
 
-TinyBrain's standout feature: **real-time visualization of transformer internals** during inference. No other on-device LLM tool has this.
+The feature no other LLM runtime has: **live visualization of what's happening inside the transformer** as it generates each token.
 
-- **Attention Heatmap** — See which past tokens the model attends to at each layer
-- **Token Probability Bars** — Top candidates with scores, updated per token
-- **Layer Activation Flow** — Hidden state magnitude across transformer layers
-- **KV Cache Grid** — Page allocation status showing memory usage
-- **Entropy Indicator** — Model confidence with plain-English explanations
+| Visualization | What It Shows |
+|---------------|---------------|
+| **Attention Heatmap** | Which past words the model is looking at right now |
+| **Token Probabilities** | The model's top guesses for the next word, with confidence scores |
+| **Layer Activations** | How the signal changes as it flows through each transformer layer |
+| **KV Cache** | Memory page usage — see the cache fill up in real-time |
+| **Entropy Meter** | How confident or uncertain the model is, in plain English |
 
-Zero performance impact when disabled. Built with SwiftUI `Canvas` for high-performance rendering.
-
----
-
-## Features
-
-- **Pure Swift + Metal** — No C/C++ dependencies
-- **INT8 Quantization** — 75% memory savings, <1% accuracy loss
-- **Metal GPU Kernels** — Tiled matmul, fused INT8 dequant for Apple Silicon
-- **Paged KV Cache** — 2048-token context with O(n) inference
-- **Streaming Output** — AsyncSequence with probability, entropy, and timing metadata
-- **BPE Tokenizer** — Unicode-normalized byte-pair encoding with HuggingFace adapter
-- **Advanced Sampling** — Temperature, top-K, top-P, repetition penalty
-- **X-Ray Mode** — Live attention, logits, and activation visualization
-- **InferenceObserver** — Zero-cost protocol to instrument the inference pipeline
-- **SwiftUI Demo** — Chat app with telemetry sidebar and X-Ray panel
-- **Benchmark CLI** — YAML scenarios with JSON/Markdown output
+Toggle it on with one button. Zero performance impact when off.
 
 ---
 
-## Quick Start
+## Get Started (5 minutes)
 
-### Prerequisites
+### What You Need
 
-- macOS 14+ / iOS 17+
-- Xcode 16+
-- Swift 5.10+
-- Apple Silicon recommended (M1/M2/M3/M4)
+- A Mac with Apple Silicon (M1 or newer)
+- macOS 14 or later
+- [Xcode](https://developer.apple.com/xcode/) 16 or later (free from the App Store)
+- Python 3.11+ (for model conversion only)
 
-### Build & Test
+### Step 1: Clone and Build
+
+Open Terminal and run:
 
 ```bash
-git clone https://github.com/vivekp/tinybrain.git
+git clone https://github.com/vivekptnk/tinybrain.git
 cd tinybrain
 swift build
-swift test
 ```
 
-### Run the Demo
+That's it. No `npm install`, no `pip install`, no Docker. Just `swift build`.
+
+### Step 2: Run the Demo
 
 ```bash
-# Command line
 swift run tinybrain-chat
-
-# Xcode (recommended for full UI + X-Ray)
-open Package.swift
-# Select ChatDemo scheme → Run
 ```
 
----
+This runs with a built-in toy model so you can see the UI immediately. The output won't be real language (it's random weights), but you'll see the full inference pipeline working — streaming tokens, telemetry, and X-Ray Mode.
 
-## Load Any HuggingFace Model
+### Step 3: Run with a Real Model (Optional)
+
+To get actual language output, you need a real model. Here's how:
 
 ```bash
-# 1. Download
+# Install Python dependencies (one time)
+pip install torch safetensors
+
+# Download TinyLlama (1.1B parameters, ~2GB download)
 huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir Models/tinyllama-raw
 
-# 2. Convert to TinyBrain format
+# Convert to TinyBrain format (~30 seconds)
 python Scripts/convert_model.py \
   --input Models/tinyllama-raw/model.safetensors \
   --output Models/tinyllama-1.1b-int8.tbf \
   --auto-config
 
-# 3. Run
+# Run with the real model
 swift run tinybrain-chat
 ```
 
-Works with TinyLlama, Llama-2/3, Phi, Gemma, and any model with a standard HuggingFace `tokenizer.json`.
+### Step 4: Open in Xcode (Best Experience)
+
+For the full GUI with X-Ray Mode:
+
+```bash
+open Package.swift
+```
+
+This opens the project in Xcode. Select the **ChatDemo** scheme from the dropdown, then hit **Run** (or press `Cmd+R`).
+
+> **macOS Tahoe note:** If the text field doesn't accept input, go to Edit Scheme > Run > Options and uncheck "Use the sandbox". This is a known macOS 15 SPM bug — the demo provides preset buttons as a workaround.
 
 ---
 
-## Usage
+## Use TinyBrain in Your Own App
 
-### Inference
+Add TinyBrain to your Swift project:
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/vivekptnk/tinybrain.git", from: "0.1.0")
+]
+```
+
+### Run Inference
 
 ```swift
 import TinyBrain
 
-let config = ModelConfig(numLayers: 6, hiddenDim: 768, numHeads: 12, vocabSize: 32000)
-let weights = ModelWeights.makeToyModel(config: config)
+// Load a model
+let weights = try ModelWeights.load(from: "path/to/model.tbf")
 let runner = ModelRunner(weights: weights)
 
-let genConfig = GenerationConfig(
+// Generate tokens
+let config = GenerationConfig(
     maxTokens: 100,
     sampler: SamplerConfig(temperature: 0.7, topK: 40),
     stopTokens: []
 )
 
-for try await output in runner.generateStream(prompt: tokenIds, config: genConfig) {
-    print("Token \(output.tokenId), prob: \(output.probability)")
+for try await output in runner.generateStream(prompt: tokenIds, config: config) {
+    let text = tokenizer.decode([output.tokenId])
+    print(text, terminator: "")
 }
 ```
 
-### X-Ray: Observe Transformer Internals
+### Watch the Model Think (X-Ray API)
 
 ```swift
 class MyObserver: InferenceObserver {
     func didComputeAttention(layerIndex: Int, weights: [Float], position: Int) {
-        // weights[i] = how much attention position `position` pays to position `i`
+        // `weights` shows how much attention each past token gets
+        // weights[0] = attention to first token, weights[1] = second, etc.
+        // They sum to 1.0 (it's a probability distribution)
     }
 
     func didEnterLayer(layerIndex: Int, hiddenStateNorm: Float, position: Int) {
-        // Track signal magnitude through the network
+        // Track how the signal magnitude changes through the network
     }
 
     func didComputeLogits(logits: [Float], position: Int) {
-        // Full output distribution before sampling
+        // The raw output scores before sampling
+        // logits.count == vocabulary size (e.g., 32000 for Llama)
     }
 }
 
-runner.observer = MyObserver()  // Attach — callbacks fire per token
-runner.observer = nil           // Detach — zero overhead
+// Attach — zero cost when nil
+runner.observer = MyObserver()
+
+// Detach when done
+runner.observer = nil
 ```
+
+---
+
+## How It Works
+
+```
+You type: "What is gravity?"
+         |
+         v
+  ┌─────────────────┐
+  │    Tokenizer     │   Converts text to numbers
+  │  "What" → 1024   │   using byte-pair encoding
+  └────────┬─────────┘
+           v
+  ┌─────────────────┐
+  │   ModelRunner    │   Runs the transformer:
+  │                  │   1. Look up token embedding
+  │  For each layer: │   2. Compute attention (Q×K^T)
+  │   • Attention    │   3. Cache keys/values (KV cache)
+  │   • Feed-forward │   4. Apply feed-forward network
+  │   • Residual add │   5. Repeat for all layers
+  └────────┬─────────┘
+           v
+  ┌─────────────────┐
+  │    Sampler       │   Picks the next token:
+  │  temperature=0.7 │   • Apply temperature scaling
+  │  topK=40         │   • Filter to top-K candidates
+  │  → token 4821    │   • Sample from distribution
+  └────────┬─────────┘
+           v
+  ┌─────────────────┐
+  │   Tokenizer      │   Converts back to text
+  │  4821 → "force"  │   and streams to the UI
+  └──────────────────┘
+```
+
+All of this happens **on your device**, using Metal GPU acceleration. No internet required.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────┐
-│     TinyBrain Chat (SwiftUI)        │
-│  ┌──────────┐  ┌─────────────────┐  │
-│  │ Chat View │  │  X-Ray Panel    │  │
-│  │           │  │  • Attention    │  │
-│  │           │  │  • Probabilities│  │
-│  │           │  │  • Activations  │  │
-│  │           │  │  • KV Cache     │  │
-│  └──────────┘  └─────────────────┘  │
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│          Runtime Layer              │
-│  ┌──────────┬──────────┬─────────┐  │
-│  │Tokenizer │ Sampler  │Observer │  │
-│  └──────────┴──────────┴─────────┘  │
-│  ┌───────────────────────────────┐  │
-│  │        ModelRunner            │  │
-│  │  Attention → FFN → KV-Cache   │  │
-│  └───────────────────────────────┘  │
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│         Backend Layer               │
-│  ┌──────────┐  ┌─────────────────┐  │
-│  │  Metal   │  │  CPU Fallback   │  │
-│  │ Kernels  │  │  (Accelerate)   │  │
-│  └──────────┘  └─────────────────┘  │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────┐
+│      TinyBrain Chat (SwiftUI)        │
+│  ┌───────────┐  ┌──────────────────┐ │
+│  │ Chat View  │  │  X-Ray Panel     │ │
+│  │            │  │  Attention map   │ │
+│  │            │  │  Token probs     │ │
+│  │            │  │  Layer norms     │ │
+│  │            │  │  KV cache grid   │ │
+│  └───────────┘  └──────────────────┘ │
+└───────────┬──────────────────────────┘
+            v
+┌───────────────────────────────────────┐
+│          TinyBrainRuntime             │
+│  Tokenizer · Sampler · ModelRunner    │
+│  KV Cache · Quantization · Observer   │
+└───────────┬───────────────────────────┘
+            v
+┌───────────────────────────────────────┐
+│          TinyBrainMetal               │
+│  GPU Kernels · Buffer Pool            │
+│  (Falls back to CPU via Accelerate)   │
+└───────────────────────────────────────┘
 ```
 
-### Modules
-
-| Module | Purpose |
-|--------|---------|
-| `TinyBrainRuntime` | Tensor engine, ModelRunner, KV cache, quantization, sampler, observer |
-| `TinyBrainMetal` | GPU kernels (tiled matmul, INT8 dequant), buffer pool |
-| `TinyBrainTokenizer` | BPE tokenizer, HuggingFace adapter, format-agnostic loading |
-| `TinyBrainDemo` | SwiftUI chat app, X-Ray visualizations, telemetry |
-| `TinyBrainBench` | CLI benchmark tool with YAML scenarios |
+| Module | What It Does |
+|--------|-------------|
+| `TinyBrainRuntime` | The core engine: tensors, model runner, KV cache, quantization, sampling |
+| `TinyBrainMetal` | GPU acceleration via Metal shaders (with automatic CPU fallback) |
+| `TinyBrainTokenizer` | Converts text to/from token IDs (supports HuggingFace format) |
+| `TinyBrainDemo` | The SwiftUI chat app with X-Ray visualizations |
+| `TinyBrainBench` | Command-line benchmarking tool |
 
 ---
 
 ## Performance
 
-Measured on **MacBook Pro M4 Max** (40 GPU cores):
+Measured on MacBook Pro M4 Max:
 
-| Metric | Value |
-|--------|-------|
-| MatMul 1536x1536 (Metal) | 4.73ms |
-| Buffer pool allocation | 0.001ms (450x vs raw alloc) |
-| KV cache append | 0.41ms/token |
-| Max context | 2048 tokens (paged) |
-| TinyLlama 1.1B memory (INT8) | 1.1 GB (75% savings vs FP32) |
-| Quantization accuracy loss | <1% |
-| Test suite | 195 tests, all passing |
+| What | How Fast |
+|------|----------|
+| Matrix multiply (1536x1536, Metal) | 4.73ms |
+| GPU buffer allocation (pooled) | 0.001ms (450x faster than raw) |
+| KV cache append per token | 0.41ms |
+| Maximum context length | 2048 tokens |
+| TinyLlama 1.1B memory (INT8) | 1.1 GB (75% less than FP32) |
+| Quantization accuracy loss | Less than 1% |
+
+---
+
+## Supported Models
+
+TinyBrain works with any HuggingFace model that has a `tokenizer.json`:
+
+| Model | Parameters | Status |
+|-------|-----------|--------|
+| TinyLlama | 1.1B | Tested and working |
+| Llama 2/3 | Various | Compatible (same format) |
+| Phi (Microsoft) | Various | Compatible |
+| Gemma (Google) | Various | Compatible |
+
+To add a new model, just download it and run the converter script. No code changes needed.
 
 ---
 
@@ -220,42 +272,52 @@ Measured on **MacBook Pro M4 Max** (40 GPU cores):
 ```
 tinybrain/
 ├── Sources/
-│   ├── TinyBrainRuntime/       # Tensor, ModelRunner, KV cache, quantization
-│   ├── TinyBrainMetal/         # Metal GPU backend
-│   ├── TinyBrainTokenizer/     # BPE + HuggingFace adapter
+│   ├── TinyBrainRuntime/       # Core engine
+│   ├── TinyBrainMetal/         # GPU backend
+│   ├── TinyBrainTokenizer/     # Tokenization
 │   ├── TinyBrainDemo/          # SwiftUI app + X-Ray views
-│   └── TinyBrainBench/         # Benchmark CLI
+│   └── TinyBrainBench/         # Benchmarks
 ├── Examples/ChatDemo/          # App entry point
 ├── Tests/                      # 195 tests
-├── Scripts/                    # Model converter
-├── Models/                     # Model files (gitignored)
-└── docs/                       # Architecture docs
+├── Scripts/                    # Model converter (Python)
+└── docs/                       # Architecture documentation
 ```
+
+---
+
+## Run the Tests
+
+```bash
+swift test --skip TinyBrainDemoTests
+```
+
+> The `--skip TinyBrainDemoTests` is needed because of a known Xcode beta linker issue with SwiftUI test targets. All 195 other tests pass.
+
+---
+
+## Why Not Just Use llama.cpp?
+
+You absolutely can. llama.cpp is great for raw performance.
+
+TinyBrain is for when you want to:
+- **Learn** how transformers actually work (the code is readable Swift, not optimized C++)
+- **See** what the model is doing in real-time (X-Ray Mode)
+- **Build** native iOS/macOS apps without bridging C++ (pure Swift + SwiftUI)
+- **Hack** on the internals (swap attention mechanisms, try different samplers, add your own visualizations)
 
 ---
 
 ## Contributing
 
-1. Read [AGENTS.md](AGENTS.md) for project conventions
-2. Follow TDD — write tests first
-3. Run `swift test` before submitting PRs
-
----
-
-## Related Projects
-
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) — C/C++ LLM inference
-- [MLC-LLM](https://github.com/mlc-ai/mlc-llm) — TVM-based mobile runtime
-- [Core ML Tools](https://github.com/apple/coremltools) — Apple's ML toolkit
-
-TinyBrain is different: **Swift-native, educational, and you can see inside the transformer while it thinks.**
+PRs welcome. Please:
+1. Read [AGENTS.md](AGENTS.md) for conventions
+2. Write tests first (TDD)
+3. Run `swift test --skip TinyBrainDemoTests` before submitting
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE)
 
----
-
-**Author:** Vivek Pattanaik
+**Author:** [Vivek Pattanaik](https://github.com/vivekptnk)
