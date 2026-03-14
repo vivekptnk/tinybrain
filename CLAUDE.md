@@ -5,46 +5,33 @@ Swift-native on-device LLM inference runtime for Apple Silicon. Educational + pr
 
 ## Quick Reference
 - **PRD:** `docs/prd.md`
-- **Task Roadmap:** `docs/TASK-ROADMAP.md`
-- **Task Specs:** `docs/tasks/TB-*.md`
-- **Architecture rules:** `AGENTS.md`
-
-## Project Status
-- TB-001 through TB-009: ALL COMPLETE
-- 251 tests passing (244 Swift + 7 Python)
-- v0.1.0 ready for release tag
-- TinyLlama 1.1B running with real language output
+- **Architecture:** `docs/overview.md`
+- **Project rules:** `AGENTS.md`
 
 ## Build & Test
 ```bash
-swift build          # Build all targets
-swift test           # Run all tests
-swift run ChatDemo   # Run the chat demo (needs model file)
-swift run tinybrain-bench  # Run benchmarks
+swift build                         # Build all targets
+swift test --skip TinyBrainDemoTests  # Run tests (skip Demo due to Xcode beta linker bug)
+swift run tinybrain-chat            # Run the chat demo
+swift run tinybrain-bench           # Run benchmarks
 ```
 
 ## Module Structure
 ```
 Sources/
-  TinyBrainRuntime/    — Tensor, ops, ModelRunner, KV-cache, quantization, streaming
+  TinyBrainRuntime/    — Tensor, ModelRunner, KV-cache, quantization, sampler, InferenceObserver
   TinyBrainMetal/      — Metal GPU backend, kernels, buffer pool
   TinyBrainTokenizer/  — BPE tokenizer, HuggingFace adapter, TokenizerLoader
-  TinyBrainDemo/       — SwiftUI ChatView, ChatViewModel
+  TinyBrainDemo/       — SwiftUI ChatView, ChatViewModel, X-Ray visualizations
 Examples/
   ChatDemo/            — Executable entry point for the demo app
-Tests/
-  TinyBrainRuntimeTests/
-  TinyBrainMetalTests/
-  TinyBrainTokenizerTests/
-  TinyBrainDemoTests/
-Scripts/               — Python model converter, diagnostic scripts
-docs/                  — PRD, task specs, completion reports
+Tests/                 — 195 tests across all modules
+Scripts/               — Python model converter
 ```
 
 ## Key Conventions
 - Swift 5.10+, iOS 17, macOS 14
 - TDD: write tests first, then implement
-- Semantic commits: `feat/runtime`, `core/metal`, `ui/demo`
 - Protocol-oriented design for pluggable components
 - Metal ops always have CPU fallbacks
 - Never commit without explicit permission
@@ -55,6 +42,9 @@ docs/                  — PRD, task specs, completion reports
 - TBF format (TinyBrain Format) — see `docs/tbf-format-spec.md`
 - Convert with: `python Scripts/convert_model.py`
 
-## Current Focus
-- TB-010: X-Ray Mode — live transformer visualization overlay
-- Differentiator feature for public launch
+## Key Architecture: X-Ray Mode
+- `InferenceObserver` protocol in `Sources/TinyBrainRuntime/InferenceObserver.swift`
+- `ModelRunner.observer` property — weak ref, zero cost when nil
+- 3 hooks: `didComputeAttention`, `didEnterLayer`, `didComputeLogits`
+- `XRayViewModel` accumulates observations → publishes `XRaySnapshot` to SwiftUI
+- Visualizations in `Sources/TinyBrainDemo/Views/XRay/`

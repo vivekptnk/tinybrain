@@ -21,32 +21,54 @@ public struct XRayPanel: View {
                 Divider()
 
                 // 1. Attention Heatmap (hero visualization)
-                AttentionHeatmapView(
-                    snapshots: xRay.snapshotHistory,
-                    selectedLayer: xRay.selectedLayer,
-                    numLayers: xRay.numLayers,
-                    onLayerChange: { xRay.selectedLayer = $0 }
-                )
+                vizSection(
+                    title: nil,
+                    tip: "Each row is a generated token. Color intensity shows how much attention the model pays to each past position."
+                ) {
+                    AttentionHeatmapView(
+                        snapshots: xRay.snapshotHistory,
+                        selectedLayer: xRay.selectedLayer,
+                        numLayers: xRay.numLayers,
+                        onLayerChange: { xRay.selectedLayer = $0 }
+                    )
+                }
 
                 Divider()
 
                 // 2. Token Probability Bar Chart
-                TokenProbabilityBar(
-                    candidates: xRay.latestSnapshot?.topCandidates ?? [],
-                    tokenDecoder: tokenDecoder
-                )
+                vizSection(
+                    title: nil,
+                    tip: "The model's top predictions for the next token. Longer bars = higher probability."
+                ) {
+                    TokenProbabilityBar(
+                        candidates: xRay.latestSnapshot?.topCandidates ?? [],
+                        tokenDecoder: tokenDecoder
+                    )
+                    .animation(.easeInOut(duration: 0.2), value: xRay.latestSnapshot?.position)
+                }
 
                 Divider()
 
                 // 3. Layer Activation Bars
-                LayerActivationView(
-                    layerNorms: xRay.latestSnapshot?.layerNorms ?? []
-                )
+                vizSection(
+                    title: nil,
+                    tip: "L2 norm of hidden state at each layer. Shows how signal magnitude evolves through the network."
+                ) {
+                    LayerActivationView(
+                        layerNorms: xRay.latestSnapshot?.layerNorms ?? []
+                    )
+                    .animation(.easeInOut(duration: 0.15), value: xRay.latestSnapshot?.position)
+                }
 
                 Divider()
 
                 // 4. KV Cache Page Grid
-                KVCacheGridView(pages: xRay.kvCachePages)
+                vizSection(
+                    title: nil,
+                    tip: "Memory pages storing past keys and values. Filled = cached data enabling O(n) inference."
+                ) {
+                    KVCacheGridView(pages: xRay.kvCachePages)
+                }
 
                 // Entropy indicator
                 if let snapshot = xRay.latestSnapshot {
@@ -124,5 +146,25 @@ public struct XRayPanel: View {
         if entropy < 3 { return "Moderate confidence — a few likely candidates" }
         if entropy < 6 { return "Uncertain — many plausible continuations" }
         return "High uncertainty — nearly random selection"
+    }
+
+    // MARK: - Visualization Section Wrapper
+
+    @ViewBuilder
+    private func vizSection<Content: View>(
+        title: String?,
+        tip: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let title {
+                sectionHeader(title)
+            }
+            content()
+            Text(tip)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

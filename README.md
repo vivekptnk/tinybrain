@@ -1,407 +1,261 @@
-# 🧠 TinyBrain
+# TinyBrain
 
 **Swift-Native On-Device LLM Inference Kit**
 
 [![Swift](https://img.shields.io/badge/Swift-5.10+-purple.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/platform-iOS%2017%2B%20%7C%20macOS%2014%2B-lightgrey.svg)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/vivekptnk/tinybrain/workflows/CI/badge.svg)](https://github.com/vivekptnk/tinybrain/actions)
+[![Tests](https://img.shields.io/badge/tests-195%20passing-brightgreen.svg)]()
 
-TinyBrain is a **Swift-native runtime** for running large language models (LLMs) entirely on-device on iOS and macOS. It combines **educational transparency** with **practical performance**, making transformer inference hackable and efficient on Apple Silicon.
+TinyBrain is a **Swift-native runtime** for running large language models entirely on-device on iOS and macOS. It combines **educational transparency** with **practical performance**, making transformer inference hackable and efficient on Apple Silicon.
 
----
-
-## ✨ Features
-
-- 🚀 **Swift-First**: No C++ dependencies, pure Swift + Metal
-- 🧮 **Quantization**: INT8 support (75% memory savings) ✅ **TB-004 Complete**
-- ⚡ **Metal Acceleration**: GPU-optimized kernels for Apple Silicon ✅ **Validated on M4 Max**
-- 🔄 **Streaming Output**: AsyncSequence-based token generation ✅ **TB-004 Complete**
-- 💾 **KV Cache**: Paged 2048-token context for efficient inference ✅ **TB-004 Complete**
-- 🌐 **Format-Agnostic**: Load ANY HuggingFace model automatically ✅ **TB-009 Complete**
-- 🎯 **Studio-Ready**: One-command model conversion and deployment ✅ **TB-007/008/009 Complete**
-- 🎓 **Educational**: Transparent, well-documented architecture
-- 📱 **Native**: Deep iOS/macOS integration with SwiftUI demo
-- 🔒 **Private**: 100% on-device inference, no network calls
+> *What [micrograd](https://github.com/karpathy/micrograd) did for understanding backprop, TinyBrain does for understanding on-device LLM inference.*
 
 ---
 
-## 🎯 Goals
+## Why TinyBrain?
 
-TinyBrain serves two main purposes:
+| | TinyBrain | llama.cpp | MLC-LLM | Core ML |
+|---|---|---|---|---|
+| **Language** | Swift + Metal | C/C++ | C++ + TVM | Obj-C API |
+| **Educational** | Yes | No | No | No |
+| **Hackable internals** | Yes | Limited | No | Black box |
+| **X-Ray Mode** | **Yes** | No | No | No |
+| **iOS integration** | Native SwiftUI | Wrapper | Wrapper | Native |
 
-1. **Educational**: Teach developers how LLMs work at the tensor level
-2. **Practical**: Enable real-time, private, offline inference on Apple devices
+**No C++ dependencies.** No TVM compiler stack. No black-box ANE scheduling. Just Swift, Metal, and code you can read.
 
 ---
 
-## 🚀 Quick Start
+## X-Ray Mode
+
+TinyBrain's standout feature: **real-time visualization of transformer internals** during inference. No other on-device LLM tool has this.
+
+- **Attention Heatmap** — See which past tokens the model attends to at each layer
+- **Token Probability Bars** — Top candidates with scores, updated per token
+- **Layer Activation Flow** — Hidden state magnitude across transformer layers
+- **KV Cache Grid** — Page allocation status showing memory usage
+- **Entropy Indicator** — Model confidence with plain-English explanations
+
+Zero performance impact when disabled. Built with SwiftUI `Canvas` for high-performance rendering.
+
+---
+
+## Features
+
+- **Pure Swift + Metal** — No C/C++ dependencies
+- **INT8 Quantization** — 75% memory savings, <1% accuracy loss
+- **Metal GPU Kernels** — Tiled matmul, fused INT8 dequant for Apple Silicon
+- **Paged KV Cache** — 2048-token context with O(n) inference
+- **Streaming Output** — AsyncSequence with probability, entropy, and timing metadata
+- **BPE Tokenizer** — Unicode-normalized byte-pair encoding with HuggingFace adapter
+- **Advanced Sampling** — Temperature, top-K, top-P, repetition penalty
+- **X-Ray Mode** — Live attention, logits, and activation visualization
+- **InferenceObserver** — Zero-cost protocol to instrument the inference pipeline
+- **SwiftUI Demo** — Chat app with telemetry sidebar and X-Ray panel
+- **Benchmark CLI** — YAML scenarios with JSON/Markdown output
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
-- macOS 14 Sonoma or later
+- macOS 14+ / iOS 17+
 - Xcode 16+
 - Swift 5.10+
-- Apple Silicon Mac (M1/M2/M3/M4) recommended
+- Apple Silicon recommended (M1/M2/M3/M4)
 
-### Installation
+### Build & Test
 
 ```bash
 git clone https://github.com/vivekp/tinybrain.git
 cd tinybrain
-make setup
+swift build
+swift test
 ```
 
-This will:
-- Install SwiftFormat and SwiftLint (via Homebrew if available)
-- Resolve Swift Package dependencies
-- Build the project
-- Run initial tests
-
-### Building
-
-**Two workflows:** SPM command-line OR Xcode IDE
-
-#### Option 1: Command Line (SPM)
+### Run the Demo
 
 ```bash
-# Build all targets
-make build
+# Command line
+swift run tinybrain-chat
 
-# Build in release mode
-make build-release
-
-# Run tests
-make test
-
-# Format code
-make format
-
-# Run linting
-make lint
-
-# Generate documentation
-make docs
-```
-
-#### Option 2: Xcode IDE (Recommended for Demo App)
-
-```bash
-# Open in Xcode
+# Xcode (recommended for full UI + X-Ray)
 open Package.swift
+# Select ChatDemo scheme → Run
 ```
-
-**Note for macOS Tahoe users:** The ChatDemo app requires proper app bundle configuration to enable TextField input. When running in Xcode:
-1. Select the `ChatDemo` scheme
-2. Edit Scheme → Run → Options
-3. Uncheck "Use the sandbox" (or run on a real iOS device where this isn't an issue)
-
-This is a known limitation of SPM executables on macOS 15.x. The `Info.plist` is included for future app bundle support.
 
 ---
 
-## 🎯 Model Studio Workflow
+## Load Any HuggingFace Model
 
-TinyBrain now supports loading ANY HuggingFace transformer model with a simple 3-step process:
-
-### 1. Download Model
 ```bash
-# Download any HuggingFace model
-hf download TinyLlama/TinyLlama-1.1B-Chat-v1.0
-# Or: git lfs clone https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0
-```
+# 1. Download
+huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir Models/tinyllama-raw
 
-### 2. Convert Weights
-```bash
-# Convert to TinyBrain format (one command!)
+# 2. Convert to TinyBrain format
 python Scripts/convert_model.py \
   --input Models/tinyllama-raw/model.safetensors \
   --output Models/tinyllama-1.1b-int8.tbf \
   --auto-config
+
+# 3. Run
+swift run tinybrain-chat
 ```
 
-### 3. Run App
-```bash
-# Open in Xcode (recommended)
-open Package.swift
-
-# Or run from command line
-swift run ChatDemo
-```
-
-**Result:** Real language output with 32K vocabulary! 🚀
-
-### Supported Models
-- ✅ **TinyLlama-1.1B** (tested and working)
-- ✅ **Llama-2/3** (same tokenizer format)
-- ✅ **Phi models** (Microsoft)
-- ✅ **Gemma** (Google)
-- ✅ **Any HuggingFace model** with standard tokenizer.json
+Works with TinyLlama, Llama-2/3, Phi, Gemma, and any model with a standard HuggingFace `tokenizer.json`.
 
 ---
 
-## 📦 Usage
+## Usage
 
-### Basic Inference
+### Inference
 
 ```swift
 import TinyBrain
 
-// Enable GPU acceleration
-TinyBrainBackend.enableMetal()
-
-// Create quantized weights (toy generator or load from disk)
-let config = ModelConfig(
-    numLayers: 6,
-    hiddenDim: 768,
-    numHeads: 12,
-    vocabSize: 32000,
-    maxSeqLen: 2048
-)
+let config = ModelConfig(numLayers: 6, hiddenDim: 768, numHeads: 12, vocabSize: 32000)
 let weights = ModelWeights.makeToyModel(config: config)
 let runner = ModelRunner(weights: weights)
 
-// Stream tokens with KV cache reuse
-let promptTokens = [1, 2, 3]  // Tokenized prompt
-for try await tokenId in runner.generateStream(prompt: promptTokens, maxTokens: 100) {
-    print(tokenId, terminator: " ")  // Progressive output!
+let genConfig = GenerationConfig(
+    maxTokens: 100,
+    sampler: SamplerConfig(temperature: 0.7, topK: 40),
+    stopTokens: []
+)
+
+for try await output in runner.generateStream(prompt: tokenIds, config: genConfig) {
+    print("Token \(output.tokenId), prob: \(output.probability)")
 }
 ```
 
-### Quantized Model Loading
+### X-Ray: Observe Transformer Internals
 
 ```swift
-// Load Float32 weights
-let weights = Tensor<Float>.random(shape: TensorShape(768, 3072))
+class MyObserver: InferenceObserver {
+    func didComputeAttention(layerIndex: Int, weights: [Float], position: Int) {
+        // weights[i] = how much attention position `position` pays to position `i`
+    }
 
-// Quantize to INT8 (75% memory savings!)
-let quantized = weights.quantize(mode: .perChannel)
-print("Savings: \(quantized.savingsVsFloat32() * 100)%")  // ~75%
+    func didEnterLayer(layerIndex: Int, hiddenStateNorm: Float, position: Int) {
+        // Track signal magnitude through the network
+    }
 
-// Use quantized weights for inference
-let input = Tensor<Float>.random(shape: TensorShape(128, 768))
-let output = input.matmul(quantized)  // Auto-dequantizes
-```
+    func didComputeLogits(logits: [Float], position: Int) {
+        // Full output distribution before sampling
+    }
+}
 
-### SwiftUI Demo
-
-A complete chat demo app is available in `Examples/ChatDemo/`:
-
-```bash
-open Examples/ChatDemo/ChatDemoApp.swift
-# Run in Xcode to see live inference
+runner.observer = MyObserver()  // Attach — callbacks fire per token
+runner.observer = nil           // Detach — zero overhead
 ```
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌─────────────────────────────────┐
-│   TinyBrain Chat (SwiftUI)      │
-└────────────┬────────────────────┘
+┌─────────────────────────────────────┐
+│     TinyBrain Chat (SwiftUI)        │
+│  ┌──────────┐  ┌─────────────────┐  │
+│  │ Chat View │  │  X-Ray Panel    │  │
+│  │           │  │  • Attention    │  │
+│  │           │  │  • Probabilities│  │
+│  │           │  │  • Activations  │  │
+│  │           │  │  • KV Cache     │  │
+│  └──────────┘  └─────────────────┘  │
+└────────────┬────────────────────────┘
              │
-┌────────────▼────────────────────┐
-│      Runtime Layer              │
-│  ┌──────────┬─────────────┐    │
-│  │Tokenizer │   Sampler   │    │
-│  └──────────┴─────────────┘    │
-│  ┌─────────────────────────┐   │
-│  │     ModelRunner         │   │
-│  │  ┌──────────────────┐   │   │
-│  │  │ Attention / MLP  │   │   │
-│  │  │    KV-Cache      │   │   │
-│  │  └──────────────────┘   │   │
-│  └─────────────────────────┘   │
-└────────────┬────────────────────┘
+┌────────────▼────────────────────────┐
+│          Runtime Layer              │
+│  ┌──────────┬──────────┬─────────┐  │
+│  │Tokenizer │ Sampler  │Observer │  │
+│  └──────────┴──────────┴─────────┘  │
+│  ┌───────────────────────────────┐  │
+│  │        ModelRunner            │  │
+│  │  Attention → FFN → KV-Cache   │  │
+│  └───────────────────────────────┘  │
+└────────────┬────────────────────────┘
              │
-┌────────────▼────────────────────┐
-│      Backend Layer              │
-│  ┌─────────┬──────────────┐    │
-│  │  Metal  │  Core ML     │    │
-│  │ Kernels │  (Optional)  │    │
-│  └─────────┴──────────────┘    │
-└─────────────────────────────────┘
+┌────────────▼────────────────────────┐
+│         Backend Layer               │
+│  ┌──────────┐  ┌─────────────────┐  │
+│  │  Metal   │  │  CPU Fallback   │  │
+│  │ Kernels  │  │  (Accelerate)   │  │
+│  └──────────┘  └─────────────────┘  │
+└─────────────────────────────────────┘
 ```
 
 ### Modules
 
-- **TinyBrainRuntime**: Core tensor operations and model runner
-- **TinyBrainMetal**: GPU-accelerated kernels via Metal
-- **TinyBrainTokenizer**: BPE/SentencePiece tokenization
-- **TinyBrainDemo**: SwiftUI demo application
-- **TinyBrainBench**: Performance benchmarking tools
+| Module | Purpose |
+|--------|---------|
+| `TinyBrainRuntime` | Tensor engine, ModelRunner, KV cache, quantization, sampler, observer |
+| `TinyBrainMetal` | GPU kernels (tiled matmul, INT8 dequant), buffer pool |
+| `TinyBrainTokenizer` | BPE tokenizer, HuggingFace adapter, format-agnostic loading |
+| `TinyBrainDemo` | SwiftUI chat app, X-Ray visualizations, telemetry |
+| `TinyBrainBench` | CLI benchmark tool with YAML scenarios |
 
 ---
 
-## 📚 Documentation
+## Performance
 
-Comprehensive documentation is available:
+Measured on **MacBook Pro M4 Max** (40 GPU cores):
 
-- **[docs/prd.md](docs/prd.md)**: Product Requirements Document
-- **[docs/overview.md](docs/overview.md)**: Architecture overview
-- **[docs/tasks/](docs/tasks/)**: Implementation roadmap
-- **API Docs**: Generate with `make docs`
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-make test
-
-# Run with coverage
-make test-coverage
-
-# Run linting and formatting checks
-make check
-```
+| Metric | Value |
+|--------|-------|
+| MatMul 1536x1536 (Metal) | 4.73ms |
+| Buffer pool allocation | 0.001ms (450x vs raw alloc) |
+| KV cache append | 0.41ms/token |
+| Max context | 2048 tokens (paged) |
+| TinyLlama 1.1B memory (INT8) | 1.1 GB (75% savings vs FP32) |
+| Quantization accuracy loss | <1% |
+| Test suite | 195 tests, all passing |
 
 ---
 
-## 🛠️ Development
-
-### Project Structure
+## Project Structure
 
 ```
 tinybrain/
 ├── Sources/
-│   ├── TinyBrainRuntime/     # Core runtime
-│   ├── TinyBrainMetal/       # Metal backend
-│   ├── TinyBrainTokenizer/   # Tokenization
-│   ├── TinyBrainDemo/        # Demo app components
-│   └── TinyBrainBench/       # Benchmark CLI
-├── Tests/                     # Unit tests
-├── Examples/
-│   └── ChatDemo/             # SwiftUI demo app
-├── Scripts/                   # Build and setup scripts
-├── Models/                    # Model files (gitignored)
-├── docs/                      # Documentation
-└── Package.swift             # SPM manifest
+│   ├── TinyBrainRuntime/       # Tensor, ModelRunner, KV cache, quantization
+│   ├── TinyBrainMetal/         # Metal GPU backend
+│   ├── TinyBrainTokenizer/     # BPE + HuggingFace adapter
+│   ├── TinyBrainDemo/          # SwiftUI app + X-Ray views
+│   └── TinyBrainBench/         # Benchmark CLI
+├── Examples/ChatDemo/          # App entry point
+├── Tests/                      # 195 tests
+├── Scripts/                    # Model converter
+├── Models/                     # Model files (gitignored)
+└── docs/                       # Architecture docs
 ```
 
-### Coding Standards
+---
 
-- Swift 5.10+ with strict concurrency checking
-- SwiftFormat for code formatting (`.swiftformat`)
-- SwiftLint for static analysis (`.swiftlint.yml`)
-- DocC-compatible documentation comments
-- 100% test coverage target for critical paths
+## Contributing
+
+1. Read [AGENTS.md](AGENTS.md) for project conventions
+2. Follow TDD — write tests first
+3. Run `swift test` before submitting PRs
 
 ---
 
-## 🗺️ Roadmap
+## Related Projects
 
-| Phase | Status | Deliverables |
-|-------|--------|--------------|
-| **TB-001: Scaffold** | ✅ Complete | Project structure, tooling, docs |
-| **TB-002: Runtime** | ✅ Complete | Tensor engine (Float32, Accelerate) |
-| **TB-003: Metal** | ✅ Complete | GPU MatMul kernel, buffer pool |
-| **TB-004: Quant/KV** | ✅ **COMPLETE** | **INT8 quantization, paged KV cache, streaming API** |
-| **TB-005: Tokenizer** | 📋 Planned | BPE tokenizer, advanced sampling |
-| **TB-006: Demo** | 📋 Planned | SwiftUI chat app with live inference |
-| **TB-007: Benchmarks** | 📋 Planned | Performance suite, energy metrics |
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) — C/C++ LLM inference
+- [MLC-LLM](https://github.com/mlc-ai/mlc-llm) — TVM-based mobile runtime
+- [Core ML Tools](https://github.com/apple/coremltools) — Apple's ML toolkit
 
-### TB-004 Highlights (Just Completed!)
-
-- ✅ **GPU-resident tensors** (0.74-1.28× vs M4 AMX)
-- ✅ **Generic Tensor<Element>** (Float32, Float16, Int8)
-- ✅ **Copy-on-Write** optimization
-- ✅ **INT8 quantization** (75% memory savings, <1% error)
-- ✅ **Paged KV cache** (2048-token context)
-- ✅ **Streaming API** (AsyncSequence for SwiftUI)
-- ✅ **94 tests passing** on M4 Max
-
-See [docs/TB-004-COMPLETE.md](docs/TB-004-COMPLETE.md) for full details.
+TinyBrain is different: **Swift-native, educational, and you can see inside the transformer while it thinks.**
 
 ---
 
-## 🤝 Contributing
+## License
 
-We welcome contributions! Please:
-
-1. Read [AGENTS.md](AGENTS.md) for project rules
-2. Check [docs/tasks/](docs/tasks/) for current work items
-3. Follow the coding standards (run `make check` before PR)
-4. Reference task IDs in commits (e.g., "feat: Implement tensor ops (TB-002)")
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 📊 Benchmarks
-
-Performance on **MacBook Pro M4 Max** (40 GPU cores):
-
-### GPU Performance (TB-003/TB-004)
-
-| Matrix Size | CPU (ms) | GPU (ms) | Speedup | Winner |
-|-------------|----------|----------|---------|--------|
-| 512×512 | 0.43 | 0.84 | 0.51× | CPU (AMX) |
-| 1024×1024 | 1.79 | 1.97 | 0.91× | CPU (AMX) |
-| **1536×1536** | **6.06** | **4.73** | **1.28×** | **GPU** ✅ |
-
-**Note:** M4 Max has AMX (Apple Matrix Extension) coprocessor that often beats GPU for single matmul. Real wins come from batched workflows!
-
-### Memory Efficiency (TB-004)
-
-| Model | Float32 | INT8 | Savings |
-|-------|---------|------|---------|
-| TinyLlama 1.1B | 4.4 GB | **1.1 GB** | **75%** ✅ |
-| Quantization error | Baseline | 0.7-1.0% | < 1% ✅ |
-
-### KV Cache Performance (TB-004)
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| Append 1 token | 0.41 ms | Fast! |
-| Append 100 tokens | 4.1 ms | Linear scaling |
-| 2048-token context | ✅ Supported | Paged memory |
-| Memory leak test | 4.2 sec | 10k cycles, no leaks ✅ |
-
-### Test Coverage
-
-| Metric | Current | Status |
-|--------|---------|--------|
-| Total tests | **94/94 passing** | ✅ **Complete** |
-| TB-004 tests | 57 new tests | ✅ **All passing** |
-| Code coverage | Core ops | ✅ **TDD methodology** |
-
-Run benchmarks: `swift test --filter PerformanceBenchmarks`
-
----
-
-## 🔗 Related Projects
-
-- [MLC-LLM](https://github.com/mlc-ai/mlc-llm): C++/TVM-based mobile LLM runtime
-- [llama.cpp](https://github.com/ggerganov/llama.cpp): Pure C/C++ LLM inference
-- [Core ML Tools](https://github.com/apple/coremltools): Apple's ML conversion toolkit
-
-**TinyBrain differentiator**: Swift-native, educational, hybrid Metal/Core ML.
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-## 👨‍💻 Author
-
-**Vivek Pattanaik**  
-GitHub: [@vivekptnk](https://github.com/vivekptnk)
-
----
-
-## 🙏 Acknowledgments
-
-- Inspired by [micrograd](https://github.com/karpathy/micrograd) for educational clarity
-- Built on Apple's Metal, Core ML, and Accelerate frameworks
-- Community contributions and feedback
-
----
-
-## 📮 Contact
-
-- Issues: [GitHub Issues](https://github.com/vivekptnk/tinybrain/issues)
-- Discussions: [GitHub Discussions](https://github.com/vivekptnk/tinybrain/discussions)
+**Author:** Vivek Pattanaik
