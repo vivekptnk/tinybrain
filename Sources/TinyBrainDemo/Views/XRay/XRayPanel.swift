@@ -92,7 +92,7 @@ public struct XRayPanel: View {
 
     private var panelHeader: some View {
         HStack {
-            Image(systemName: "eye.trianglebadge.exclamationmark")
+            Image(systemName: "eye.fill")
                 .foregroundStyle(.blue)
             Text("X-Ray Mode")
                 .font(.system(.headline, design: .rounded))

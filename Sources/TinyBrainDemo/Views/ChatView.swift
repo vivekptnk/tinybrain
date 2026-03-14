@@ -6,7 +6,7 @@
 /// - Message list with auto-scroll
 /// - Streaming response display
 /// - Telemetry panel
-/// - Sampler controls
+/// - X-Ray Mode visualization
 /// - Platform-adaptive layout
 
 import SwiftUI
@@ -16,116 +16,245 @@ import TinyBrainRuntime
 public struct ChatView: View {
     @StateObject private var viewModel: ChatViewModel
     let theme = TinyBrainTheme.shared
-    
+
     @State private var showTelemetry = true
     @State private var showSettings = false
     @State private var showXRay = false
-    
+
     public init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
     }
-    
+
     public var body: some View {
         VStack(spacing: 0) {
-            // Header
             header
-            
-            Divider()
-            
-            // Main content
             HStack(spacing: 0) {
                 // Chat area
                 VStack(spacing: 0) {
                     messagesList
-                    
-                    Divider()
-                    
-                    // SIMPLIFIED Input - minimal nesting
                     inputBar
                 }
-                
-                // Right panel: X-Ray or Telemetry
-                if showXRay {
-                    Divider()
 
+                // Right panel
+                if showXRay {
                     XRayPanel(
                         xRay: viewModel.xRay,
                         tokenDecoder: { viewModel.decodeToken($0) }
                     )
-                    .transition(.slideFromEdge(.trailing))
+                    .transition(.move(edge: .trailing))
                 } else if showTelemetry {
-                    Divider()
-
                     telemetrySidebar
-                        .frame(width: theme.layout.sidebarWidth)
-                        .transition(.slideFromEdge(.trailing))
+                        .frame(width: 240)
+                        .transition(.move(edge: .trailing))
                 }
             }
         }
-        .frame(minWidth: 600, minHeight: 400)
-        .background(theme.gradients.background)
+        .frame(minWidth: 700, minHeight: 500)
+        #if os(macOS)
+        .background(Color(nsColor: .windowBackgroundColor))
+        #endif
     }
-    
-    // MARK: - Input Bar (Workaround for macOS Tahoe TextField bug)
-    
-    private var inputBar: some View {
-        VStack(spacing: 10) {
-            // Prompt selection
-            HStack(spacing: 8) {
-                Text("Try:")
-                    .font(.system(.caption, design: .rounded))
-                    .foregroundColor(.secondary)
 
-                ForEach(demoPrompts, id: \.label) { prompt in
-                    Button(prompt.label) {
-                        viewModel.promptText = prompt.text
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.accentColor)
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            // Logo + title
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(.blue)
+
+            Text("TinyBrain")
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+
+            if viewModel.isGenerating {
+                HStack(spacing: 4) {
+                    Circle().fill(.blue).frame(width: 5, height: 5)
+                    Text("Generating")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.blue)
                 }
-
-                Spacer()
-
-                if viewModel.isGenerating {
-                    Button("Stop") {
-                        viewModel.clearConversation()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.red)
-                }
+                .pulsing()
             }
 
-            // Selected prompt + send
-            if !viewModel.promptText.isEmpty {
-                HStack(spacing: 12) {
-                    Text(viewModel.promptText)
-                        .font(.system(.body, design: .default))
-                        .lineLimit(2)
-                        .foregroundColor(.primary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.accentColor.opacity(0.08))
-                        .cornerRadius(8)
+            Spacer()
 
-                    Button {
-                        sendMessage()
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundColor(.accentColor)
+            // Toolbar buttons
+            HStack(spacing: 2) {
+                toolbarButton(
+                    icon: showXRay ? "eye.fill" : "eye",
+                    color: showXRay ? .blue : .secondary,
+                    tooltip: "X-Ray Mode"
+                ) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showXRay.toggle()
+                        viewModel.setXRayEnabled(showXRay)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isGenerating)
-                    .keyboardShortcut(.return, modifiers: .command)
                 }
+
+                toolbarButton(
+                    icon: showTelemetry ? "chart.bar.fill" : "chart.bar",
+                    color: showTelemetry ? .accentColor : .secondary,
+                    tooltip: "Metrics"
+                ) {
+                    withAnimation(.easeInOut(duration: 0.2)) { showTelemetry.toggle() }
+                }
+
+                toolbarButton(
+                    icon: "arrow.counterclockwise",
+                    color: .secondary,
+                    tooltip: "New chat"
+                ) {
+                    viewModel.clearConversation()
+                }
+                .disabled(viewModel.messages.isEmpty && !viewModel.isGenerating)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private func toolbarButton(icon: String, color: Color, tooltip: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(color)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+    }
+
+    // MARK: - Messages List
+
+    private var messagesList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    if viewModel.messages.isEmpty {
+                        emptyState
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(.top, 80)
+                    } else {
+                        ForEach(viewModel.messages) { message in
+                            MessageBubble(message: message)
+                                .id(message.id)
+                        }
+                        .padding(.top, 12)
+                        .padding(.bottom, 20)
+                    }
+                }
+            }
+            .onChange(of: viewModel.messages.count) {
+                if let last = viewModel.messages.last {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 36, weight: .thin))
+                .foregroundStyle(.blue.opacity(0.6))
+
+            Text("TinyBrain")
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+
+            Text("On-device LLM inference")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 6) {
+                Image(systemName: "eye")
+                    .font(.system(size: 11))
+                Text("Click the eye icon to enable X-Ray Mode")
+                    .font(.system(size: 12))
+            }
+            .foregroundStyle(.tertiary)
+            .padding(.top, 8)
+        }
+    }
+
+    // MARK: - Input Bar
+
+    private var inputBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            VStack(spacing: 8) {
+                // Selected prompt preview + send
+                if !viewModel.promptText.isEmpty {
+                    HStack(spacing: 10) {
+                        Text(viewModel.promptText)
+                            .font(.system(size: 14))
+                            .lineLimit(2)
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.accentColor.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                        Button {
+                            sendMessage()
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 26))
+                                .foregroundStyle(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.isGenerating)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
+                }
+
+                // Demo prompt pills
+                HStack(spacing: 6) {
+                    ForEach(demoPrompts, id: \.label) { prompt in
+                        Button {
+                            viewModel.promptText = prompt.text
+                        } label: {
+                            Text(prompt.label)
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.isGenerating)
+                    }
+
+                    Spacer()
+
+                    if viewModel.isGenerating {
+                        Button {
+                            viewModel.clearConversation()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 8))
+                                Text("Stop")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.red.opacity(0.1))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.bar)
+        }
     }
 
     private var demoPrompts: [(label: String, text: String)] {
@@ -135,188 +264,79 @@ public struct ChatView: View {
             ("Tell a story", "Tell me a short story about a neural network"),
         ]
     }
-    
+
     private func sendMessage() {
         Task {
             await viewModel.generate()
         }
     }
-    
-    // MARK: - Header
-    
-    private var header: some View {
-        HStack {
-            // Title
-            HStack(spacing: theme.spacing.xs) {
-                Text("🧠")
-                    .font(.title)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("TinyBrain Chat")
-                        .font(theme.typography.headline)
-                        .fontWeight(.semibold)
-                    
-                    if viewModel.isGenerating {
-                        Text("Generating...")
-                            .font(theme.typography.caption)
-                            .foregroundColor(.secondary)
-                            .pulsing()
-                    }
-                }
-            }
-            
-            Spacer()
-            
-            // Controls
-            HStack(spacing: theme.spacing.sm) {
-                // X-Ray toggle
-                Button(action: {
-                    withAnimation {
-                        showXRay.toggle()
-                        viewModel.setXRayEnabled(showXRay)
-                    }
-                }) {
-                    Image(systemName: showXRay ? "eye.fill" : "eye")
-                        .foregroundColor(showXRay ? .blue : .secondary)
-                }
-                .help("Toggle X-Ray Mode — live transformer visualization")
 
-                // Telemetry toggle
-                Button(action: { withAnimation { showTelemetry.toggle() } }) {
-                    Image(systemName: showTelemetry ? "chart.bar.fill" : "chart.bar")
-                }
-                .help("Toggle telemetry panel")
-
-                // Settings
-                Button(action: { showSettings.toggle() }) {
-                    Image(systemName: "gear")
-                }
-                .help("Settings")
-                
-                // Clear
-                Button(action: viewModel.clearConversation) {
-                    Image(systemName: "trash")
-                }
-                .help("Clear conversation")
-                .disabled(viewModel.messages.isEmpty)
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-        }
-        .padding(theme.spacing.md)
-        .background(.ultraThinMaterial)
-    }
-    
-    // MARK: - Messages List
-    
-    private var messagesList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: theme.spacing.sm) {
-                    if viewModel.messages.isEmpty {
-                        emptyState
-                    } else {
-                        ForEach(viewModel.messages) { message in
-                            MessageBubble(message: message)
-                                .id(message.id)
-                        }
-                    }
-                }
-                .padding(.vertical, theme.spacing.md)
-            }
-            .onChange(of: viewModel.messages.count) {
-                // Auto-scroll to bottom
-                if let last = viewModel.messages.last {
-                    withAnimation(theme.animations.smooth) {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
-        }
-    }
-    
-    private var emptyState: some View {
-        VStack(spacing: 20) {
-            Text("🧠")
-                .font(.system(size: 48))
-
-            VStack(spacing: 8) {
-                Text("TinyBrain")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-
-                Text("On-device LLM inference with X-Ray Mode")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
-
-                Text("Choose a prompt below to get started")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 4)
-            }
-        }
-        .frame(maxWidth: 400)
-        .padding(theme.spacing.xl)
-    }
-    
     // MARK: - Telemetry Sidebar
-    
+
     private var telemetrySidebar: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.md) {
-            Text("Metrics")
-                .font(theme.typography.headline)
-                .fontWeight(.semibold)
-            
-            Divider()
-            
-            // Metrics
-            VStack(alignment: .leading, spacing: theme.spacing.sm) {
-                metricRow(
-                    icon: "speedometer",
-                    label: "Tokens/sec",
-                    value: String(format: "%.1f", viewModel.telemetry.tokensPerSecond)
-                )
-                
-                metricRow(
-                    icon: "timer",
-                    label: "ms/token",
-                    value: String(format: "%.0f", viewModel.telemetry.millisecondsPerToken)
-                )
-                
-                metricRow(
+        VStack(alignment: .leading, spacing: 0) {
+            Text("METRICS")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .tracking(0.5)
+                .padding(.bottom, 16)
+
+            VStack(spacing: 14) {
+                metricCard(
                     icon: "bolt.fill",
-                    label: "Energy",
-                    value: String(format: "%.2f J", viewModel.telemetry.energyEstimate)
+                    label: "Tokens/sec",
+                    value: String(format: "%.1f", viewModel.telemetry.tokensPerSecond),
+                    color: .blue
                 )
-                
-                metricRow(
-                    icon: "square.stack.3d.up",
+
+                metricCard(
+                    icon: "timer",
+                    label: "Latency",
+                    value: String(format: "%.0f ms", viewModel.telemetry.millisecondsPerToken),
+                    color: .orange
+                )
+
+                metricCard(
+                    icon: "flame.fill",
+                    label: "Energy",
+                    value: String(format: "%.2f J", viewModel.telemetry.energyEstimate),
+                    color: .red
+                )
+
+                metricCard(
+                    icon: "square.stack.3d.up.fill",
                     label: "KV Cache",
-                    value: String(format: "%.0f%%", viewModel.telemetry.kvCacheUsagePercent)
+                    value: String(format: "%.0f%%", viewModel.telemetry.kvCacheUsagePercent),
+                    color: .green
                 )
             }
-            
+
             Spacer()
         }
-        .padding(theme.spacing.md)
-        .background(.ultraThinMaterial)
+        .padding(16)
+        .background(.bar)
     }
-    
-    private func metricRow(icon: String, label: String, value: String) -> some View {
-        HStack {
+
+    private func metricCard(icon: String, label: String, value: String, color: Color) -> some View {
+        HStack(spacing: 10) {
             Image(systemName: icon)
-                .foregroundColor(theme.colors.accent)
+                .font(.system(size: 12))
+                .foregroundStyle(color)
                 .frame(width: 20)
-            
-            Text(label)
-                .font(theme.typography.caption)
-                .foregroundColor(.secondary)
-            
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+            }
+
             Spacer()
-            
-            Text(value)
-                .font(theme.typography.monospace)
-                .fontWeight(.medium)
         }
+        .padding(10)
+        .background(color.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -325,7 +345,6 @@ public struct ChatView: View {
 #if DEBUG
 struct ChatView_Previews: PreviewProvider {
     static var previews: some View {
-        // Create toy model for preview
         let config = ModelConfig(
             numLayers: 2,
             hiddenDim: 128,
@@ -336,10 +355,9 @@ struct ChatView_Previews: PreviewProvider {
         let weights = ModelWeights.makeToyModel(config: config, seed: 42)
         let runner = ModelRunner(weights: weights)
         let viewModel = ChatViewModel(runner: runner)
-        
+
         return ChatView(viewModel: viewModel)
             .frame(width: 900, height: 600)
     }
 }
 #endif
-
