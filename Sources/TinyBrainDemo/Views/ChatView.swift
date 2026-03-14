@@ -69,51 +69,71 @@ public struct ChatView: View {
     // MARK: - Input Bar (Workaround for macOS Tahoe TextField bug)
     
     private var inputBar: some View {
-        VStack(spacing: 12) {
-            // WORKAROUND: TextField doesn't work in SPM executables on macOS Tahoe
-            // Provide demo buttons instead
-            Text("⚠️ TextField broken on macOS Tahoe + SPM. Use demo prompts:")
-                .font(.caption)
-                .foregroundColor(.orange)
-            
+        VStack(spacing: 10) {
+            // Prompt selection
             HStack(spacing: 8) {
-                Button("Hello") {
-                    viewModel.promptText = "Hello, TinyBrain!"
+                Text("Try:")
+                    .font(.system(.caption, design: .rounded))
+                    .foregroundColor(.secondary)
+
+                ForEach(demoPrompts, id: \.label) { prompt in
+                    Button(prompt.label) {
+                        viewModel.promptText = prompt.text
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.accentColor)
                 }
-                
-                Button("Explain LLMs") {
-                    viewModel.promptText = "Can you explain how large language models work?"
-                }
-                
-                Button("Tell a story") {
-                    viewModel.promptText = "Tell me a short story about a neural network"
-                }
-                
-                Button("Clear") {
-                    viewModel.promptText = ""
+
+                Spacer()
+
+                if viewModel.isGenerating {
+                    Button("Stop") {
+                        viewModel.clearConversation()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.red)
                 }
             }
-            .disabled(viewModel.isGenerating)
-            
+
+            // Selected prompt + send
             if !viewModel.promptText.isEmpty {
-                HStack {
+                HStack(spacing: 12) {
                     Text(viewModel.promptText)
+                        .font(.system(.body, design: .default))
                         .lineLimit(2)
-                        .foregroundColor(.secondary)
-                    
-                    Spacer()
-                    
-                    Button("Send ➤") {
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.accentColor.opacity(0.08))
+                        .cornerRadius(8)
+
+                    Button {
                         sendMessage()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.accentColor)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.plain)
                     .disabled(viewModel.isGenerating)
                     .keyboardShortcut(.return, modifiers: .command)
                 }
             }
         }
-        .padding()
-        .background(Color.yellow.opacity(0.1))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
+    private var demoPrompts: [(label: String, text: String)] {
+        [
+            ("Hello", "Hello, TinyBrain!"),
+            ("Explain LLMs", "Can you explain how large language models work?"),
+            ("Tell a story", "Tell me a short story about a neural network"),
+        ]
     }
     
     private func sendMessage() {
@@ -216,20 +236,22 @@ public struct ChatView: View {
     }
     
     private var emptyState: some View {
-        VStack(spacing: theme.spacing.lg) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 60))
-                .foregroundColor(.secondary)
-            
-            VStack(spacing: theme.spacing.xs) {
-                Text("Welcome to TinyBrain")
-                    .font(theme.typography.title)
-                    .fontWeight(.semibold)
-                
-                Text("Start a conversation to see on-device LLM inference in action")
-                    .font(theme.typography.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
+        VStack(spacing: 20) {
+            Text("🧠")
+                .font(.system(size: 48))
+
+            VStack(spacing: 8) {
+                Text("TinyBrain")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+
+                Text("On-device LLM inference with X-Ray Mode")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+
+                Text("Choose a prompt below to get started")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: 400)

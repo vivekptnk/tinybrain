@@ -310,18 +310,40 @@ private extension ModelRunner {
         let query = layerWeights.query.apply(toRow: hiddenRow)
         let keyRow = layerWeights.key.apply(toRow: hiddenRow)
         let valueRow = layerWeights.value.apply(toRow: hiddenRow)
-        
+
         let keyVec = keyRow.squeezedRowVector()
         let valueVec = valueRow.squeezedRowVector()
-        
+
         kvCache.append(layer: layerIndex, key: keyVec, value: valueVec, position: currentPosition)
-        
+
         let sequenceLength = currentPosition + 1
         let allKeys = kvCache.getKeys(layer: layerIndex, range: 0..<sequenceLength)
         let allValues = kvCache.getValues(layer: layerIndex, range: 0..<sequenceLength)
-        
-        let scalingFactor = 1.0 / sqrt(max(1.0, Float(config.hiddenDim) / Float(config.numHeads)))
-        let scores = (query.matmul(allKeys.transpose())) * scalingFactor
+
+        let headDim = config.hiddenDim / config.numHeads
+        let scalingFactor = 1.0 / sqrt(Float(headDim))
+
+        // Handle Grouped Query Attention (GQA):
+        // When numKVHeads < numHeads, repeat KV heads to match query dimension.
+        // E.g., TinyLlama: 32 query heads, 4 KV heads → repeat each KV head 8×
+        let queryForScores: Tensor<Float>
+        let keysForScores: Tensor<Float>
+        let valuesForContext: Tensor<Float>
+
+        if config.numKVHeads < config.numHeads {
+            // GQA: repeat KV heads to match query heads
+            let repeats = config.numHeads / config.numKVHeads
+            keysForScores = repeatKVHeads(allKeys, headDim: headDim, numKVHeads: config.numKVHeads, repeats: repeats)
+            valuesForContext = repeatKVHeads(allValues, headDim: headDim, numKVHeads: config.numKVHeads, repeats: repeats)
+            queryForScores = query
+        } else {
+            // Standard MHA: dimensions already match
+            queryForScores = query
+            keysForScores = allKeys
+            valuesForContext = allValues
+        }
+
+        let scores = (queryForScores.matmul(keysForScores.transpose())) * scalingFactor
         let attentionWeights = scores.softmax()
 
         // X-Ray hook: attention weights showing which past tokens matter
@@ -331,8 +353,35 @@ private extension ModelRunner {
             position: currentPosition
         )
 
-        let context = attentionWeights.matmul(allValues)
-        
+        let context = attentionWeights.matmul(valuesForContext)
+
         return layerWeights.output.apply(toRow: context)
+    }
+
+    /// Repeat KV heads to match query heads for Grouped Query Attention.
+    /// Input: [seqLen, kvDim] where kvDim = numKVHeads × headDim
+    /// Output: [seqLen, hiddenDim] where hiddenDim = numHeads × headDim
+    func repeatKVHeads(_ tensor: Tensor<Float>, headDim: Int, numKVHeads: Int, repeats: Int) -> Tensor<Float> {
+        let seqLen = tensor.shape.dimensions[0]
+        let kvDim = numKVHeads * headDim
+        let outputDim = kvDim * repeats
+
+        var result = [Float](repeating: 0, count: seqLen * outputDim)
+        let src = tensor.data
+
+        for s in 0..<seqLen {
+            for kvHead in 0..<numKVHeads {
+                let srcOffset = s * kvDim + kvHead * headDim
+                for r in 0..<repeats {
+                    let dstHead = kvHead * repeats + r
+                    let dstOffset = s * outputDim + dstHead * headDim
+                    for d in 0..<headDim {
+                        result[dstOffset + d] = src[srcOffset + d]
+                    }
+                }
+            }
+        }
+
+        return Tensor<Float>(shape: TensorShape(seqLen, outputDim), data: result)
     }
 }

@@ -14,19 +14,15 @@ import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Ensure app activates and window becomes key
         NSApp.activate(ignoringOtherApps: true)
-        
-        // Make first window key and order front
         DispatchQueue.main.async {
             if let window = NSApp.windows.first {
-                window.makeKey()
                 window.makeKeyAndOrderFront(nil)
                 window.orderFrontRegardless()
             }
         }
     }
-    
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
     }
@@ -38,9 +34,11 @@ struct ChatDemoApp: App {
     #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     #endif
-    
-    // Initialize Metal backend if available
+
+    @StateObject private var viewModel: ChatViewModel
+
     init() {
+        // Initialize Metal backend
         if MetalBackend.isAvailable {
             do {
                 TinyBrainBackend.metalBackend = try MetalBackend()
@@ -49,30 +47,29 @@ struct ChatDemoApp: App {
                 print("⚠️ Metal initialization failed: \(error)")
             }
         }
+
+        // Load model (falls back to toy model if no real model found)
+        let weights = ModelLoader.loadWithFallback(
+            from: "Models/tinyllama-1.1b-int8.tbf"
+        )
+        let runner = ModelRunner(weights: weights)
+
+        // Load tokenizer (auto-detects format)
+        let tokenizer = TokenizerLoader.loadBestAvailable()
+
+        // Create view model
+        let vm = ChatViewModel(runner: runner, tokenizer: tokenizer)
+        _viewModel = StateObject(wrappedValue: vm)
+
+        print("✅ App initialized. Config:")
+        print("   Layers: \(weights.config.numLayers)")
+        print("   Hidden dim: \(weights.config.hiddenDim)")
+        print("   Vocab size: \(weights.config.vocabSize)")
     }
-    
+
     var body: some Scene {
         WindowGroup {
-            // TB-008 & TB-009: Load model and tokenizer (format-agnostic)
-            let weights = ModelLoader.loadWithFallback(
-                from: "Models/tinyllama-1.1b-int8.tbf"
-            )
-            let runner = ModelRunner(weights: weights)
-            
-            // Load tokenizer (auto-detects format)
-            let tokenizer = TokenizerLoader.loadBestAvailable()
-            
-            let viewModel = ChatViewModel(runner: runner, tokenizer: tokenizer)
-            
             ChatView(viewModel: viewModel)
-                .frame(minWidth: 600, minHeight: 400)
-                .onAppear {
-                    print("✅ Model loaded. Config:")
-                    print("  hiddenDim: \(weights.config.hiddenDim)")
-                    print("  numHeads: \(weights.config.numHeads)")
-                    print("  numKVHeads: \(weights.config.numKVHeads)")
-                    print("  Calculated kvDim: \(weights.config.kvDim)")
-                }
         }
         #if os(macOS)
         .defaultSize(width: 900, height: 600)
@@ -82,12 +79,12 @@ struct ChatDemoApp: App {
                     NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
                 }
                 .keyboardShortcut("x", modifiers: .command)
-                
+
                 Button("Copy") {
                     NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
                 }
                 .keyboardShortcut("c", modifiers: .command)
-                
+
                 Button("Paste") {
                     NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
                 }

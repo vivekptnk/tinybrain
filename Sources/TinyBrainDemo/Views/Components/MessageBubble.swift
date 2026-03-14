@@ -24,40 +24,65 @@ public struct MessageBubble: View {
     }
     
     public var body: some View {
-        HStack(alignment: .top, spacing: theme.spacing.sm) {
+        HStack(alignment: .top, spacing: 0) {
             if message.isUser {
-                Spacer(minLength: 60)
+                Spacer(minLength: 80)
+            } else {
+                // Assistant avatar
+                Text("🧠")
+                    .font(.system(size: 20))
+                    .frame(width: 28, height: 28)
+                    .padding(.top, 4)
+                    .padding(.trailing, 8)
             }
-            
-            VStack(alignment: message.isUser ? .trailing : .leading, spacing: theme.spacing.xs) {
+
+            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
                 // Message content
-                Text(message.content)
-                    .font(theme.typography.body)
-                    .foregroundColor(.primary)
-                    .padding(theme.spacing.md)
-                    .background(bubbleBackground)
-                    .cornerRadius(theme.corners.medium)
-                    .contextMenu {
-                        Button(action: copyMessage) {
-                            Label("Copy", systemImage: "doc.on.doc")
+                if message.content.isEmpty {
+                    // Typing indicator for empty assistant messages
+                    if message.isAssistant {
+                        HStack(spacing: 4) {
+                            ForEach(0..<3, id: \.self) { i in
+                                Circle()
+                                    .fill(Color.secondary.opacity(0.4))
+                                    .frame(width: 6, height: 6)
+                            }
                         }
+                        .padding(theme.spacing.md)
+                        .background(bubbleBackground)
+                        .cornerRadius(theme.corners.medium)
                     }
-                
+                } else {
+                    Text(message.content)
+                        .font(theme.typography.body)
+                        .foregroundColor(.primary)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(bubbleBackground)
+                        .cornerRadius(theme.corners.medium)
+                        .contextMenu {
+                            Button(action: copyMessage) {
+                                Label("Copy", systemImage: "doc.on.doc")
+                            }
+                        }
+                }
+
                 // Timestamp
                 Text(formattedTimestamp)
-                    .font(theme.typography.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, theme.spacing.xs)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 4)
             }
-            
+            .frame(maxWidth: 500, alignment: message.isUser ? .trailing : .leading)
+
             if message.isAssistant {
-                Spacer(minLength: 60)
+                Spacer(minLength: 80)
             }
         }
         .padding(.horizontal, theme.spacing.md)
-        .padding(.vertical, theme.spacing.xs)
+        .padding(.vertical, 3)
         .transition(.messageAppear)
-        .animation(theme.animations.smooth, value: message.id)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
     }

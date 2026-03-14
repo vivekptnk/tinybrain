@@ -35,6 +35,14 @@ The feature no other LLM runtime has: **live visualization of what's happening i
 
 Toggle it on with one button. Zero performance impact when off.
 
+<p align="center">
+  <img src="docs/images/xray-demo.gif" alt="X-Ray Mode Demo" width="700" />
+</p>
+
+<p align="center">
+  <img src="docs/images/xray-screenshot.png" alt="X-Ray Mode Screenshot" width="700" />
+</p>
+
 ---
 
 ## Get Started (5 minutes)
