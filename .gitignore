@@ -81,3 +81,4 @@ docs/tasks/
 benchmarks/results/*.json
 !benchmarks/results/.gitkeep
 
+.cursor/
