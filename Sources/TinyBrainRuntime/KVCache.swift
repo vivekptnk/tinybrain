@@ -341,4 +341,17 @@ public final class KVCache {
           Page size: \(pageSize) tokens/page
         """
     }
+
+    /// Page allocation status for X-Ray visualization (TB-010)
+    ///
+    /// Returns an array of bools where `true` means the page is allocated
+    /// (contains cached key/value data) and `false` means it's free.
+    ///
+    /// - Parameter layer: Which layer to check (default 0, all layers share allocation pattern)
+    /// - Returns: `[Bool]` of length `maxPages`
+    public func pageAllocationStatus(layer: Int = 0) -> [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return (0..<maxPages).map { keyPages[layer][$0] != nil }
+    }
 }

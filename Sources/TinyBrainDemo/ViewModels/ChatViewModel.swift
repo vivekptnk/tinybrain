@@ -48,25 +48,34 @@ public final class ChatViewModel: ObservableObject {
     
     /// Telemetry view model
     @Published public private(set) var telemetry: TelemetryViewModel
-    
+
+    /// X-Ray visualization view model (TB-010)
+    @Published public private(set) var xRay: XRayViewModel
+
     // MARK: - Private State
-    
+
     /// Model runner
     private let runner: ModelRunner
-    
+
     /// Optional tokenizer (real or mock)
     private let tokenizer: (any Tokenizer)?
-    
+
     /// Current generation task
     private var generationTask: Task<Void, Never>?
-    
+
+    /// Decode a single token ID to text (for X-Ray display)
+    public func decodeToken(_ tokenId: Int) -> String {
+        tokenizer?.decode([tokenId]) ?? "[\(tokenId)]"
+    }
+
     // MARK: - Initialization
-    
+
     /// Initialize with pre-configured model runner and optional tokenizer
     public init(runner: ModelRunner, tokenizer: (any Tokenizer)? = nil) {
         self.runner = runner
         self.tokenizer = tokenizer
         self.telemetry = TelemetryViewModel()
+        self.xRay = XRayViewModel(numLayers: runner.config.numLayers)
     }
     
     // MARK: - Message Management
@@ -94,8 +103,15 @@ public final class ChatViewModel: ObservableObject {
         generationTask?.cancel()
         generationTask = nil
         telemetry.reset()
+        xRay.reset()
         runner.reset()
         clearError()
+    }
+
+    /// Toggle X-Ray observation on/off
+    public func setXRayEnabled(_ enabled: Bool) {
+        xRay.isEnabled = enabled
+        runner.observer = enabled ? xRay : nil
     }
     
     // MARK: - Generation
@@ -187,7 +203,12 @@ public final class ChatViewModel: ObservableObject {
                 at: Date()
             )
             telemetry.calculateMetrics()
-            
+
+            // Update X-Ray KV cache visualization
+            if xRay.isEnabled {
+                xRay.kvCachePages = runner.kvCache.pageAllocationStatus()
+            }
+
             // Small delay for animation smoothness
             try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         }

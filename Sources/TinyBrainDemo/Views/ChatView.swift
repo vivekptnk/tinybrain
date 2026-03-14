@@ -19,6 +19,7 @@ public struct ChatView: View {
     
     @State private var showTelemetry = true
     @State private var showSettings = false
+    @State private var showXRay = false
     
     public init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -43,10 +44,18 @@ public struct ChatView: View {
                     inputBar
                 }
                 
-                // Telemetry sidebar (collapsible)
-                if showTelemetry {
+                // Right panel: X-Ray or Telemetry
+                if showXRay {
                     Divider()
-                    
+
+                    XRayPanel(
+                        xRay: viewModel.xRay,
+                        tokenDecoder: { viewModel.decodeToken($0) }
+                    )
+                    .transition(.slideFromEdge(.trailing))
+                } else if showTelemetry {
+                    Divider()
+
                     telemetrySidebar
                         .frame(width: theme.layout.sidebarWidth)
                         .transition(.slideFromEdge(.trailing))
@@ -140,12 +149,24 @@ public struct ChatView: View {
             
             // Controls
             HStack(spacing: theme.spacing.sm) {
+                // X-Ray toggle
+                Button(action: {
+                    withAnimation {
+                        showXRay.toggle()
+                        viewModel.setXRayEnabled(showXRay)
+                    }
+                }) {
+                    Image(systemName: showXRay ? "eye.fill" : "eye")
+                        .foregroundColor(showXRay ? .blue : .secondary)
+                }
+                .help("Toggle X-Ray Mode — live transformer visualization")
+
                 // Telemetry toggle
                 Button(action: { withAnimation { showTelemetry.toggle() } }) {
                     Image(systemName: showTelemetry ? "chart.bar.fill" : "chart.bar")
                 }
                 .help("Toggle telemetry panel")
-                
+
                 // Settings
                 Button(action: { showSettings.toggle() }) {
                     Image(systemName: "gear")

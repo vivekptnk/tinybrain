@@ -76,6 +76,11 @@ public final class ModelRunner {
     
     /// Last computed logits (used for streaming/verifications)
     private var lastLogits: Tensor<Float>?
+
+    /// Optional observer for X-Ray visualization (TB-010)
+    /// When nil, zero overhead. When set, receives attention weights,
+    /// hidden state norms, and logits at each inference step.
+    public weak var observer: InferenceObserver?
     
     /// Initialize model runner with deterministic toy weights (useful for demos/tests)
     public convenience init(config: ModelConfig) {
@@ -119,7 +124,10 @@ public final class ModelRunner {
         // 3. Output projection to logits
         let logitsRow = weights.output.apply(toRow: hiddenRow)
         let logits = logitsRow.squeezedRowVector()
-        
+
+        // X-Ray hook: full logit distribution (fires last, signals step complete)
+        observer?.didComputeLogits(logits: logits.data, position: currentPosition)
+
         currentPosition += 1
         lastLogits = logits
         
@@ -279,6 +287,13 @@ private extension ModelRunner {
     func applyLayer(_ hiddenRow: Tensor<Float>,
                     layerWeights: TransformerLayerWeights,
                     layerIndex: Int) -> Tensor<Float> {
+        // X-Ray hook: hidden state magnitude entering this layer
+        observer?.didEnterLayer(
+            layerIndex: layerIndex,
+            hiddenStateNorm: sqrt(hiddenRow.data.reduce(0) { $0 + $1 * $1 }),
+            position: currentPosition
+        )
+
         let attentionOutput = attention(hiddenRow: hiddenRow,
                                         layerWeights: layerWeights.attention,
                                         layerIndex: layerIndex)
@@ -308,6 +323,14 @@ private extension ModelRunner {
         let scalingFactor = 1.0 / sqrt(max(1.0, Float(config.hiddenDim) / Float(config.numHeads)))
         let scores = (query.matmul(allKeys.transpose())) * scalingFactor
         let attentionWeights = scores.softmax()
+
+        // X-Ray hook: attention weights showing which past tokens matter
+        observer?.didComputeAttention(
+            layerIndex: layerIndex,
+            weights: attentionWeights.data,
+            position: currentPosition
+        )
+
         let context = attentionWeights.matmul(allValues)
         
         return layerWeights.output.apply(toRow: context)
