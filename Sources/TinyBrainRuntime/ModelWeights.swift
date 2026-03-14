@@ -227,7 +227,7 @@ public struct ModelWeights {
         data.append(Data(count: paddedHeaderSize - headerSize))
         
         // 2. Write Quantization Metadata
-        var metadataOffset = data.count
+        let metadataOffset = data.count
         
         // Count all tensors (embeddings + all layer weights)
         var tensorCount: UInt32 = 1  // embeddings
@@ -287,7 +287,7 @@ public struct ModelWeights {
         data.append(Data(count: paddedMetadataSize - metadataSize))
         
         // 3. Write Tensor Index
-        var indexOffset = data.count
+        let indexOffset = data.count
         data.append(Data(bytes: &tensorCount, count: 4))
         
         // Helper to write tensor index entry
@@ -299,7 +299,7 @@ public struct ModelWeights {
             
             var dimCount = UInt32(shape.dimensions.count)
             data.append(Data(bytes: &dimCount, count: 4))
-            for var dim in shape.dimensions {
+            for dim in shape.dimensions {
                 var dim32 = Int32(dim)
                 data.append(Data(bytes: &dim32, count: 4))
             }
@@ -312,7 +312,7 @@ public struct ModelWeights {
         
         // Calculate offsets (will fill in later)
         // For now, write placeholder index
-        let indexStart = data.count
+        _ = data.count  // Index start position (for future random-access support)
         
         // Embeddings
         writeTensorIndex(
@@ -347,7 +347,7 @@ public struct ModelWeights {
         
         // 4. Write Weight Data Blobs (4KB aligned)
         // Embeddings
-        var dataOffset = data.count
+        let dataOffset = data.count
         for var value in tokenEmbeddings.data {
             data.append(Data(bytes: &value, count: 4))
         }

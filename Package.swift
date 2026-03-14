@@ -69,7 +69,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TinyBrainRuntimeTests",
-            dependencies: ["TinyBrainRuntime"],
+            dependencies: ["TinyBrainRuntime", "TinyBrainMetal"],
             path: "Tests/TinyBrainRuntimeTests",
             resources: [
                 .process("Fixtures")
@@ -126,7 +126,8 @@ let package = Package(
         .executableTarget(
             name: "ChatDemo",
             dependencies: ["TinyBrainDemo"],
-            path: "Examples/ChatDemo"
+            path: "Examples/ChatDemo",
+            exclude: ["Info.plist"]
         ),
         
         // MARK: - Benchmark Tool

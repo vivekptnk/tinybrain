@@ -58,13 +58,11 @@ struct NativeTextField: NSViewRepresentable {
     func updateNSView(_ nsView: FocusableTextField, context: Context) {
         // CRITICAL: Prevent ANY updates during editing to avoid interrupting the editing session
         if context.coordinator.isEditing {
-            print("⚠️ Blocked update during editing")
             return
         }
-        
+
         // Only update text from external changes (not from typing)
         if !context.coordinator.isTyping && nsView.stringValue != text {
-            print("📥 External text update: '\(text)'")
             nsView.stringValue = text
         }
         

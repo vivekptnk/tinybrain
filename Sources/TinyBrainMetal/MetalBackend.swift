@@ -581,11 +581,6 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     }
     
     // MARK: - INT8 Quantized Operations
-    
-    /// **REVIEW HITLER FIX:** Fused INT8 dequant + matmul
-    ///
-    /// THE REAL SOLUTION: Compute directly from INT8 without Float32 materialization!
-    ///
     /// - Parameters:
     ///   - input: Float32 input [M, K]
     ///   - quantized: INT8 weights
@@ -595,7 +590,6 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         precondition(quantized.shape.dimensions.count == 2, "Weights must be 2D")
         precondition(input.shape.dimensions[1] == quantized.shape.dimensions[0], "Dimensions must match")
         
-        // **REVIEW HITLER FIX:** Only per-channel mode supported in current kernel!
         // Symmetric/asymmetric modes need different kernel (single scale, not per-channel)
         guard quantized.mode == .perChannel else {
             // Fall back to CPU for non-per-channel modes

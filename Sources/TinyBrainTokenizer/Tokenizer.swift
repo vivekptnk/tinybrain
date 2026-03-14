@@ -48,19 +48,26 @@ public protocol Tokenizer {
 /// ```
 public struct BPEVocabulary: Codable {
     /// Maps token string → ID
-    let vocab: [String: Int]
+    public let vocab: [String: Int]
     
     /// Ordered list of BPE merge rules (applied in order)
-    let merges: [[String]]
+    public let merges: [[String]]
     
     /// Special tokens configuration
-    let special_tokens: SpecialTokens?
+    public let special_tokens: SpecialTokens?
     
-    struct SpecialTokens: Codable {
-        let bos_token: String?
-        let eos_token: String?
-        let unk_token: String?
-        let pad_token: String?
+    public struct SpecialTokens: Codable {
+        public let bos_token: String?
+        public let eos_token: String?
+        public let unk_token: String?
+        public let pad_token: String?
+        
+        public init(bos_token: String?, eos_token: String?, unk_token: String?, pad_token: String?) {
+            self.bos_token = bos_token
+            self.eos_token = eos_token
+            self.unk_token = unk_token
+            self.pad_token = pad_token
+        }
     }
 }
 
@@ -108,34 +115,25 @@ public struct BPETokenizer: Tokenizer {
     
     // MARK: - Initialization
     
-    /// Initialize BPE tokenizer from vocabulary file
+    /// Initialize BPE tokenizer with raw vocabulary data
     ///
-    /// **Educational:**
-    /// 1. Load JSON vocabulary
-    /// 2. Build bidirectional token↔ID maps
-    /// 3. Parse merge rules
-    /// 4. Extract special tokens
+    /// **TB-009:** Direct initialization for adapter pattern
+    /// Used by TokenizerLoader to support multiple formats
     ///
-    /// - Parameter vocabularyPath: Path to JSON vocab file
-    /// - Throws: If file not found or JSON invalid
-    public init(vocabularyPath: String) throws {
-        // Load and parse JSON
-        let url = URL(fileURLWithPath: vocabularyPath)
-        
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw TokenizerError.vocabularyNotFound(vocabularyPath)
-        }
-        
-        let data = try Data(contentsOf: url)
-        let vocabulary = try JSONDecoder().decode(BPEVocabulary.self, from: data)
-        
+    /// - Parameters:
+    ///   - vocab: Token string → ID mapping
+    ///   - merges: BPE merge rules (ordered)
+    ///   - specialTokens: Special token configuration
+    public init(vocab: [String: Int],
+                merges: [[String]],
+                specialTokens: BPEVocabulary.SpecialTokens) {
         // Build token maps
-        self.tokenToId = vocabulary.vocab
-        self.vocabularySize = vocabulary.vocab.count
+        self.tokenToId = vocab
+        self.vocabularySize = vocab.count
         
-        // Build inverse mapping (ID → token)
+        // Build inverse mapping
         var idToTokenMap: [Int: String] = [:]
-        for (token, id) in vocabulary.vocab {
+        for (token, id) in vocab {
             idToTokenMap[id] = token
         }
         self.idToToken = idToTokenMap
@@ -144,7 +142,7 @@ public struct BPETokenizer: Tokenizer {
         var rules: [(String, String)] = []
         var priorityMap: [String: [String: Int]] = [:]
         
-        for (priority, mergePair) in vocabulary.merges.enumerated() {
+        for (priority, mergePair) in merges.enumerated() {
             guard mergePair.count == 2 else { continue }
             let first = mergePair[0]
             let second = mergePair[1]
@@ -160,29 +158,46 @@ public struct BPETokenizer: Tokenizer {
         self.mergeRules = rules
         self.mergePriority = priorityMap
         
-        // Extract special tokens
-        let specialTokens = vocabulary.special_tokens
+        // Extract special tokens with smart fallback to actual vocab entries
+        // Use first available valid token if special tokens not defined
+        let validIds = Array(vocab.values).sorted()
+        let firstValidId = validIds.first ?? 0
         
-        // **REVIEW HITLER FIX:** Resolve special tokens from vocab (not hard-coded IDs)
-        self.bosToken = try Self.resolveSpecialToken(
-            tokenString: specialTokens?.bos_token,
-            fallbackKey: "<BOS>",
-            vocab: tokenToId
-        )
-        self.eosToken = try Self.resolveSpecialToken(
-            tokenString: specialTokens?.eos_token,
-            fallbackKey: "<EOS>",
-            vocab: tokenToId
-        )
-        self.unkToken = try Self.resolveSpecialToken(
-            tokenString: specialTokens?.unk_token,
-            fallbackKey: "<UNK>",
-            vocab: tokenToId
-        )
-        self.padToken = try Self.resolveSpecialToken(
-            tokenString: specialTokens?.pad_token,
-            fallbackKey: "<PAD>",
-            vocab: tokenToId
+        self.bosToken = (specialTokens.bos_token.flatMap { vocab[$0] }) ?? firstValidId
+        self.eosToken = (specialTokens.eos_token.flatMap { vocab[$0] }) ?? (validIds.dropFirst().first ?? firstValidId)
+        self.unkToken = (specialTokens.unk_token.flatMap { vocab[$0] }) ?? (validIds.dropFirst(2).first ?? firstValidId)
+        self.padToken = (specialTokens.pad_token.flatMap { vocab[$0] }) ?? (validIds.dropFirst(3).first ?? firstValidId)
+    }
+    
+    /// Initialize BPE tokenizer from vocabulary file (TinyBrain JSON format)
+    ///
+    /// **Educational:**
+    /// 1. Load JSON vocabulary
+    /// 2. Delegate to raw init
+    ///
+    /// - Parameter vocabularyPath: Path to JSON vocab file
+    /// - Throws: If file not found or JSON invalid
+    public init(vocabularyPath: String) throws {
+        // Load and parse JSON
+        let url = URL(fileURLWithPath: vocabularyPath)
+        
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw TokenizerError.vocabularyNotFound(vocabularyPath)
+        }
+        
+        let data = try Data(contentsOf: url)
+        let vocabulary = try JSONDecoder().decode(BPEVocabulary.self, from: data)
+        
+        // Use raw init (DRY principle)
+        self.init(
+            vocab: vocabulary.vocab,
+            merges: vocabulary.merges,
+            specialTokens: vocabulary.special_tokens ?? BPEVocabulary.SpecialTokens(
+                bos_token: "<BOS>",
+                eos_token: "<EOS>",
+                unk_token: "<UNK>",
+                pad_token: "<PAD>"
+            )
         )
     }
     
@@ -287,9 +302,28 @@ public struct BPETokenizer: Tokenizer {
     /// - Parameter tokens: Token IDs to decode
     /// - Returns: Reconstructed text
     public func decode(_ tokens: [Int]) -> String {
-        return tokens
-            .compactMap { idToToken[$0] }  // Lookup each ID, skip invalid
-            .joined()  // Concatenate strings
+        let tokenStrings = tokens.compactMap { idToToken[$0] }
+        
+        // Handle byte-level BPE (used by GPT-2, Llama, etc.)
+        // Tokens like "<0x20>" represent bytes
+        var bytes: [UInt8] = []
+        
+        for tokenStr in tokenStrings {
+            // Check if token is a byte representation like "<0x20>"
+            if tokenStr.hasPrefix("<0x") && tokenStr.hasSuffix(">") {
+                // Extract hex value
+                let hexStr = tokenStr.dropFirst(3).dropLast()
+                if let byte = UInt8(hexStr, radix: 16) {
+                    bytes.append(byte)
+                }
+            } else {
+                // Regular token - convert to UTF-8 bytes
+                bytes.append(contentsOf: Array(tokenStr.utf8))
+            }
+        }
+        
+        // Convert bytes to string
+        return String(decoding: bytes, as: UTF8.self)
     }
     
     // MARK: - Helper Functions
@@ -330,16 +364,28 @@ public struct BPETokenizer: Tokenizer {
 
 // MARK: - Errors
 
-enum TokenizerError: Error, CustomStringConvertible {
+public enum TokenizerError: Error, CustomStringConvertible {
     case vocabularyNotFound(String)
     case invalidVocabularyFormat(String)
+    case unsupportedFormat(String)
+    case invalidJSON
+    case missingRequiredField(String)
+    case fileNotFound(String)
     
-    var description: String {
+    public var description: String {
         switch self {
         case .vocabularyNotFound(let path):
             return "Vocabulary file not found: \(path)"
         case .invalidVocabularyFormat(let message):
             return "Invalid vocabulary format: \(message)"
+        case .unsupportedFormat(let format):
+            return "Unsupported tokenizer format: \(format)"
+        case .invalidJSON:
+            return "Invalid JSON in tokenizer file"
+        case .missingRequiredField(let field):
+            return "Missing required field: \(field)"
+        case .fileNotFound(let path):
+            return "File not found: \(path)"
         }
     }
 }

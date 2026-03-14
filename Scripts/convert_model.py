@@ -33,39 +33,47 @@ class ModelConfig:
     vocab_size: int
     intermediate_dim: int = None  # FFN intermediate size (default: 4 * hidden_dim)
     max_seq_len: int = 2048
+    num_kv_heads: int = None  # For GQA/MQA (defaults to num_heads for MHA)
     
     def __post_init__(self):
         if self.intermediate_dim is None:
             self.intermediate_dim = 4 * self.hidden_dim
+        if self.num_kv_heads is None:
+            self.num_kv_heads = self.num_heads  # Default to MHA
 
 
-@dataclass
-class TBFHeader:
-    """TBF file header structure"""
-    magic: bytes = b'TBFM'  # Magic bytes
-    version: int = 1
-    model_type: str = "llama"
-    config: Dict = None
+def write_tbf_header(f, config: ModelConfig):
+    """Write TBF header matching Swift ModelWeights.save() format"""
+    # Magic bytes "TBFM" (4 bytes)
+    f.write(b'TBFM')
     
-    def to_bytes(self) -> bytes:
-        """Serialize header to bytes"""
-        # Magic bytes (4 bytes)
-        data = self.magic
-        
-        # Version (UInt32, little-endian)
-        data += struct.pack('<I', self.version)
-        
-        # Model type length + string
-        model_type_bytes = self.model_type.encode('utf-8')
-        data += struct.pack('<I', len(model_type_bytes))
-        data += model_type_bytes
-        
-        # Config JSON
-        config_json = json.dumps(self.config if self.config else {}).encode('utf-8')
-        data += struct.pack('<I', len(config_json))
-        data += config_json
-        
-        return data
+    # Version UInt32 (4 bytes, little-endian)
+    f.write(struct.pack('<I', 1))
+    
+    # Config as JSON (matching Swift JSONEncoder output)
+    config_dict = {
+        'numLayers': config.num_layers,
+        'hiddenDim': config.hidden_dim,
+        'numHeads': config.num_heads,
+        'numKVHeads': config.num_kv_heads,  # Add GQA support
+        'vocabSize': config.vocab_size,
+        'maxSeqLen': config.max_seq_len
+    }
+    config_json = json.dumps(config_dict).encode('utf-8')
+    
+    # Config length UInt32 (4 bytes)
+    f.write(struct.pack('<I', len(config_json)))
+    
+    # Config JSON
+    f.write(config_json)
+    
+    # Pad to 4KB
+    header_size = 4 + 4 + 4 + len(config_json)
+    padded_size = ((header_size + 4095) // 4096) * 4096
+    padding = padded_size - header_size
+    f.write(b'\x00' * padding)
+    
+    return padded_size
 
 
 def load_pytorch_checkpoint(checkpoint_path: str) -> Dict:
@@ -169,6 +177,9 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
         layer_weights = {}
         
         # Attention projections
+        # NOTE: PyTorch stores weights as [out_features, in_features]
+        # but TinyBrain expects [in_features, out_features] for matmul
+        # So we need to TRANSPOSE!
         for proj in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
             key = find_key([
                 f'layers.{layer_idx}.self_attn.{proj}.weight',
@@ -176,7 +187,8 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
                 f'h.{layer_idx}.attn.{proj}.weight',
             ])
             if key:
-                layer_weights[proj] = to_numpy(state_dict[key])
+                # TRANSPOSE: [out, in] -> [in, out]
+                layer_weights[proj] = to_numpy(state_dict[key]).T
         
         # MLP projections
         for proj in ['gate_proj', 'up_proj', 'down_proj']:
@@ -186,17 +198,18 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
                 f'h.{layer_idx}.mlp.{proj}.weight',
             ])
             if key:
-                layer_weights[proj] = to_numpy(state_dict[key])
+                # TRANSPOSE: [out, in] -> [in, out]
+                layer_weights[proj] = to_numpy(state_dict[key]).T
         
         # Handle merged gate+up projection (some models combine these)
         if 'gate_proj' not in layer_weights and 'up_proj' not in layer_weights:
             key = find_key([f'layers.{layer_idx}.mlp.fc1.weight'])
             if key:
-                # Split into gate and up
-                full_weight = to_numpy(state_dict[key])
-                mid = full_weight.shape[0] // 2
-                layer_weights['gate_proj'] = full_weight[:mid]
-                layer_weights['up_proj'] = full_weight[mid:]
+                # Split into gate and up, then transpose
+                full_weight = to_numpy(state_dict[key]).T  # Transpose first
+                mid = full_weight.shape[1] // 2  # Now split on dim 1
+                layer_weights['gate_proj'] = full_weight[:, :mid]
+                layer_weights['up_proj'] = full_weight[:, mid:]
         
         # Layer norms
         for norm in ['input_layernorm', 'post_attention_layernorm']:
@@ -213,12 +226,14 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
     # 3. Extract LM head
     lm_head_key = find_key(['lm_head.weight', 'output.weight', 'head.weight'])
     if lm_head_key:
-        weights['lm_head'] = to_numpy(state_dict[lm_head_key])
+        # TRANSPOSE: LM head is also a linear layer [vocab_size, hidden_dim] -> [hidden_dim, vocab_size]
+        weights['lm_head'] = to_numpy(state_dict[lm_head_key]).T
         print(f"  ✓ LM Head: {weights['lm_head'].shape}")
     else:
         # Some models tie embeddings and LM head
         print("  ⚠ LM head not found, using tied embeddings")
-        weights['lm_head'] = weights['embeddings'].copy()
+        # Embeddings are already [vocab_size, hidden_dim], need to transpose for matmul
+        weights['lm_head'] = weights['embeddings'].T.copy()
     
     return weights
 
@@ -261,93 +276,227 @@ def quantize_int8_per_channel(tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarra
 
 def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str, quantize: bool = True):
     """
-    Write weights to TBF binary format
+    Write weights to TBF binary format (matches Swift ModelWeights.save() format EXACTLY)
     
-    Args:
-        weights: Extracted and organized weights
-        config: Model configuration
-        output_path: Output .tbf file path
-        quantize: Whether to quantize to INT8
+    This must match the format in Sources/TinyBrainRuntime/ModelWeights.swift exactly!
+    
+    Format:
+    1. Header (4KB aligned): magic + version + config JSON
+    2. Metadata (4KB aligned): quantization info for each tensor
+    3. Index (4KB aligned): tensor names, shapes, offsets
+    4. Data (4KB aligned per tensor): actual weight blobs
     """
     output_path = Path(output_path)
     print(f"\nWriting TBF format to: {output_path}")
     
-    # Create header
-    header = TBFHeader(
-        version=1,
-        model_type="llama",
-        config=asdict(config),
-    )
+    # Prepare quantized tensors
+    quantized_weights = {}
+    
+    def prepare_tensor(name: str, tensor: np.ndarray):
+        if quantize and len(tensor.shape) >= 1:
+            q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
+            quantized_weights[name] = {
+                'data': q_tensor,
+                'scales': scales,
+                'zero_points': zero_points,
+                'shape': q_tensor.shape,
+                'quantized': True
+            }
+        else:
+            quantized_weights[name] = {
+                'data': tensor.astype(np.float32),
+                'scales': [],
+                'zero_points': None,
+                'shape': tensor.shape,
+                'quantized': False
+            }
+    
+    print("Quantizing weights...")
+    # Embeddings (Float32, not quantized)
+    quantized_weights['embeddings'] = {
+        'data': weights['embeddings'].astype(np.float32),
+        'scales': [],
+        'zero_points': None,
+        'shape': weights['embeddings'].shape,
+        'quantized': False
+    }
+    
+    # Layers (quantized)
+    pbar = tqdm(total=len(weights['layers']) * 8, desc="Quantizing")
+    for layer_idx, layer in enumerate(weights['layers']):
+        # Attention projections
+        prepare_tensor(f'layer_{layer_idx}_attn_q', layer['q_proj'])
+        pbar.update(1)
+        prepare_tensor(f'layer_{layer_idx}_attn_k', layer['k_proj'])
+        pbar.update(1)
+        prepare_tensor(f'layer_{layer_idx}_attn_v', layer['v_proj'])
+        pbar.update(1)
+        prepare_tensor(f'layer_{layer_idx}_attn_o', layer['o_proj'])
+        pbar.update(1)
+        
+        # FFN projections
+        prepare_tensor(f'layer_{layer_idx}_ffn_up', layer['gate_proj'])
+        pbar.update(1)
+        prepare_tensor(f'layer_{layer_idx}_ffn_down', layer['down_proj'])
+        pbar.update(1)
+        
+        # Layer norms (Float32, not quantized for numerical stability)
+        quantized_weights[f'layer_{layer_idx}_ln_input'] = {
+            'data': layer['input_layernorm'].astype(np.float32),
+            'scales': [],
+            'zero_points': None,
+            'shape': layer['input_layernorm'].shape,
+            'quantized': False
+        }
+        pbar.update(1)
+        quantized_weights[f'layer_{layer_idx}_ln_post'] = {
+            'data': layer['post_attention_layernorm'].astype(np.float32),
+            'scales': [],
+            'zero_points': None,
+            'shape': layer['post_attention_layernorm'].shape,
+            'quantized': False
+        }
+        pbar.update(1)
+    pbar.close()
+    
+    # Output projection
+    prepare_tensor('output', weights['lm_head'])
+    
+    print(f"Writing to: {output_path}")
     
     with open(output_path, 'wb') as f:
         # 1. Write header
-        header_bytes = header.to_bytes()
-        f.write(header_bytes)
-        print(f"  ✓ Header: {len(header_bytes)} bytes")
+        header_end = write_tbf_header(f, config)
         
-        # 2. Write quantization metadata
-        quant_mode = b'int8' if quantize else b'fp32'
-        f.write(struct.pack('<I', len(quant_mode)))
-        f.write(quant_mode)
+        # 2. Write quantization metadata section (starts at 4KB boundary)
+        # Count quantized tensors only
+        quant_tensor_names = [name for name, info in quantized_weights.items() if info['quantized']]
+        f.write(struct.pack('<I', len(quant_tensor_names)))
         
-        # 3. Write weights with progress bar
-        total_tensors = 1 + len(weights['layers']) * 8 + 1  # embeddings + layers + lm_head
-        pbar = tqdm(total=total_tensors, desc="Writing tensors")
-        
-        # Helper to write tensor
-        def write_tensor(name: str, tensor: np.ndarray):
-            if quantize and tensor.dtype != np.int8:
-                q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
-                
-                # Write quantized data
-                f.write(struct.pack('<I', len(q_tensor.tobytes())))
-                f.write(q_tensor.tobytes())
-                
-                # Write scales
-                f.write(struct.pack('<I', len(scales.tobytes())))
-                f.write(scales.tobytes())
-                
-                # Write shape
-                f.write(struct.pack('<I', len(q_tensor.shape)))
-                for dim in q_tensor.shape:
-                    f.write(struct.pack('<I', dim))
+        for name in quant_tensor_names:
+            info = quantized_weights[name]
+            
+            # Tensor name
+            name_bytes = name.encode('utf-8')
+            f.write(struct.pack('<I', len(name_bytes)))
+            f.write(name_bytes)
+            
+            # Precision (1 = INT8)
+            f.write(struct.pack('<B', 1))
+            
+            # Mode (2 = perChannel)
+            f.write(struct.pack('<B', 2))
+            
+            # Scales
+            f.write(struct.pack('<I', len(info['scales'])))
+            for scale in info['scales']:
+                f.write(struct.pack('<f', scale))
+            
+            # Zero points
+            if info['zero_points'] is not None:
+                f.write(struct.pack('<I', len(info['zero_points'])))
+                for zp in info['zero_points']:
+                    f.write(struct.pack('<b', zp))
             else:
-                # Write float32 data
-                tensor_bytes = tensor.astype(np.float32).tobytes()
-                f.write(struct.pack('<I', len(tensor_bytes)))
-                f.write(tensor_bytes)
-                
-                # Write shape
-                f.write(struct.pack('<I', len(tensor.shape)))
-                for dim in tensor.shape:
-                    f.write(struct.pack('<I', dim))
+                f.write(struct.pack('<I', 0))
+        
+        # Pad to 4KB
+        current_pos = f.tell()
+        padded_pos = ((current_pos + 4095) // 4096) * 4096
+        f.write(b'\x00' * (padded_pos - current_pos))
+        
+        # 3. Write tensor index section
+        f.write(struct.pack('<I', len(quantized_weights)))
+        
+        # We'll write data next and track offsets
+        data_start = ((f.tell() + (len(quantized_weights) * 100) + 4095) // 4096) * 4096  # Estimate
+        
+        tensor_list = list(quantized_weights.items())
+        current_data_offset = 0
+        
+        for name, info in tensor_list:
+            # Name
+            name_bytes = name.encode('utf-8')
+            f.write(struct.pack('<I', len(name_bytes)))
+            f.write(name_bytes)
+            
+            # Shape
+            f.write(struct.pack('<I', len(info['shape'])))
+            for dim in info['shape']:
+                f.write(struct.pack('<i', dim))
+            
+            # Data offset and size (will be in data section)
+            data_size = info['data'].nbytes
+            f.write(struct.pack('<Q', data_start + current_data_offset))
+            f.write(struct.pack('<Q', data_size))
+            
+            # Track offset for next tensor (4KB aligned)
+            padded_size = ((data_size + 4095) // 4096) * 4096
+            current_data_offset += padded_size
+        
+        # Pad index to 4KB
+        current_pos = f.tell()
+        padded_pos = ((current_pos + 4095) // 4096) * 4096
+        f.write(b'\x00' * (padded_pos - current_pos))
+        
+        # 4. Write weight data blobs (4KB aligned per tensor)
+        pbar = tqdm(total=len(tensor_list), desc="Writing weights")
+        for name, info in tensor_list:
+            f.write(info['data'].tobytes())
+            
+            # Pad to 4KB
+            current_pos = f.tell()
+            padded_pos = ((current_pos + 4095) // 4096) * 4096
+            f.write(b'\x00' * (padded_pos - current_pos))
             
             pbar.update(1)
-        
-        # Embeddings
-        write_tensor('embeddings', weights['embeddings'])
-        
-        # Layers
-        for layer_idx, layer in enumerate(weights['layers']):
-            for key in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 
-                       'gate_proj', 'down_proj',
-                       'input_layernorm', 'post_attention_layernorm']:
-                if key in layer:
-                    write_tensor(f'layer_{layer_idx}_{key}', layer[key])
-        
-        # LM head
-        write_tensor('lm_head', weights['lm_head'])
-        
         pbar.close()
     
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"\n✅ Conversion complete! Output: {output_path} ({file_size_mb:.2f} MB)")
 
 
-def infer_config_from_weights(state_dict: Dict) -> ModelConfig:
+def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> ModelConfig:
     """
-    Attempt to infer model configuration from weight shapes
+    Attempt to infer model configuration from weight shapes or config.json
     """
+    # First, try to load config.json if checkpoint path is provided
+    if checkpoint_path:
+        checkpoint_dir = Path(checkpoint_path).parent
+        config_json_path = checkpoint_dir / 'config.json'
+        
+        if config_json_path.exists():
+            print(f"Loading config from: {config_json_path}")
+            with open(config_json_path) as f:
+                hf_config = json.load(f)
+            
+            vocab_size = hf_config.get('vocab_size')
+            hidden_dim = hf_config.get('hidden_size')
+            num_layers = hf_config.get('num_hidden_layers')
+            num_heads = hf_config.get('num_attention_heads')
+            num_kv_heads = hf_config.get('num_key_value_heads', num_heads)  # GQA support!
+            intermediate_dim = hf_config.get('intermediate_size', 4 * hidden_dim)
+            max_seq_len = hf_config.get('max_position_embeddings', 2048)
+            
+            print("\nInferred configuration:")
+            print(f"  Vocab size: {vocab_size}")
+            print(f"  Hidden dim: {hidden_dim}")
+            print(f"  Num layers: {num_layers}")
+            print(f"  Num heads: {num_heads}")
+            print(f"  Num KV heads: {num_kv_heads}")
+            print(f"  Intermediate dim: {intermediate_dim}")
+            
+            return ModelConfig(
+                num_layers=num_layers,
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                vocab_size=vocab_size,
+                intermediate_dim=intermediate_dim,
+                max_seq_len=max_seq_len
+            )
+    
+    # Fallback: infer from weight shapes
     # Find embedding weight to get vocab size and hidden dim
     embed_key = None
     for key in state_dict.keys():
@@ -378,6 +527,16 @@ def infer_config_from_weights(state_dict: Dict) -> ModelConfig:
     elif hidden_dim % 64 == 0:
         num_heads = hidden_dim // 64
     
+    # Try to infer num_kv_heads from K/V projection shapes
+    num_kv_heads = num_heads  # Default to MHA
+    for key in state_dict.keys():
+        if 'layers.0' in key and ('k_proj' in key or 'key' in key):
+            if len(state_dict[key].shape) == 2:
+                kv_out_dim = state_dict[key].shape[0]  # Before transpose
+                head_dim = hidden_dim // num_heads
+                num_kv_heads = kv_out_dim // head_dim
+                break
+    
     # Get intermediate_dim from MLP
     intermediate_dim = 4 * hidden_dim  # Default
     for key in state_dict.keys():
@@ -391,12 +550,14 @@ def infer_config_from_weights(state_dict: Dict) -> ModelConfig:
     print(f"  Hidden dim: {hidden_dim}")
     print(f"  Num layers: {num_layers}")
     print(f"  Num heads: {num_heads}")
+    print(f"  Num KV heads: {num_kv_heads}")
     print(f"  Intermediate dim: {intermediate_dim}")
     
     return ModelConfig(
         num_layers=num_layers,
         hidden_dim=hidden_dim,
         num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
         vocab_size=vocab_size,
         intermediate_dim=intermediate_dim,
     )
@@ -437,7 +598,7 @@ Examples:
     
     # Determine config
     if args.auto_config or not all([args.num_layers, args.hidden_dim, args.num_heads, args.vocab_size]):
-        config = infer_config_from_weights(state_dict)
+        config = infer_config_from_weights(state_dict, checkpoint_path=args.input)
     else:
         config = ModelConfig(
             num_layers=args.num_layers,

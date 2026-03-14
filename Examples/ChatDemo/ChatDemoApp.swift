@@ -5,6 +5,9 @@
 
 import SwiftUI
 import TinyBrainDemo
+import TinyBrainRuntime
+import TinyBrainMetal
+import TinyBrainTokenizer
 
 #if os(macOS)
 import AppKit
@@ -36,10 +39,40 @@ struct ChatDemoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     #endif
     
+    // Initialize Metal backend if available
+    init() {
+        if MetalBackend.isAvailable {
+            do {
+                TinyBrainBackend.metalBackend = try MetalBackend()
+                print("🚀 Metal GPU backend initialized")
+            } catch {
+                print("⚠️ Metal initialization failed: \(error)")
+            }
+        }
+    }
+    
     var body: some Scene {
         WindowGroup {
-            ChatView()
+            // TB-008 & TB-009: Load model and tokenizer (format-agnostic)
+            let weights = ModelLoader.loadWithFallback(
+                from: "Models/tinyllama-1.1b-int8.tbf"
+            )
+            let runner = ModelRunner(weights: weights)
+            
+            // Load tokenizer (auto-detects format)
+            let tokenizer = TokenizerLoader.loadBestAvailable()
+            
+            let viewModel = ChatViewModel(runner: runner, tokenizer: tokenizer)
+            
+            ChatView(viewModel: viewModel)
                 .frame(minWidth: 600, minHeight: 400)
+                .onAppear {
+                    print("✅ Model loaded. Config:")
+                    print("  hiddenDim: \(weights.config.hiddenDim)")
+                    print("  numHeads: \(weights.config.numHeads)")
+                    print("  numKVHeads: \(weights.config.numKVHeads)")
+                    print("  Calculated kvDim: \(weights.config.kvDim)")
+                }
         }
         #if os(macOS)
         .defaultSize(width: 900, height: 600)

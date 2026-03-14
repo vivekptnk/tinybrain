@@ -10,6 +10,7 @@
 /// - Platform-adaptive layout
 
 import SwiftUI
+import TinyBrainRuntime
 
 /// Main chat interface view
 public struct ChatView: View {
@@ -19,8 +20,8 @@ public struct ChatView: View {
     @State private var showTelemetry = true
     @State private var showSettings = false
     
-    public init(viewModel: ChatViewModel? = nil) {
-        _viewModel = StateObject(wrappedValue: viewModel ?? ChatViewModel())
+    public init(viewModel: ChatViewModel) {
+        _viewModel = StateObject(wrappedValue: viewModel)
     }
     
     public var body: some View {
@@ -281,7 +282,19 @@ public struct ChatView: View {
 #if DEBUG
 struct ChatView_Previews: PreviewProvider {
     static var previews: some View {
-        ChatView()
+        // Create toy model for preview
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+        let viewModel = ChatViewModel(runner: runner)
+        
+        return ChatView(viewModel: viewModel)
             .frame(width: 900, height: 600)
     }
 }

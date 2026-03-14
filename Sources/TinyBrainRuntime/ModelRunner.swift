@@ -31,8 +31,11 @@ public struct ModelConfig: Codable {
     /// Hidden dimension size
     public let hiddenDim: Int
     
-    /// Number of attention heads
+    /// Number of attention heads (for queries)
     public let numHeads: Int
+    
+    /// Number of key-value heads (for GQA/MQA, defaults to numHeads for MHA)
+    public let numKVHeads: Int
     
     /// Vocabulary size
     public let vocabSize: Int
@@ -40,10 +43,16 @@ public struct ModelConfig: Codable {
     /// Maximum sequence length
     public let maxSeqLen: Int
     
-    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048) {
+    /// Computed: KV dimension (hiddenDim / numHeads * numKVHeads)
+    public var kvDim: Int {
+        return (hiddenDim / numHeads) * numKVHeads
+    }
+    
+    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048, numKVHeads: Int? = nil) {
         self.numLayers = numLayers
         self.hiddenDim = hiddenDim
         self.numHeads = numHeads
+        self.numKVHeads = numKVHeads ?? numHeads  // Default to MHA if not specified
         self.vocabSize = vocabSize
         self.maxSeqLen = maxSeqLen
     }
@@ -79,7 +88,7 @@ public final class ModelRunner {
         self.config = weights.config
         self.kvCache = KVCache(
             numLayers: config.numLayers,
-            hiddenDim: config.hiddenDim,
+            hiddenDim: config.kvDim,  // Use KV dimension for GQA support
             maxTokens: config.maxSeqLen,
             pageSize: 16
         )
@@ -284,8 +293,11 @@ private extension ModelRunner {
                    layerWeights: AttentionProjectionWeights,
                    layerIndex: Int) -> Tensor<Float> {
         let query = layerWeights.query.apply(toRow: hiddenRow)
-        let keyVec = layerWeights.key.apply(toRow: hiddenRow).squeezedRowVector()
-        let valueVec = layerWeights.value.apply(toRow: hiddenRow).squeezedRowVector()
+        let keyRow = layerWeights.key.apply(toRow: hiddenRow)
+        let valueRow = layerWeights.value.apply(toRow: hiddenRow)
+        
+        let keyVec = keyRow.squeezedRowVector()
+        let valueVec = valueRow.squeezedRowVector()
         
         kvCache.append(layer: layerIndex, key: keyVec, value: valueVec, position: currentPosition)
         

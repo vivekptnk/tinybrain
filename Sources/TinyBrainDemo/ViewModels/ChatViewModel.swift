@@ -62,22 +62,11 @@ public final class ChatViewModel: ObservableObject {
     
     // MARK: - Initialization
     
-    /// Initialize with optional tokenizer
-    public init(tokenizer: (any Tokenizer)? = nil) {
+    /// Initialize with pre-configured model runner and optional tokenizer
+    public init(runner: ModelRunner, tokenizer: (any Tokenizer)? = nil) {
+        self.runner = runner
         self.tokenizer = tokenizer
         self.telemetry = TelemetryViewModel()
-        
-        // Create toy model for demo
-        let config = ModelConfig(
-            numLayers: 2,
-            hiddenDim: 128,
-            numHeads: 4,
-            vocabSize: 100,
-            maxSeqLen: 256
-        )
-        
-        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
-        self.runner = ModelRunner(weights: weights)
     }
     
     // MARK: - Message Management

@@ -64,6 +64,7 @@
 - Discuss major API or architecture changes in design docs before coding; store them under `docs/rfcs/`.
 - When blocked, document the issue in the task file and propose mitigation paths aligned with PRD risk table.
 - Keep responses concise and action-focused; summarize deviations from the plan in AGENTS.md if they become permanent rules.
+- Never author yourself
 - **NEVER commit changes without explicit permission from the product owner.** Always stage changes and ask for approval before running `git commit`.
 
 Following these rules keeps TinyBrain aligned with the PRD vision while enabling future agents to contribute confidently.

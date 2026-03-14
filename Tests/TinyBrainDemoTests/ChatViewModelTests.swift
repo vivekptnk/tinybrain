@@ -20,7 +20,17 @@ final class ChatViewModelTests: XCTestCase {
     var viewModel: ChatViewModel!
     
     override func setUp() async throws {
-        viewModel = ChatViewModel()
+        // Create toy model for testing
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+        viewModel = ChatViewModel(runner: runner)
     }
     
     override func tearDown() async throws {
