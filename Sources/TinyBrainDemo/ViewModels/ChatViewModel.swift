@@ -21,44 +21,50 @@ import TinyBrainTokenizer
 /// Main view model for the TinyBrain Chat interface
 @MainActor
 public final class ChatViewModel: ObservableObject {
-    
+
     // MARK: - Published Properties
-    
+
     /// All messages in the conversation
     @Published public var messages: [Message] = []
-    
+
     /// Current user input
     @Published public var promptText: String = ""
-    
+
     /// Whether AI is currently generating
     @Published public var isGenerating: Bool = false
-    
+
     /// Error state
     @Published public var hasError: Bool = false
     @Published public var errorMessage: String = ""
-    
+
     /// Sampler configuration
     @Published public var temperature: Float = 0.7
     @Published public var topK: Int = 40
     @Published public var topP: Float = 0.9
     @Published public var useTopK: Bool = true
-    
+
     /// Quantization mode (for UI display)
     @Published public var quantizationMode: QuantizationMode = .int8
-    
+
+    /// Whether a model switch is in progress
+    @Published public private(set) var isSwitchingModel: Bool = false
+
     /// Telemetry view model
     @Published public private(set) var telemetry: TelemetryViewModel
 
     /// X-Ray visualization view model (TB-010)
     @Published public private(set) var xRay: XRayViewModel
 
+    /// Model picker view model
+    public let modelPicker: ModelPickerViewModel
+
     // MARK: - Private State
 
-    /// Model runner
-    private let runner: ModelRunner
+    /// Model runner (mutable to allow hot-swapping models)
+    private var runner: ModelRunner
 
-    /// Optional tokenizer (real or mock)
-    private let tokenizer: (any Tokenizer)?
+    /// Optional tokenizer (real or mock, mutable for hot-swapping)
+    private var tokenizer: (any Tokenizer)?
 
     /// Current generation task
     private var generationTask: Task<Void, Never>?
@@ -76,6 +82,38 @@ public final class ChatViewModel: ObservableObject {
         self.tokenizer = tokenizer
         self.telemetry = TelemetryViewModel()
         self.xRay = XRayViewModel(numLayers: runner.config.numLayers)
+        self.modelPicker = ModelPickerViewModel()
+    }
+
+    // MARK: - Model Switching
+
+    /// Switch to a different model file at runtime.
+    ///
+    /// This resets the conversation, loads the new weights + tokenizer,
+    /// and rebuilds the runner. If `model` is nil, reverts to the toy model.
+    ///
+    /// - Parameter model: The ModelInfo to load, or nil for the toy model.
+    public func switchModel(_ model: ModelInfo?) async {
+        guard !isGenerating else { return }
+
+        isSwitchingModel = true
+        clearConversation()
+
+        modelPicker.select(path: model?.path)
+        let (weights, newTokenizer) = await modelPicker.loadSelected()
+
+        // Rebuild runner with new weights
+        runner = ModelRunner(weights: weights)
+        tokenizer = newTokenizer
+
+        // Rebuild X-Ray for new layer count
+        xRay = XRayViewModel(numLayers: runner.config.numLayers)
+
+        isSwitchingModel = false
+
+        if let err = modelPicker.switchError {
+            handleError(message: err)
+        }
     }
     
     // MARK: - Message Management

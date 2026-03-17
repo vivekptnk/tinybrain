@@ -2,10 +2,11 @@
 """
 PyTorch -> TBF (TinyBrain Binary Format) Model Converter
 
-Converts PyTorch checkpoints to TinyBrain's optimized binary format with INT8 quantization.
+Converts PyTorch checkpoints to TinyBrain's optimized binary format with INT8 or INT4 quantization.
 
 Usage:
     python convert_model.py --input model.pt --output model.tbf --quantize int8
+    python convert_model.py --input model.pt --output model.tbf --quantize int4
 
 References:
     - docs/tbf-format-spec.md for format specification
@@ -275,25 +276,108 @@ def quantize_int8_per_channel(tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarra
     return quantized, scales, zero_points
 
 
-def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str, quantize: bool = True):
+def quantize_int4_per_group(tensor: np.ndarray, group_size: int = 128) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Quantize tensor to INT4 with per-group symmetric quantization.
+
+    Per-group quantization divides the flattened tensor into groups of
+    `group_size` consecutive elements, each sharing one FP32 scale factor.
+    Two INT4 values are packed into each byte (high nibble + low nibble).
+
+    Memory savings vs FP32: 87.5% (4 bytes -> 0.5 bytes per element)
+    Memory savings vs INT8: 50%   (1 byte  -> 0.5 bytes per element)
+
+    Args:
+        tensor: Float32 numpy array (1D or 2D)
+        group_size: Number of elements per quantization group (default: 128)
+
+    Returns:
+        (packed_data, scales, zero_points)
+        - packed_data: int8 array with 2 INT4 values per byte
+        - scales: float32 array with one scale per group
+        - zero_points: int8 array with one zero point per group (always 0 for symmetric)
+    """
+    flat = tensor.flatten().astype(np.float32)
+    total_elements = len(flat)
+    num_groups = (total_elements + group_size - 1) // group_size
+
+    scales = np.zeros(num_groups, dtype=np.float32)
+    zero_points = np.zeros(num_groups, dtype=np.int8)
+    packed_count = (total_elements + 1) // 2
+    packed_data = np.zeros(packed_count, dtype=np.uint8)
+
+    for g in range(num_groups):
+        start = g * group_size
+        end = min(start + group_size, total_elements)
+        group_data = flat[start:end]
+
+        # Symmetric quantization: map abs_max to 7 (max positive INT4)
+        abs_max = np.abs(group_data).max()
+        scale = abs_max / 7.0 if abs_max > 0 else 1.0
+        scales[g] = scale
+
+        # Quantize each element to [-7, 7] range
+        quantized = np.clip(np.round(group_data / scale), -7, 7).astype(np.int8)
+
+        # Pack pairs of INT4 values into bytes
+        for i_in_group, q_val in enumerate(quantized):
+            i = start + i_in_group
+            byte_idx = i // 2
+            nibble = int(q_val) & 0x0F  # 4-bit two's complement
+
+            if i % 2 == 0:
+                # Even index -> high nibble (bits 7-4)
+                packed_data[byte_idx] = (nibble << 4) & 0xFF
+            else:
+                # Odd index -> low nibble (bits 3-0)
+                packed_data[byte_idx] |= nibble & 0x0F
+
+    # Convert to int8 view for consistency with Swift side
+    packed_data = packed_data.view(np.int8)
+
+    return packed_data, scales, zero_points
+
+
+def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
+                     quantize_mode: str = 'int8', group_size: int = 128):
     """
     Write weights to TBF binary format (matches Swift ModelWeights.save() format EXACTLY)
+
+    Args:
+        weights: Organized weights dictionary
+        config: Model configuration
+        output_path: Output file path
+        quantize_mode: 'int8', 'int4', or 'none'
+        group_size: Group size for INT4 quantization (default: 128)
     """
     output_path = Path(output_path)
     print(f"\nWriting TBF format to: {output_path}")
+    print(f"  Quantization: {quantize_mode}" + (f" (group_size={group_size})" if quantize_mode == 'int4' else ""))
 
     # Prepare quantized tensors
     quantized_weights = {}
 
     def prepare_tensor(name: str, tensor: np.ndarray):
-        if quantize and len(tensor.shape) >= 1:
+        if quantize_mode == 'int4' and len(tensor.shape) >= 1:
+            q_tensor, scales, zero_points = quantize_int4_per_group(tensor, group_size=group_size)
+            quantized_weights[name] = {
+                'data': q_tensor,
+                'scales': scales,
+                'zero_points': zero_points,
+                'shape': tensor.shape,  # Original shape (not packed shape)
+                'quantized': True,
+                'precision': 'int4',
+                'group_size': group_size,
+            }
+        elif quantize_mode == 'int8' and len(tensor.shape) >= 1:
             q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
             quantized_weights[name] = {
                 'data': q_tensor,
                 'scales': scales,
                 'zero_points': zero_points,
                 'shape': q_tensor.shape,
-                'quantized': True
+                'quantized': True,
+                'precision': 'int8',
             }
         else:
             quantized_weights[name] = {
@@ -301,7 +385,7 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str, quant
                 'scales': [],
                 'zero_points': None,
                 'shape': tensor.shape,
-                'quantized': False
+                'quantized': False,
             }
 
     print("Quantizing weights...")
@@ -387,11 +471,17 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str, quant
             f.write(struct.pack('<I', len(name_bytes)))
             f.write(name_bytes)
 
-            # Precision (1 = INT8)
-            f.write(struct.pack('<B', 1))
+            # Precision (1 = INT8, 2 = INT4)
+            precision_code = 2 if info.get('precision') == 'int4' else 1
+            f.write(struct.pack('<B', precision_code))
 
-            # Mode (2 = perChannel)
-            f.write(struct.pack('<B', 2))
+            # Mode (2 = perChannel for INT8, 3 = int4 per-group for INT4)
+            mode_code = 3 if info.get('precision') == 'int4' else 2
+            f.write(struct.pack('<B', mode_code))
+
+            # Group size (only meaningful for INT4, 0 for INT8)
+            gs = info.get('group_size', 0) if info.get('precision') == 'int4' else 0
+            f.write(struct.pack('<I', gs))
 
             # Scales
             f.write(struct.pack('<I', len(info['scales'])))
@@ -572,8 +662,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Convert with INT8 quantization
+  # Convert with INT8 quantization (75% memory savings)
   python convert_model.py --input tinyllama.pt --output tinyllama-int8.tbf --quantize int8
+
+  # Convert with INT4 quantization (87.5% memory savings)
+  python convert_model.py --input tinyllama.pt --output tinyllama-int4.tbf --quantize int4
+
+  # INT4 with custom group size
+  python convert_model.py --input model.pt --output model-int4.tbf --quantize int4 --group-size 64
 
   # Convert without quantization (FP32)
   python convert_model.py --input model.pt --output model.tbf --quantize none
@@ -585,7 +681,10 @@ Examples:
 
     parser.add_argument('--input', '-i', required=True, help='Input PyTorch checkpoint (.pt or .safetensors)')
     parser.add_argument('--output', '-o', required=True, help='Output TBF file path')
-    parser.add_argument('--quantize', choices=['int8', 'none'], default='int8', help='Quantization mode')
+    parser.add_argument('--quantize', choices=['int8', 'int4', 'none'], default='int8',
+                        help='Quantization mode (int8: 75%% savings, int4: 87.5%% savings)')
+    parser.add_argument('--group-size', type=int, default=128,
+                        help='Group size for INT4 quantization (default: 128)')
     parser.add_argument('--auto-config', action='store_true', help='Auto-infer model config from weights')
 
     # Manual config overrides
@@ -614,8 +713,9 @@ Examples:
     weights = extract_weights(state_dict, config)
 
     # Write TBF format
-    quantize = (args.quantize == 'int8')
-    write_tbf_format(weights, config, args.output, quantize=quantize)
+    write_tbf_format(weights, config, args.output,
+                     quantize_mode=args.quantize,
+                     group_size=args.group_size)
 
 
 if __name__ == '__main__':

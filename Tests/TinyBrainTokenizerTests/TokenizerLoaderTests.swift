@@ -1,11 +1,13 @@
 /// Tokenizer Loader Tests
 ///
-/// **TB-009 RED Phase:** Tests for format-agnostic tokenizer loading
+/// **TB-009 / TB-010:** Tests for format-agnostic tokenizer loading
 ///
 /// Tests cover:
-/// - Format detection (HuggingFace, SentencePiece, TinyBrain)
+/// - Format detection for all four formats (HuggingFace, TinyBrain, SentencePiece, TikToken)
 /// - HuggingFace tokenizer.json parsing
-/// - Automatic discovery
+/// - SentencePiece .vocab loading
+/// - TikToken .tiktoken loading
+/// - Automatic discovery (loadBestAvailable)
 /// - Error handling
 
 import XCTest
@@ -90,22 +92,106 @@ final class TokenizerLoaderTests: XCTestCase {
         XCTAssertGreaterThan(tokenizer.vocabularySize, 0)
     }
     
+    // MARK: - SentencePiece Format Detection
+
+    func testDetectSentencePieceVocabExtension() throws {
+        let fixtureURL = Bundle.module.url(forResource: "test_sentencepiece", withExtension: "vocab")
+        XCTAssertNotNil(fixtureURL, "test_sentencepiece.vocab fixture should exist")
+
+        let format = TokenizerFormat.detect(at: fixtureURL!.path)
+        XCTAssertEqual(format, .sentencePiece, "Should detect .vocab as SentencePiece")
+    }
+
+    func testDetectSentencePieceModelFilename() throws {
+        // Create a temp file named "tokenizer.model"
+        let tempDir = FileManager.default.temporaryDirectory
+        let modelURL = tempDir.appendingPathComponent("tokenizer.model")
+        // Write minimal valid SP content
+        let content = "<unk>\t0\n<s>\t0\n</s>\t0\n▁Hello\t-1.0\n"
+        try content.write(to: modelURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: modelURL) }
+
+        let format = TokenizerFormat.detect(at: modelURL.path)
+        XCTAssertEqual(format, .sentencePiece, "Should detect 'tokenizer.model' as SentencePiece")
+    }
+
+    func testLoadSentencePieceVocab() throws {
+        let fixtureURL = Bundle.module.url(forResource: "test_sentencepiece", withExtension: "vocab")!
+        let tokenizer = try TokenizerLoader.load(from: fixtureURL.path)
+        XCTAssertGreaterThan(tokenizer.vocabularySize, 0, "SentencePiece vocab should load")
+    }
+
+    func testLoadSentencePieceRoundTrip() throws {
+        let fixtureURL = Bundle.module.url(forResource: "test_sentencepiece", withExtension: "vocab")!
+        let tokenizer = try TokenizerLoader.load(from: fixtureURL.path)
+        let tokens = tokenizer.encode("Hello")
+        XCTAssertFalse(tokens.isEmpty)
+        let decoded = tokenizer.decode(tokens)
+        XCTAssertFalse(decoded.isEmpty)
+    }
+
+    // MARK: - TikToken Format Detection
+
+    func testDetectTikTokenExtension() throws {
+        let fixtureURL = Bundle.module.url(forResource: "test_tiktoken", withExtension: "tiktoken")
+        XCTAssertNotNil(fixtureURL, "test_tiktoken.tiktoken fixture should exist")
+
+        let format = TokenizerFormat.detect(at: fixtureURL!.path)
+        XCTAssertEqual(format, .tiktoken, "Should detect .tiktoken as TikToken format")
+    }
+
+    func testLoadTikToken() throws {
+        let fixtureURL = Bundle.module.url(forResource: "test_tiktoken", withExtension: "tiktoken")!
+        let tokenizer = try TokenizerLoader.load(from: fixtureURL.path)
+        XCTAssertGreaterThan(tokenizer.vocabularySize, 0, "TikToken file should load")
+    }
+
+    func testLoadTikTokenEncodesDecode() throws {
+        let fixtureURL = Bundle.module.url(forResource: "test_tiktoken", withExtension: "tiktoken")!
+        let tokenizer = try TokenizerLoader.load(from: fixtureURL.path)
+        let tokens = tokenizer.encode("Hello")
+        XCTAssertFalse(tokens.isEmpty)
+        let decoded = tokenizer.decode(tokens)
+        XCTAssertFalse(decoded.isEmpty)
+    }
+
+    // MARK: - Priority Ordering
+
+    /// HuggingFace should take priority over TinyBrain when both keys present
+    func testHuggingFacePriorityOverTinyBrain() throws {
+        // A JSON with both "version"+"model" AND "vocab"+"merges" should be HuggingFace
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("priority_test.json")
+        let json = """
+        {
+          "version": "1.0",
+          "model": {"type": "BPE", "vocab": {"a": 0}, "merges": []},
+          "vocab": {"a": 0},
+          "merges": []
+        }
+        """
+        try json.write(to: tempURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let format = TokenizerFormat.detect(at: tempURL.path)
+        XCTAssertEqual(format, .huggingFace, "HuggingFace should take priority")
+    }
+
     // MARK: - Error Handling
-    
+
     func testLoadInvalidFile() {
         XCTAssertThrowsError(try TokenizerLoader.load(from: "/nonexistent.json")) {
             error in
             XCTAssertTrue(error is CocoaError || error is TokenizerError)
         }
     }
-    
+
     func testLoadInvalidJSON() throws {
         // Create temp file with invalid JSON
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("invalid.json")
         try "{ invalid json }".write(to: tempURL, atomically: true, encoding: .utf8)
-        
+
         XCTAssertThrowsError(try TokenizerLoader.load(from: tempURL.path))
-        
+
         try? FileManager.default.removeItem(at: tempURL)
     }
 }

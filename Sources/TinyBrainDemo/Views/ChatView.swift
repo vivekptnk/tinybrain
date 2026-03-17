@@ -67,6 +67,12 @@ public struct ChatView: View {
             Text("TinyBrain")
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
 
+            // Model picker — lets users switch models at runtime
+            ModelPickerView(pickerVM: viewModel.modelPicker) { model in
+                Task { await viewModel.switchModel(model) }
+            }
+            .disabled(viewModel.isGenerating || viewModel.isSwitchingModel)
+
             if viewModel.isGenerating {
                 HStack(spacing: 4) {
                     Circle().fill(.blue).frame(width: 5, height: 5)
@@ -75,6 +81,15 @@ public struct ChatView: View {
                         .foregroundStyle(.blue)
                 }
                 .pulsing()
+            } else if viewModel.isSwitchingModel {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 12, height: 12)
+                    Text("Loading model...")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()

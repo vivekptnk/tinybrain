@@ -91,3 +91,4 @@ benchmarks/results/*.json
 !benchmarks/results/.gitkeep
 
 .cursor/
+.claude/worktrees/

@@ -1,0 +1,25 @@
+// This file is intentionally disabled (.disabled extension).
+// It documents how the test_tiktoken.tiktoken fixture was generated.
+//
+// Each line: base64(utf8_bytes_of_token) + " " + rank
+//
+// Tokens:
+//   " " (space) = ICA= no, just a single space byte = IA== ? No: base64(" ") = IA==
+//   Actually: " ".utf8 = [0x20] → base64 = "IA==" but that's with padding for 1 byte
+//   base64 of single byte 0x20 = " " → "IA==" ... let's compute properly:
+//
+//   In Swift: Data([0x20]).base64EncodedString() = "IA=="
+//   Data("H".utf8).base64EncodedString() = "SA=="
+//   Data("e".utf8).base64EncodedString() = "ZQ=="
+//   Data("l".utf8).base64EncodedString() = "bA=="
+//   Data("o".utf8).base64EncodedString() = "bw=="
+//   Data("w".utf8).base64EncodedString() = "dw=="
+//   Data("r".utf8).base64EncodedString() = "cg=="
+//   Data("d".utf8).base64EncodedString() = "ZA=="
+//   Data("!".utf8).base64EncodedString() = "IQ=="
+//   Data(",".utf8).base64EncodedString() = "LA=="
+//   Data("He".utf8).base64EncodedString() = "SGU="
+//   Data("Hello".utf8).base64EncodedString() = "SGVsbG8="
+//   Data("world".utf8).base64EncodedString() = "d29ybGQ="
+//   Data(" Hello".utf8).base64EncodedString() = "IEhlbGxv"
+//   Data(" world".utf8).base64EncodedString() = "IHdvcmxk"

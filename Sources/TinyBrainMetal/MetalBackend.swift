@@ -179,9 +179,9 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             }
         }
 
-        // **REVIEW HITLER FIX:** INT8 dequant + fused matmul kernels
+        // INT8 dequant + fused matmul kernels
 
-        // Fused INT8 dequant + matmul (THE REAL FIX!)
+        // Fused INT8 dequant + matmul
         kernel void matmul_int8_dequant(
             device const float* A [[buffer(0)]],
             device const char* B_quantized [[buffer(1)]],
@@ -204,6 +204,57 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
                 char b_quant = B_quantized[k * N + col];
                 float b_scale = B_scales[k];
                 float b_val = float(b_quant) * b_scale;
+
+                sum += a_val * b_val;
+            }
+
+            C[row * N + col] = sum;
+        }
+
+        // ── INT4 fused dequant + matmul ────────────────────────────────────
+        // Unpacks two 4-bit values from each byte, applies per-group
+        // scale and zero point, then accumulates the dot product.
+        // B is packed as [K*N/2] bytes with per-group scales.
+        kernel void matmul_int4_dequant(
+            device const float* A [[buffer(0)]],
+            device const char* B_packed [[buffer(1)]],
+            device const float* B_scales [[buffer(2)]],
+            device const char* B_zeroPoints [[buffer(3)]],
+            device float* C [[buffer(4)]],
+            constant uint3& dims [[buffer(5)]],
+            constant uint& groupSize [[buffer(6)]],
+            uint2 gid [[thread_position_in_grid]]
+        ) {
+            uint M = dims.x, N = dims.y, K = dims.z;
+            uint row = gid.y, col = gid.x;
+
+            if (row >= M || col >= N) return;
+
+            float sum = 0.0;
+
+            for (uint k = 0; k < K; k++) {
+                float a_val = A[row * K + k];
+
+                // B element at (k, col): linear index = k * N + col
+                uint linearIdx = k * N + col;
+                uint byteIdx = linearIdx / 2;
+                char packed = B_packed[byteIdx];
+
+                // Unpack INT4: even index = high nibble, odd = low nibble
+                int nibble;
+                if (linearIdx % 2 == 0) {
+                    nibble = (int(packed) >> 4) & 0x0F;
+                } else {
+                    nibble = int(packed) & 0x0F;
+                }
+                // Sign-extend from 4-bit
+                if (nibble > 7) nibble -= 16;
+
+                // Per-group dequantize
+                uint groupIdx = linearIdx / groupSize;
+                float b_scale = B_scales[groupIdx];
+                int b_zp = int(B_zeroPoints[groupIdx]);
+                float b_val = float(nibble - b_zp) * b_scale;
 
                 sum += a_val * b_val;
             }
@@ -687,85 +738,172 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
     }
     
-    // MARK: - INT8 Quantized Operations
+    // MARK: - Quantized Operations (INT8 + INT4)
+
+    /// Matrix multiplication with quantized weights (INT8 or INT4)
+    ///
+    /// Auto-detects precision from the QuantizedTensor and dispatches
+    /// to the appropriate Metal kernel:
+    ///   - INT8 per-channel → `matmul_int8_dequant`
+    ///   - INT4 per-group   → `matmul_int4_dequant`
+    ///
     /// - Parameters:
     ///   - input: Float32 input [M, K]
-    ///   - quantized: INT8 weights
+    ///   - quantized: Quantized weights (INT8 or INT4)
     /// - Returns: Float32 output [M, N]
     public func matmulQuantized(_ input: Tensor<Float>, _ quantized: QuantizedTensor) throws -> Tensor<Float> {
         precondition(input.shape.dimensions.count == 2, "Input must be 2D")
         precondition(quantized.shape.dimensions.count == 2, "Weights must be 2D")
         precondition(input.shape.dimensions[1] == quantized.shape.dimensions[0], "Dimensions must match")
-        
-        // Symmetric/asymmetric modes need different kernel (single scale, not per-channel)
+
+        // Route to INT4 kernel for 4-bit precision
+        if quantized.precision == .int4 {
+            return try matmulINT4(input, quantized)
+        }
+
+        // INT8: Symmetric/asymmetric modes need different kernel (single scale, not per-channel)
         guard quantized.mode == .perChannel else {
             // Fall back to CPU for non-per-channel modes
             let dequantized = quantized.dequantize()
             return try matmul(input, dequantized)
         }
-        
+
         let M = UInt32(input.shape.dimensions[0])
         let K = UInt32(input.shape.dimensions[1])
         let N = UInt32(quantized.shape.dimensions[1])
-        
+
         // Ensure input is contiguous
         let inputContiguous = input.isContiguous ? input : input.makeContiguousCopy()
-        
+
         // Create buffers
         let (bufferA, releaseA) = try createBufferWithTracking(from: inputContiguous)
-        
+
         // Upload or reuse GPU-resident quantized buffers
         let cacheEntry = try cachedQuantizedBuffers(for: quantized)
         let bufferB = cacheEntry.weights
         let bufferScales = cacheEntry.scales
-        
+
         // Output buffer
         let bufferC = try createBuffer(elementCount: Int(M * N))
-        
+
         // Dimensions
         var dims = SIMD3<UInt32>(M, N, K)
         let dimsBuffer = device.makeBuffer(bytes: &dims, length: MemoryLayout<SIMD3<UInt32>>.stride, options: .storageModeShared)!
-        
+
         // Load kernel
         let pipeline = try loadKernel(named: "matmul_int8_dequant")
-        
+
         // Encode
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.invalidKernelConfiguration("Failed to create command buffer")
         }
-        
+
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(bufferA, offset: 0, index: 0)
         encoder.setBuffer(bufferB, offset: 0, index: 1)
         encoder.setBuffer(bufferScales, offset: 0, index: 2)
         encoder.setBuffer(bufferC, offset: 0, index: 3)
         encoder.setBuffer(dimsBuffer, offset: 0, index: 4)
-        
+
         let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
         let threadgroupsPerGrid = MTLSize(
             width: (Int(N) + 15) / 16,
             height: (Int(M) + 15) / 16,
             depth: 1
         )
-        
+
         encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
         encoder.endEncoding()
-        
+
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
-        
+
         // Release input buffer
         if releaseA {
             bufferPool.release(bufferA, elementCount: Int(M * K))
         }
-        
+
         // Return result
         let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
         storage.releaseCallback = { [weak bufferPool] in
             bufferPool?.release(bufferC, elementCount: Int(M * N))
         }
-        
+
+        return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
+    }
+
+    // MARK: - INT4 Quantized MatMul
+
+    /// Fused INT4 dequant + matmul on GPU
+    ///
+    /// Uses the `matmul_int4_dequant` kernel which unpacks two 4-bit values
+    /// per byte and applies per-group scale + zero point during the dot product.
+    ///
+    /// - Parameters:
+    ///   - input: Float32 input [M, K]
+    ///   - quantized: INT4 packed weights with per-group scales
+    /// - Returns: Float32 output [M, N]
+    private func matmulINT4(_ input: Tensor<Float>, _ quantized: QuantizedTensor) throws -> Tensor<Float> {
+        let M = UInt32(input.shape.dimensions[0])
+        let K = UInt32(input.shape.dimensions[1])
+        let N = UInt32(quantized.shape.dimensions[1])
+
+        let inputContiguous = input.isContiguous ? input : input.makeContiguousCopy()
+        let (bufferA, releaseA) = try createBufferWithTracking(from: inputContiguous)
+
+        // Upload INT4 packed data, scales, and zero points
+        let cacheEntry = try cachedINT4Buffers(for: quantized)
+
+        // Output buffer
+        let bufferC = try createBuffer(elementCount: Int(M * N))
+
+        // Dimensions: [M, N, K]
+        var dims = SIMD3<UInt32>(M, N, K)
+        let dimsBuffer = device.makeBuffer(bytes: &dims, length: MemoryLayout<SIMD3<UInt32>>.stride, options: .storageModeShared)!
+
+        // Group size
+        var gs = UInt32(quantized.groupSize > 0 ? quantized.groupSize : Int(K * N))
+        let gsBuffer = device.makeBuffer(bytes: &gs, length: MemoryLayout<UInt32>.stride, options: .storageModeShared)!
+
+        let pipeline = try loadKernel(named: "matmul_int4_dequant")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.invalidKernelConfiguration("Failed to create command buffer")
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(bufferA, offset: 0, index: 0)
+        encoder.setBuffer(cacheEntry.weights, offset: 0, index: 1)
+        encoder.setBuffer(cacheEntry.scales, offset: 0, index: 2)
+        encoder.setBuffer(cacheEntry.zeroPoints, offset: 0, index: 3)
+        encoder.setBuffer(bufferC, offset: 0, index: 4)
+        encoder.setBuffer(dimsBuffer, offset: 0, index: 5)
+        encoder.setBuffer(gsBuffer, offset: 0, index: 6)
+
+        let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadgroupsPerGrid = MTLSize(
+            width: (Int(N) + 15) / 16,
+            height: (Int(M) + 15) / 16,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if releaseA {
+            bufferPool.release(bufferA, elementCount: Int(M * K))
+        }
+
+        let storage = TensorStorage<Float>(gpuBuffer: bufferC, count: Int(M * N))
+        storage.releaseCallback = { [weak bufferPool] in
+            bufferPool?.release(bufferC, elementCount: Int(M * N))
+        }
+
         return Tensor<Float>(shape: TensorShape(Int(M), Int(N)), storage: storage)
     }
     // MARK: - Phase 3 helpers
@@ -1027,6 +1165,57 @@ private extension MetalBackend {
         let entry = QuantizedBufferEntry(weights: weightsBuffer, scales: scalesBuffer)
         quantizedBufferCache[tensor.identifier] = entry
         return entry
+    }
+}
+
+// MARK: - INT4 Quantized Buffer Cache
+
+private extension MetalBackend {
+    /// Cache entry for INT4 quantized tensors (includes zero points buffer)
+    struct INT4BufferEntry {
+        let weights: MTLBuffer     // Packed INT4 bytes
+        let scales: MTLBuffer      // Per-group FP32 scales
+        let zeroPoints: MTLBuffer  // Per-group INT4 zero points (stored as Int8)
+    }
+
+    /// Upload or reuse GPU-resident INT4 buffers
+    func cachedINT4Buffers(for tensor: QuantizedTensor) throws -> INT4BufferEntry {
+        quantizedCacheLock.lock()
+        defer { quantizedCacheLock.unlock() }
+
+        // Check if we already have cached INT4 buffers for this tensor
+        // We reuse the same cache dict but store an INT4BufferEntry wrapper
+        // For simplicity, we create fresh buffers keyed by identifier
+        // (The QuantizedBufferEntry cache is separate for INT8)
+
+        // Upload packed INT4 weights
+        guard let weightsBuffer = device.makeBuffer(length: tensor.data.count, options: .storageModeShared) else {
+            throw MetalError.bufferCreationFailed
+        }
+        tensor.data.withUnsafeBytes { src in
+            memcpy(weightsBuffer.contents(), src.baseAddress!, tensor.data.count)
+        }
+
+        // Upload per-group scales
+        let scalesLength = tensor.scales.count * MemoryLayout<Float>.stride
+        guard let scalesBuffer = device.makeBuffer(length: scalesLength, options: .storageModeShared) else {
+            throw MetalError.bufferCreationFailed
+        }
+        tensor.scales.withUnsafeBytes { src in
+            memcpy(scalesBuffer.contents(), src.baseAddress!, scalesLength)
+        }
+
+        // Upload per-group zero points
+        let zpData = tensor.zeroPoints ?? [Int8](repeating: 0, count: tensor.scales.count)
+        let zpLength = zpData.count * MemoryLayout<Int8>.stride
+        guard let zpBuffer = device.makeBuffer(length: max(zpLength, 1), options: .storageModeShared) else {
+            throw MetalError.bufferCreationFailed
+        }
+        zpData.withUnsafeBytes { src in
+            memcpy(zpBuffer.contents(), src.baseAddress!, zpLength)
+        }
+
+        return INT4BufferEntry(weights: weightsBuffer, scales: scalesBuffer, zeroPoints: zpBuffer)
     }
 }
 
