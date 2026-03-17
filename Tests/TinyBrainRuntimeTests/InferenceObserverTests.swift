@@ -49,13 +49,13 @@ final class InferenceObserverTests: XCTestCase {
         XCTAssertEqual(observer.attentionCalls[0].layerIndex, 0)
         XCTAssertEqual(observer.attentionCalls[1].layerIndex, 1)
 
-        // Verify attention weights shape: should be [sequenceLength] = [1] for first token
-        XCTAssertEqual(observer.attentionCalls[0].weights.count, 1,
-                       "First token should have attention over 1 position")
+        // Verify attention weights shape: numHeads * sequenceLength = 2 * 1 = 2 for first token
+        XCTAssertEqual(observer.attentionCalls[0].weights.count, 2,
+                       "First token: numHeads(2) * seqLen(1) attention weights")
 
-        // Verify attention weights sum to ~1.0 (softmax output)
+        // Verify attention weights sum to ~numHeads (each head's softmax sums to 1.0)
         let weightSum = observer.attentionCalls[0].weights.reduce(0, +)
-        XCTAssertEqual(weightSum, 1.0, accuracy: 1e-5, "Attention weights should sum to 1.0")
+        XCTAssertEqual(weightSum, 2.0, accuracy: 1e-5, "Attention weights should sum to numHeads")
 
         // Verify logits shape matches vocab size
         XCTAssertEqual(observer.logitsCalls[0].logits.count, 50,

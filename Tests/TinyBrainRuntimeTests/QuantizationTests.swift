@@ -88,12 +88,12 @@ final class QuantizationTests: XCTestCase {
         
         let quantized = weights.quantize(mode: .perChannel)
         
-        // Should have one scale per row (3 scales)
-        XCTAssertEqual(quantized.scales.count, 3, "One scale per output channel")
-        
-        // Scales should be different for different magnitude rows
+        // Should have one scale per output channel (dim 1 = 4 columns)
+        XCTAssertEqual(quantized.scales.count, 4, "One scale per output channel")
+
+        // Scales should be different for different magnitude columns
         XCTAssertNotEqual(quantized.scales[0], quantized.scales[1], "Different magnitudes → different scales")
-        XCTAssertNotEqual(quantized.scales[1], quantized.scales[2], "Different magnitudes → different scales")
+        XCTAssertNotEqual(quantized.scales[2], quantized.scales[3], "Different magnitudes → different scales")
     }
     
     func testPerChannelAccuracy() {
@@ -194,19 +194,24 @@ final class QuantizationTests: XCTestCase {
     }
     
     func testQuantizeOutliers() {
-        // Edge: One extreme outlier
-        // WHY: Outliers can mess up quantization range
-        
-        let data: [Float] = Array(repeating: 1.0, count: 99) + [1000.0]  // One outlier!
-        let tensor = Tensor<Float>(shape: TensorShape(100, 1), data: data)
-        
+        // Edge: One column has an extreme outlier, another column has normal values
+        // WHY: Per-channel (per-column) quantization isolates outlier impact
+
+        // Column 0: all 1.0 (normal), Column 1: one outlier at 1000.0
+        var data = [Float](repeating: 0, count: 100 * 2)
+        for row in 0..<100 {
+            data[row * 2 + 0] = 1.0       // col 0: normal
+            data[row * 2 + 1] = 1.0       // col 1: normal
+        }
+        data[99 * 2 + 1] = 1000.0         // outlier only in col 1
+        let tensor = Tensor<Float>(shape: TensorShape(100, 2), data: data)
+
         let quantized = tensor.quantize(mode: .perChannel)
         let dequantized = quantized.dequantize()
-        
-        // Per-channel should handle this better than per-tensor
-        // Most values (1.0) should be preserved reasonably well
+
+        // Per-channel: column 0 has its own scale, unaffected by column 1's outlier
         let regularValue = dequantized[0, 0]
-        XCTAssertEqual(regularValue, 1.0, accuracy: 0.2, "Regular values preserved despite outlier")
+        XCTAssertEqual(regularValue, 1.0, accuracy: 0.2, "Regular column preserved despite outlier in other column")
     }
     
     // MARK: - Memory Savings Tests

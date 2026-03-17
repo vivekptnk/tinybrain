@@ -131,8 +131,12 @@ public struct QuantizedTensor {
 
         switch mode {
         case .perChannel, .int4PerChannel:
-            precondition(scales.count == shape.dimensions[0],
-                        "Per-channel: need one scale per channel (rows)")
+            // Scales are per output channel. For 2D weights stored as [in, out],
+            // output channels are dim 1. For 1D tensors, they're dim 0.
+            let expectedChannels = shape.dimensions.count >= 2
+                ? shape.dimensions[1] : shape.dimensions[0]
+            precondition(scales.count == expectedChannels,
+                        "Per-channel: need one scale per output channel (\(expectedChannels)), got \(scales.count)")
         case .symmetric, .asymmetric:
             precondition(scales.count == 1, "Per-tensor: need single scale")
         case .int4:
@@ -208,7 +212,7 @@ public struct QuantizedTensor {
                     int4Val = raw > 7 ? raw - 16 : raw
                 }
 
-                floatData[i] = Float(int4Val - zeroPoint) * scale
+                floatData[i] = (Float(int4Val) - Float(zeroPoint)) * scale
             }
 
         case .int4PerChannel:
@@ -230,24 +234,39 @@ public struct QuantizedTensor {
                         let raw = packed & 0x0F
                         int4Val = raw > 7 ? raw - 16 : raw
                     }
-                    floatData[i] = Float(int4Val - zeroPoint) * scale
+                    floatData[i] = (Float(int4Val) - Float(zeroPoint)) * scale
                 }
             }
 
         case .perChannel:
-            // Each channel (row) has its own scale
-            let numChannels = shape.dimensions[0]
-            let channelSize = data.count / numChannels
-            
-            for ch in 0..<numChannels {
-                let scale = scales[ch]
-                let zeroPoint = zeroPoints?[ch] ?? 0
-                let start = ch * channelSize
-                let end = start + channelSize
-                
-                for i in start..<end {
-                    let quantizedVal = data[i]
-                    floatData[i] = Float(quantizedVal - zeroPoint) * scale
+            // Weights stored as [in, out] with scales per output channel (dim 1)
+            // scales[c] was computed for output channel c during quantization
+            if shape.dimensions.count == 2 {
+                let rows = shape.dimensions[0]    // in_features
+                let cols = shape.dimensions[1]    // out_features (= num scales)
+
+                for row in 0..<rows {
+                    for col in 0..<cols {
+                        let i = row * cols + col
+                        let scale = scales[col]
+                        let zeroPoint = zeroPoints?[col] ?? 0
+                        floatData[i] = (Float(data[i]) - Float(zeroPoint)) * scale
+                    }
+                }
+            } else {
+                // 1D tensors: single scale per element group
+                let numChannels = shape.dimensions[0]
+                let channelSize = data.count / numChannels
+
+                for ch in 0..<numChannels {
+                    let scale = scales[ch]
+                    let zeroPoint = zeroPoints?[ch] ?? 0
+                    let start = ch * channelSize
+                    let end = start + channelSize
+
+                    for i in start..<end {
+                        floatData[i] = (Float(data[i]) - Float(zeroPoint)) * scale
+                    }
                 }
             }
             
@@ -258,7 +277,7 @@ public struct QuantizedTensor {
             
             for i in 0..<data.count {
                 let quantizedVal = data[i]
-                floatData[i] = Float(quantizedVal - zeroPoint) * scale
+                floatData[i] = (Float(quantizedVal) - Float(zeroPoint)) * scale
             }
         }
         
@@ -351,48 +370,48 @@ extension Tensor where Element == Float {
     }
     
     /// Per-channel symmetric quantization (recommended for model weights)
+    ///
+    /// Computes one scale per **output channel** (dim 1 for 2D tensors stored
+    /// as `[in_features, out_features]`). This matches the Python converter
+    /// and the dequantize/init conventions.
     private func quantizePerChannel() -> QuantizedTensor {
         precondition(shape.dimensions.count == 2, "Per-channel quantization requires 2D tensor")
-        
-        let numChannels = shape.dimensions[0]
-        let channelSize = shape.count / numChannels
-        
+
+        let rows = shape.dimensions[0]  // in_features
+        let cols = shape.dimensions[1]  // out_features (= num scales)
+
         var quantizedData = [Int8](repeating: 0, count: shape.count)
-        var scales = [Float](repeating: 0.0, count: numChannels)
-        
-        for ch in 0..<numChannels {
-            let start = ch * channelSize
-            let end = start + channelSize
-            let channelData = Array(rawData[start..<end])
-            
-            // Find min/max for this channel
-            let minVal = channelData.min() ?? 0.0
-            let maxVal = channelData.max() ?? 0.0
-            
-            // Compute scale for symmetric quantization
-            let absMax = max(abs(minVal), abs(maxVal))
+        var scales = [Float](repeating: 0.0, count: cols)
+
+        // Compute scale per output channel (column)
+        for col in 0..<cols {
+            // Find abs-max across all rows for this column
+            var absMax: Float = 0.0
+            for row in 0..<rows {
+                let val = abs(rawData[row * cols + col])
+                if val > absMax { absMax = val }
+            }
+
             let scale: Float
-            
             if absMax < Float.leastNonzeroMagnitude {
-                // All zeros in this channel
-                scale = 1.0  // Arbitrary, won't matter
+                scale = 1.0  // All zeros in this channel
             } else {
-                // Map absMax to 127 (max positive Int8 in symmetric range)
                 scale = absMax / 127.0
             }
-            
-            scales[ch] = scale
-            
-            // Quantize this channel
-            for i in start..<end {
-                let floatVal = rawData[i]
-                let quantVal = round(floatVal / scale)
-                // Clamp to [-127, 127] for symmetric
+            scales[col] = scale
+        }
+
+        // Quantize using per-column scales
+        for row in 0..<rows {
+            for col in 0..<cols {
+                let i = row * cols + col
+                let scale = scales[col]
+                let quantVal = round(rawData[i] / scale)
                 let clamped = max(-127, min(127, quantVal))
                 quantizedData[i] = Int8(clamped)
             }
         }
-        
+
         return QuantizedTensor(
             shape: shape,
             data: quantizedData,
@@ -542,22 +561,27 @@ extension Tensor where Element == Float {
     private func quantizeINT4PerChannel() -> QuantizedTensor {
         precondition(shape.dimensions.count == 2, "Per-channel quantization requires 2D tensor")
 
-        let numChannels = shape.dimensions[0]
-        let channelSize = shape.count / numChannels
+        let rows = shape.dimensions[0]  // in_features
+        let cols = shape.dimensions[1]  // out_features (= num scales)
         let packedCount = (shape.count + 1) / 2
         var packedData = [Int8](repeating: 0, count: packedCount)
-        var scales = [Float](repeating: 0.0, count: numChannels)
+        var scales = [Float](repeating: 0.0, count: cols)
 
-        for ch in 0..<numChannels {
-            let start = ch * channelSize
-            let end = start + channelSize
-            let channelData = Array(rawData[start..<end])
+        // Compute scale per output channel (column)
+        for col in 0..<cols {
+            var absMax: Float = 0.0
+            for row in 0..<rows {
+                let val = abs(rawData[row * cols + col])
+                if val > absMax { absMax = val }
+            }
+            scales[col] = absMax < Float.leastNonzeroMagnitude ? 1.0 : absMax / 7.0
+        }
 
-            let absMax = max(abs(channelData.min() ?? 0.0), abs(channelData.max() ?? 0.0))
-            let scale: Float = absMax < Float.leastNonzeroMagnitude ? 1.0 : absMax / 7.0
-            scales[ch] = scale
-
-            for i in start..<end {
+        // Quantize using per-column scales and pack into nibbles
+        for row in 0..<rows {
+            for col in 0..<cols {
+                let i = row * cols + col
+                let scale = scales[col]
                 let quantVal = round(rawData[i] / scale)
                 let clamped = Int8(max(-7, min(7, quantVal)))
                 let byteIdx = i / 2
@@ -581,7 +605,13 @@ extension Tensor where Element == Float {
 }
 
 /// Extension for matmul with quantized tensors
+private var _quantizedDiagnosticChecked = false
+
 extension Tensor where Element == Float {
+    fileprivate static var diagnosticChecked: Bool {
+        get { _quantizedDiagnosticChecked }
+        set { _quantizedDiagnosticChecked = newValue }
+    }
     /// Matrix multiplication with quantized weights
     ///
     /// **REVIEW HITLER FIX:** Now uses INT8 Metal kernel (no Float32 materialization!)
@@ -593,23 +623,19 @@ extension Tensor where Element == Float {
     /// let output = input.matmul(weights)  // Computes directly from INT8!
     /// ```
     public func matmul(_ quantized: QuantizedTensor) -> Tensor<Float> {
+        // Diagnostic removed
+
         // Try Metal kernel first (supports both INT8 and INT4)
         if let metalBackend = TinyBrainBackend.metalBackend as? QuantizedMatMulBackend {
             do {
-                let label = quantized.precision == .int4 ? "INT4" : "INT8"
-                TinyBrainBackend.log("Using \(label) Metal kernel (no Float32 materialization!)")
                 return try metalBackend.matmulQuantized(self, quantized)
             } catch {
                 let label = quantized.precision == .int4 ? "INT4" : "INT8"
                 print("\(label) kernel failed: \(error), falling back to dequant+CPU")
-                TinyBrainBackend.log("\(label) kernel failed: \(error), falling back to dequant+CPU")
             }
-        } else {
-            TinyBrainBackend.log("No QuantizedMatMulBackend available, falling back to CPU")
         }
 
         // Fallback: Dequantize then CPU matmul
-        TinyBrainBackend.log("Falling back to dequant+CPU matmul")
         let weights = quantized.dequantize()
         return self.matmulCPU(weights)
     }

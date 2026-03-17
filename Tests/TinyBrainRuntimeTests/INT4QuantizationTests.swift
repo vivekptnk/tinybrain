@@ -127,11 +127,11 @@ final class INT4QuantizationTests: XCTestCase {
         let quantized = original.quantize(mode: .int4PerChannel)
 
         XCTAssertEqual(quantized.precision, .int4, "Precision should be INT4")
-        XCTAssertEqual(quantized.scales.count, 3, "One scale per channel (row)")
+        XCTAssertEqual(quantized.scales.count, 4, "One scale per output channel (column)")
 
-        // Scales should differ for different magnitude rows
+        // Scales should differ for different magnitude columns
         XCTAssertNotEqual(quantized.scales[0], quantized.scales[1])
-        XCTAssertNotEqual(quantized.scales[1], quantized.scales[2])
+        XCTAssertNotEqual(quantized.scales[2], quantized.scales[3])
 
         // Round-trip check
         let dequantized = quantized.dequantize()

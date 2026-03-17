@@ -263,165 +263,172 @@ public struct ModelWeights {
         let paddedHeaderSize = ((headerSize + 4095) / 4096) * 4096
         data.append(Data(count: paddedHeaderSize - headerSize))
 
-        // 2. Write Quantization Metadata
+        // ── Collect all tensors in write order ─────────────────────────
+        // Each entry: (name, isQuantized, quantizedTensor?, floatData?, shape, dataSize)
+        struct TensorEntry {
+            let name: String
+            let quantized: QuantizedTensor?   // non-nil for quantized weights
+            let floatData: [Float]?           // non-nil for Float32 tensors
+            let shape: TensorShape
+            var dataSize: Int {
+                if let q = quantized { return q.data.count }
+                return (floatData?.count ?? 0) * 4
+            }
+        }
+
+        var allTensors: [TensorEntry] = []
+        var quantTensors: [TensorEntry] = []
+
+        // Embeddings (Float32)
+        allTensors.append(TensorEntry(name: "embeddings", quantized: nil,
+                                       floatData: tokenEmbeddings.data, shape: tokenEmbeddings.shape))
+
+        // Layer weights
+        for (layerIdx, layer) in layers.enumerated() {
+            let layerQuantized: [(String, QuantizedTensor)] = {
+                var entries: [(String, QuantizedTensor)] = [
+                    ("layer_\(layerIdx)_attn_q", layer.attention.query.weights),
+                    ("layer_\(layerIdx)_attn_k", layer.attention.key.weights),
+                    ("layer_\(layerIdx)_attn_v", layer.attention.value.weights),
+                    ("layer_\(layerIdx)_attn_o", layer.attention.output.weights),
+                ]
+                if let gate = layer.feedForward.gate {
+                    entries.append(("layer_\(layerIdx)_ffn_gate", gate.weights))
+                }
+                entries.append(("layer_\(layerIdx)_ffn_up", layer.feedForward.up.weights))
+                entries.append(("layer_\(layerIdx)_ffn_down", layer.feedForward.down.weights))
+                return entries
+            }()
+
+            for (name, qt) in layerQuantized {
+                let entry = TensorEntry(name: name, quantized: qt, floatData: nil, shape: qt.shape)
+                allTensors.append(entry)
+                quantTensors.append(entry)
+            }
+
+            // Norm weights (Float32)
+            if let inNorm = layer.inputNormWeights {
+                allTensors.append(TensorEntry(name: "layer_\(layerIdx)_ln_input", quantized: nil,
+                                               floatData: inNorm.data, shape: inNorm.shape))
+            }
+            if let postNorm = layer.postAttentionNormWeights {
+                allTensors.append(TensorEntry(name: "layer_\(layerIdx)_ln_post", quantized: nil,
+                                               floatData: postNorm.data, shape: postNorm.shape))
+            }
+        }
+
+        // Final norm (Float32)
+        if let finalNorm = finalNormWeights {
+            allTensors.append(TensorEntry(name: "final_norm", quantized: nil,
+                                           floatData: finalNorm.data, shape: finalNorm.shape))
+        }
+
+        // Output projection (quantized)
+        let outEntry = TensorEntry(name: "output", quantized: output.weights, floatData: nil,
+                                    shape: output.weights.shape)
+        allTensors.append(outEntry)
+        quantTensors.append(outEntry)
+
+        // ── 2. Write Quantization Metadata ──────────────────────────────
         let metadataOffset = data.count
 
-        // Count all tensors (embeddings + all layer weights)
-        var tensorCount: UInt32 = 1  // embeddings
-        tensorCount += UInt32(layers.count * 8)  // 8 tensors per layer (Q/K/V/O + biases, FFN up/down + biases)
-        tensorCount += 2  // output weights + bias
+        var quantCount = UInt32(quantTensors.count)
+        data.append(Data(bytes: &quantCount, count: 4))
 
-        data.append(Data(bytes: &tensorCount, count: 4))
-
-        // Write metadata for each quantized tensor
-        func writeQuantMetadata(name: String, tensor: QuantizedTensor) {
-            // Tensor ID (name)
-            let nameData = name.utf8
+        for entry in quantTensors {
+            let qt = entry.quantized!
+            let nameData = entry.name.utf8
             var nameLength = UInt32(nameData.count)
             data.append(Data(bytes: &nameLength, count: 4))
             data.append(contentsOf: nameData)
 
-            // Precision
-            var precision: UInt8 = 1  // INT8
+            var precision: UInt8 = qt.precision == .int4 ? 2 : 1
             data.append(Data(bytes: &precision, count: 1))
-
-            // Mode
             var mode: UInt8 = 2  // perChannel
             data.append(Data(bytes: &mode, count: 1))
+            var groupSize = UInt32(qt.groupSize)
+            data.append(Data(bytes: &groupSize, count: 4))
 
-            // Scales
-            var scalesCount = UInt32(tensor.scales.count)
+            var scalesCount = UInt32(qt.scales.count)
             data.append(Data(bytes: &scalesCount, count: 4))
-            for var scale in tensor.scales {
+            for var scale in qt.scales {
                 data.append(Data(bytes: &scale, count: 4))
             }
 
-            // Zero points (may be nil for symmetric)
-            let zpCount = UInt32(tensor.zeroPoints?.count ?? 0)
+            let zpCount = UInt32(qt.zeroPoints?.count ?? 0)
             var zpCountVar = zpCount
             data.append(Data(bytes: &zpCountVar, count: 4))
-            if let zps = tensor.zeroPoints {
-                for var zp in zps {
-                    data.append(Data(bytes: &zp, count: 1))
-                }
+            if let zps = qt.zeroPoints {
+                for var zp in zps { data.append(Data(bytes: &zp, count: 1)) }
             }
         }
-
-        // Write metadata for all quantized layers
-        for (layerIdx, layer) in layers.enumerated() {
-            writeQuantMetadata(name: "layer_\(layerIdx)_attn_q", tensor: layer.attention.query.weights)
-            writeQuantMetadata(name: "layer_\(layerIdx)_attn_k", tensor: layer.attention.key.weights)
-            writeQuantMetadata(name: "layer_\(layerIdx)_attn_v", tensor: layer.attention.value.weights)
-            writeQuantMetadata(name: "layer_\(layerIdx)_attn_o", tensor: layer.attention.output.weights)
-            writeQuantMetadata(name: "layer_\(layerIdx)_ffn_up", tensor: layer.feedForward.up.weights)
-            writeQuantMetadata(name: "layer_\(layerIdx)_ffn_down", tensor: layer.feedForward.down.weights)
-        }
-        writeQuantMetadata(name: "output", tensor: output.weights)
 
         // Pad metadata to 4KB
         let metadataSize = data.count - metadataOffset
         let paddedMetadataSize = ((metadataSize + 4095) / 4096) * 4096
         data.append(Data(count: paddedMetadataSize - metadataSize))
 
-        // 3. Write Tensor Index
+        // ── 3. Write Tensor Index (two-pass with placeholder offsets) ───
         let indexOffset = data.count
-        data.append(Data(bytes: &tensorCount, count: 4))
+        var totalTensorCount = UInt32(allTensors.count)
+        data.append(Data(bytes: &totalTensorCount, count: 4))
 
-        // Helper to write tensor index entry
-        func writeTensorIndex(name: String, shape: TensorShape, dataSize: Int, dataOffset: Int) {
-            let nameData = name.utf8
+        // Pass 1: write index entries with placeholder offsets; record patch positions
+        var offsetPatchPositions: [(dataPosition: Int, dataSize: Int)] = []
+        for entry in allTensors {
+            let nameData = entry.name.utf8
             var nameLength = UInt32(nameData.count)
             data.append(Data(bytes: &nameLength, count: 4))
             data.append(contentsOf: nameData)
 
-            var dimCount = UInt32(shape.dimensions.count)
+            var dimCount = UInt32(entry.shape.dimensions.count)
             data.append(Data(bytes: &dimCount, count: 4))
-            for dim in shape.dimensions {
+            for dim in entry.shape.dimensions {
                 var dim32 = Int32(dim)
                 data.append(Data(bytes: &dim32, count: 4))
             }
 
-            var offset64 = UInt64(dataOffset)
-            var size64 = UInt64(dataSize)
-            data.append(Data(bytes: &offset64, count: 8))
+            offsetPatchPositions.append((data.count, entry.dataSize))
+            var placeholder: UInt64 = 0
+            data.append(Data(bytes: &placeholder, count: 8))  // offset placeholder
+            var size64 = UInt64(entry.dataSize)
             data.append(Data(bytes: &size64, count: 8))
         }
-
-        // Calculate offsets (will fill in later)
-        // For now, write placeholder index
-        _ = data.count  // Index start position (for future random-access support)
-
-        // Embeddings
-        writeTensorIndex(
-            name: "embeddings",
-            shape: tokenEmbeddings.shape,
-            dataSize: tokenEmbeddings.data.count * 4,  // Float32
-            dataOffset: 0  // Placeholder
-        )
-
-        // Layer weights
-        for (layerIdx, layer) in layers.enumerated() {
-            writeTensorIndex(name: "layer_\(layerIdx)_attn_q", shape: layer.attention.query.weights.shape,
-                           dataSize: layer.attention.query.weights.data.count, dataOffset: 0)
-            writeTensorIndex(name: "layer_\(layerIdx)_attn_k", shape: layer.attention.key.weights.shape,
-                           dataSize: layer.attention.key.weights.data.count, dataOffset: 0)
-            writeTensorIndex(name: "layer_\(layerIdx)_attn_v", shape: layer.attention.value.weights.shape,
-                           dataSize: layer.attention.value.weights.data.count, dataOffset: 0)
-            writeTensorIndex(name: "layer_\(layerIdx)_attn_o", shape: layer.attention.output.weights.shape,
-                           dataSize: layer.attention.output.weights.data.count, dataOffset: 0)
-            writeTensorIndex(name: "layer_\(layerIdx)_ffn_up", shape: layer.feedForward.up.weights.shape,
-                           dataSize: layer.feedForward.up.weights.data.count, dataOffset: 0)
-            writeTensorIndex(name: "layer_\(layerIdx)_ffn_down", shape: layer.feedForward.down.weights.shape,
-                           dataSize: layer.feedForward.down.weights.data.count, dataOffset: 0)
-        }
-        writeTensorIndex(name: "output", shape: output.weights.shape,
-                       dataSize: output.weights.data.count, dataOffset: 0)
 
         // Pad index to 4KB
         let indexSize = data.count - indexOffset
         let paddedIndexSize = ((indexSize + 4095) / 4096) * 4096
         data.append(Data(count: paddedIndexSize - indexSize))
 
-        // 4. Write Weight Data Blobs (4KB aligned)
-        // Embeddings
-        let dataOffset = data.count
-        for var value in tokenEmbeddings.data {
-            data.append(Data(bytes: &value, count: 4))
-        }
-        let embeddingSize = data.count - dataOffset
-        let paddedEmbeddingSize = ((embeddingSize + 4095) / 4096) * 4096
-        data.append(Data(count: paddedEmbeddingSize - embeddingSize))
+        let dataStart = data.count
 
-        // Layer weights (quantized INT8)
-        for layer in layers {
-            let tensors = [
-                layer.attention.query.weights,
-                layer.attention.key.weights,
-                layer.attention.value.weights,
-                layer.attention.output.weights,
-                layer.feedForward.up.weights,
-                layer.feedForward.down.weights
-            ]
-
-            for tensor in tensors {
-                let start = data.count
-                for var value in tensor.data {
+        // ── 4. Write Weight Data Blobs (4KB aligned) ────────────────────
+        var currentDataOffset = 0
+        for entry in allTensors {
+            if let floatData = entry.floatData {
+                for var value in floatData {
+                    data.append(Data(bytes: &value, count: 4))
+                }
+            } else if let qt = entry.quantized {
+                for var value in qt.data {
                     data.append(Data(bytes: &value, count: 1))
                 }
-                let size = data.count - start
-                let paddedSize = ((size + 4095) / 4096) * 4096
-                data.append(Data(count: paddedSize - size))
             }
+            let blobSize = data.count - (dataStart + currentDataOffset)
+            let paddedBlobSize = ((blobSize + 4095) / 4096) * 4096
+            data.append(Data(count: paddedBlobSize - blobSize))
+            currentDataOffset += paddedBlobSize
         }
 
-        // Output weights
-        let outStart = data.count
-        for var value in output.weights.data {
-            data.append(Data(bytes: &value, count: 1))
+        // Pass 2: patch placeholder offsets with absolute positions
+        currentDataOffset = 0
+        for (patchPos, blobDataSize) in offsetPatchPositions {
+            var absoluteOffset = UInt64(dataStart + currentDataOffset)
+            data.replaceSubrange(patchPos..<(patchPos + 8),
+                                 with: Data(bytes: &absoluteOffset, count: 8))
+            let paddedBlobSize = ((blobDataSize + 4095) / 4096) * 4096
+            currentDataOffset += paddedBlobSize
         }
-        let outSize = data.count - outStart
-        let paddedOutSize = ((outSize + 4095) / 4096) * 4096
-        data.append(Data(count: paddedOutSize - outSize))
 
         // Write to file
         try data.write(to: fileURL)
@@ -521,6 +528,9 @@ public struct ModelWeights {
             let precision = readUInt8()
             let mode = readUInt8()
 
+            // Group size (UInt32): used by INT4 quantization, 0 for INT8
+            let _ = readUInt32()
+
             let scalesCount = readUInt32()
 
             var scales: [Float] = []
@@ -587,11 +597,11 @@ public struct ModelWeights {
             tensorIndex[name] = (shape, Int(dataOffset), Int(dataSize))
         }
 
-        // Skip to weight data section (4KB aligned)
-        var dataOffset = ((offset + 4095) / 4096) * 4096
-
         // 4. Load Weight Data
-        // Helper to load quantized tensor
+        // Use absolute offsets from tensor index (written by the converter)
+        // Bulk copy via withUnsafeBytes to avoid per-element overhead on large models
+
+        // Helper to load quantized tensor using stored absolute offset
         func loadQuantizedTensor(name: String) -> QuantizedTensor {
             guard let index = tensorIndex[name] else {
                 fatalError("Missing tensor: \(name)")
@@ -601,16 +611,14 @@ public struct ModelWeights {
             }
 
             let shape = TensorShape(index.shape)
-            var quantData: [Int8] = []
+            let tensorOffset = index.dataOffset
 
-            // Read INT8 data from current dataOffset
-            for i in 0..<index.dataSize {
-                let value = Int8(bitPattern: data[dataOffset + i])
-                quantData.append(value)
+            // Bulk copy INT8 data from absolute offset
+            let quantData: [Int8] = data.withUnsafeBytes { rawPtr in
+                let base = rawPtr.baseAddress!.advanced(by: tensorOffset)
+                    .assumingMemoryBound(to: Int8.self)
+                return Array(UnsafeBufferPointer(start: base, count: index.dataSize))
             }
-
-            // Move to next tensor (4KB aligned)
-            dataOffset = ((dataOffset + index.dataSize + 4095) / 4096) * 4096
 
             let mode: QuantizationMode = metadata.mode == 2 ? .perChannel : .symmetric
             return QuantizedTensor(
@@ -623,33 +631,27 @@ public struct ModelWeights {
             )
         }
 
-        // Load embeddings (Float32)
-        let embIndex = tensorIndex["embeddings"]!
-        var embeddingData: [Float] = []
-        for i in 0..<(embIndex.dataSize / 4) {
-            let floatOffset = dataOffset + i * 4
-            let bytes = data[floatOffset..<(floatOffset + 4)]
-            let value = bytes.withUnsafeBytes { ptr in
-                ptr.loadUnaligned(as: Float.self)
-            }
-            embeddingData.append(value)
+        // Load embeddings (Float32) using absolute offset from tensor index
+        guard let embIndex = tensorIndex["embeddings"] else {
+            fatalError("Missing tensor: embeddings")
+        }
+        let floatCount = embIndex.dataSize / 4
+        let embeddingData: [Float] = data.withUnsafeBytes { rawPtr in
+            let base = rawPtr.baseAddress!.advanced(by: embIndex.dataOffset)
+                .assumingMemoryBound(to: Float.self)
+            return Array(UnsafeBufferPointer(start: base, count: floatCount))
         }
         let embeddings = Tensor<Float>(shape: TensorShape(embIndex.shape), data: embeddingData)
-        dataOffset = ((dataOffset + embIndex.dataSize + 4095) / 4096) * 4096
 
-        // Helper to load Float32 tensor from data section
+        // Helper to load Float32 tensor using absolute offset from tensor index
         func loadFloat32Tensor(name: String) -> Tensor<Float>? {
             guard let index = tensorIndex[name] else { return nil }
-            var floatData: [Float] = []
-            for i in 0..<(index.dataSize / 4) {
-                let floatOff = dataOffset + i * 4
-                let bytes = data[floatOff..<(floatOff + 4)]
-                let value = bytes.withUnsafeBytes { ptr in
-                    ptr.loadUnaligned(as: Float.self)
-                }
-                floatData.append(value)
+            let count = index.dataSize / 4
+            let floatData: [Float] = data.withUnsafeBytes { rawPtr in
+                let base = rawPtr.baseAddress!.advanced(by: index.dataOffset)
+                    .assumingMemoryBound(to: Float.self)
+                return Array(UnsafeBufferPointer(start: base, count: count))
             }
-            dataOffset = ((dataOffset + index.dataSize + 4095) / 4096) * 4096
             return Tensor<Float>(shape: TensorShape(index.shape), data: floatData)
         }
 
