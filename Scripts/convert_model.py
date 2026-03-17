@@ -182,6 +182,9 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
         # NOTE: PyTorch stores weights as [out_features, in_features]
         # but TinyBrain expects [in_features, out_features] for matmul
         # So we need to TRANSPOSE!
+        head_dim = config.hidden_dim // config.num_heads
+        kv_dim = config.num_kv_heads * head_dim
+
         for proj in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
             key = find_key([
                 f'layers.{layer_idx}.self_attn.{proj}.weight',
@@ -190,7 +193,21 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
             ])
             if key:
                 # Keep as [out, in] — quantize per output channel, then transpose
-                layer_weights[proj] = to_numpy(state_dict[key])
+                w = to_numpy(state_dict[key])
+
+                # Validate GQA shapes: K/V should be [kv_dim, hidden_dim]
+                if proj in ('k_proj', 'v_proj') and w.ndim == 2:
+                    expected_out = kv_dim
+                    if w.shape[0] != expected_out:
+                        print(f"  WARNING: Layer {layer_idx} {proj} has shape {w.shape}, "
+                              f"expected ({expected_out}, {config.hidden_dim}) for GQA "
+                              f"({config.num_kv_heads} KV heads, head_dim={head_dim})")
+                elif proj == 'q_proj' and w.ndim == 2:
+                    if w.shape[0] != config.hidden_dim:
+                        print(f"  WARNING: Layer {layer_idx} {proj} has shape {w.shape}, "
+                              f"expected ({config.hidden_dim}, {config.hidden_dim})")
+
+                layer_weights[proj] = w
 
         # MLP projections
         for proj in ['gate_proj', 'up_proj', 'down_proj']:
@@ -720,6 +737,7 @@ Examples:
     parser.add_argument('--num-layers', type=int, help='Number of transformer layers')
     parser.add_argument('--hidden-dim', type=int, help='Hidden dimension size')
     parser.add_argument('--num-heads', type=int, help='Number of attention heads')
+    parser.add_argument('--num-kv-heads', type=int, help='Number of KV heads for GQA (defaults to num-heads)')
     parser.add_argument('--vocab-size', type=int, help='Vocabulary size')
 
     args = parser.parse_args()
@@ -735,6 +753,7 @@ Examples:
             num_layers=args.num_layers,
             hidden_dim=args.hidden_dim,
             num_heads=args.num_heads,
+            num_kv_heads=getattr(args, 'num_kv_heads', None),
             vocab_size=args.vocab_size,
         )
 

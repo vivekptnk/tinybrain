@@ -181,8 +181,8 @@ public struct ModelWeights {
         for _ in 0..<config.numLayers {
             let attention = AttentionProjectionWeights(
                 query: makeProjection(outputDim: config.hiddenDim),
-                key: makeProjection(outputDim: config.hiddenDim),
-                value: makeProjection(outputDim: config.hiddenDim),
+                key: makeProjection(outputDim: config.kvDim),
+                value: makeProjection(outputDim: config.kvDim),
                 output: makeProjection(outputDim: config.hiddenDim)
             )
 

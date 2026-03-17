@@ -49,7 +49,7 @@ kernel void dequantize_int8(
 kernel void matmul_int8_dequant(
     device const float* A [[buffer(0)]],              // Float32 input [M, K]
     device const char* B_quantized [[buffer(1)]],     // INT8 weights [K, N]
-    device const float* B_scales [[buffer(2)]],       // Per-channel scales [K]
+    device const float* B_scales [[buffer(2)]],       // Per-channel scales [N] (one per output channel)
     device float* C [[buffer(3)]],                    // Float32 output [M, N]
     constant uint3& dims [[buffer(4)]],               // [M, N, K]
     uint2 gid [[thread_position_in_grid]]
@@ -68,7 +68,7 @@ kernel void matmul_int8_dequant(
         
         // B value (INT8, need to dequantize on-the-fly)
         char b_quantized = B_quantized[k * N + col];
-        float b_scale = B_scales[k];  // Per-channel scale
+        float b_scale = B_scales[col];  // Per output-channel scale
         float b_val = float(b_quantized) * b_scale;
         
         // Accumulate
@@ -113,7 +113,7 @@ kernel void matmul_int8_dequant_tiled(
         if ((t + tid.y) < K && col < N) {
             uint k_idx = t + tid.y;
             char b_quant = B_quantized[k_idx * N + col];
-            float b_scale = B_scales[k_idx];
+            float b_scale = B_scales[col];  // Per output-channel scale
             tileB[tid.y * TILE_SIZE + tid.x] = float(b_quant) * b_scale;
         } else {
             tileB[tid.y * TILE_SIZE + tid.x] = 0.0;
