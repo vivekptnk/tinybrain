@@ -221,21 +221,32 @@ public struct BPETokenizer: Tokenizer {
     /// - Returns: Array of token IDs
     public func encode(_ text: String) -> [Int] {
         // Step 1: Unicode normalization (NFC - canonical composition)
-        // This ensures "café" (composed) and "cafe\u{0301}" (decomposed) are identical
         let normalized = text.precomposedStringWithCanonicalMapping
-        
+
         // Step 2: Handle empty string
         if normalized.isEmpty {
             return []
         }
-        
-        // Step 3: Split into characters (initial tokens)
-        var tokens = normalized.map { String($0) }
-        
-        // Step 4: Apply BPE merges until no more merges possible
+
+        // Step 3: SentencePiece-style preprocessing
+        // Replace spaces with ▁ (U+2581) and prepend ▁ at the start
+        // This is the standard convention for LLaMA/SentencePiece tokenizers
+        let spaceMarker = "\u{2581}"  // ▁
+        let processed: String
+        if tokenToId[spaceMarker] != nil || tokenToId[spaceMarker + "a"] != nil {
+            // SentencePiece vocab detected: use ▁ as space marker
+            processed = spaceMarker + normalized.replacingOccurrences(of: " ", with: spaceMarker)
+        } else {
+            processed = normalized
+        }
+
+        // Step 4: Split into characters (initial tokens)
+        var tokens = processed.map { String($0) }
+
+        // Step 5: Apply BPE merges until no more merges possible
         tokens = applyBPEMerges(tokens)
-        
-        // Step 5: Convert tokens to IDs
+
+        // Step 6: Convert tokens to IDs
         return tokens.map { token in
             tokenToId[token] ?? unkToken  // Unknown tokens → UNK
         }
@@ -317,13 +328,18 @@ public struct BPETokenizer: Tokenizer {
                     bytes.append(byte)
                 }
             } else {
-                // Regular token - convert to UTF-8 bytes
-                bytes.append(contentsOf: Array(tokenStr.utf8))
+                // Regular token - convert SentencePiece ▁ to space, then to UTF-8 bytes
+                let decoded = tokenStr.replacingOccurrences(of: "\u{2581}", with: " ")
+                bytes.append(contentsOf: Array(decoded.utf8))
             }
         }
-        
-        // Convert bytes to string
-        return String(decoding: bytes, as: UTF8.self)
+
+        // Convert bytes to string and strip leading space (SentencePiece artifact)
+        var result = String(decoding: bytes, as: UTF8.self)
+        if result.hasPrefix(" ") {
+            result = String(result.dropFirst())
+        }
+        return result
     }
     
     // MARK: - Helper Functions

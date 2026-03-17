@@ -179,28 +179,53 @@ public final class ChatViewModel: ObservableObject {
         await generationTask?.value
     }
     
+    /// Format conversation history using TinyLlama/Zephyr chat template
+    private func formatChatPrompt() -> String {
+        var prompt = ""
+        // System message
+        prompt += "<|system|>\nYou are a friendly, helpful assistant.</s>\n"
+        // Conversation turns
+        for message in messages {
+            if message.isUser {
+                prompt += "<|user|>\n\(message.content)</s>\n"
+            } else if !message.content.isEmpty {
+                prompt += "<|assistant|>\n\(message.content)</s>\n"
+            }
+        }
+        // Generation prompt
+        prompt += "<|assistant|>\n"
+        return prompt
+    }
+
     private func performGeneration() async throws {
         // Get last user message
-        guard let lastUserMessage = messages.last(where: { $0.isUser }) else {
+        guard messages.last(where: { $0.isUser }) != nil else {
             throw ChatError.noUserMessage
         }
-        
-        // Tokenize
+
+        // Build full chat prompt with template
+        let chatPrompt = formatChatPrompt()
+
+        // Tokenize with BOS token
         let promptTokens: [Int]
         if let tokenizer = tokenizer {
-            promptTokens = tokenizer.encode(lastUserMessage.content)
+            // BOS token (1) + encoded chat template
+            promptTokens = [1] + tokenizer.encode(chatPrompt)
         } else {
             // Fallback: character-based
-            promptTokens = Array(lastUserMessage.content.prefix(10)).map { char in
+            promptTokens = Array(chatPrompt.prefix(50)).map { char in
                 Int(char.asciiValue ?? 0) % runner.config.vocabSize
             }
         }
-        
+
+        // Reset runner for fresh generation (clear KV cache from previous turns)
+        runner.reset()
+
         // Configure generation
         let generationConfig = GenerationConfig(
-            maxTokens: 50,
+            maxTokens: 200,
             sampler: currentSamplerConfig,
-            stopTokens: []
+            stopTokens: [2]  // EOS token </s>
         )
         
         // Create assistant message to accumulate response

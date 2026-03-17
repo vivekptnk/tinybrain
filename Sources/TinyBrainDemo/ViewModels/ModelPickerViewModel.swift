@@ -87,9 +87,10 @@ public final class ModelPickerViewModel: ObservableObject {
                 try ModelLoader.load(from: path)
             }.value
 
-            // Try to load a matching tokenizer from the same directory
+            // Try to load a matching tokenizer from the same directory,
+            // then fall back to the global best-available search
             let dir = (path as NSString).deletingLastPathComponent
-            let tokenizer = loadTokenizerFromDirectory(dir)
+            let tokenizer = loadTokenizerFromDirectory(dir) ?? TokenizerLoader.loadBestAvailable()
 
             return (weights, tokenizer)
         } catch {

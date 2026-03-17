@@ -200,9 +200,9 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             for (uint k = 0; k < K; k++) {
                 float a_val = A[row * K + k];
 
-                // Dequantize on-the-fly (no Float32 materialization!)
+                // Dequantize on-the-fly (scales per output channel = per column)
                 char b_quant = B_quantized[k * N + col];
-                float b_scale = B_scales[k];
+                float b_scale = B_scales[col];
                 float b_val = float(b_quant) * b_scale;
 
                 sum += a_val * b_val;

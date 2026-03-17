@@ -131,6 +131,8 @@ public final class ModelRunner {
         // 1. Embed input token
         var hiddenRow = weights.embedding(for: tokenId).asRowMatrix()
 
+        // Diagnostic removed (was corrupting KV cache)
+
         // 2. Transformer layers with cached attention + quantized matmuls
         for (layerIndex, layerWeights) in weights.layers.enumerated() {
             hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
@@ -385,37 +387,71 @@ private extension ModelRunner {
 
         let scalingFactor = 1.0 / sqrt(Float(headDim))
 
-        // Handle Grouped Query Attention (GQA):
-        // When numKVHeads < numHeads, repeat KV heads to match query dimension.
-        // E.g., TinyLlama: 32 query heads, 4 KV heads -> repeat each KV head 8x
-        let queryForScores: Tensor<Float>
-        let keysForScores: Tensor<Float>
-        let valuesForContext: Tensor<Float>
+        // Per-head attention (correct multi-head attention)
+        // Each head independently computes: softmax(q_h @ K_h.T / sqrt(d)) @ V_h
+        let numHeads = config.numHeads
+        let numKVHeads = config.numKVHeads
+        let repeats = numHeads / numKVHeads
 
-        if config.numKVHeads < config.numHeads {
-            // GQA: repeat KV heads to match query heads
-            let repeats = config.numHeads / config.numKVHeads
-            keysForScores = repeatKVHeads(allKeys, headDim: headDim, numKVHeads: config.numKVHeads, repeats: repeats)
-            valuesForContext = repeatKVHeads(allValues, headDim: headDim, numKVHeads: config.numKVHeads, repeats: repeats)
-            queryForScores = query
-        } else {
-            // Standard MHA: dimensions already match
-            queryForScores = query
-            keysForScores = allKeys
-            valuesForContext = allValues
+        // Query is [1, numHeads * headDim], squeeze to [numHeads * headDim]
+        let qFlat = query.squeezedRowVector().data
+        // Keys: [seqLen, numKVHeads * headDim], Values: [seqLen, numKVHeads * headDim]
+        let kData = allKeys.data
+        let vData = allValues.data
+        let kvDim = numKVHeads * headDim
+
+        // Output: [numHeads * headDim]
+        var contextData = [Float](repeating: 0, count: numHeads * headDim)
+
+        // Collect all attention weights for X-Ray (flat across heads)
+        var allAttnWeights = [Float]()
+
+        for head in 0..<numHeads {
+            // Which KV head does this query head use?
+            let kvHead = head / repeats
+
+            // Extract q_h: [headDim]
+            let qOffset = head * headDim
+
+            // Compute scores: q_h . k_h for each position
+            var scores = [Float](repeating: 0, count: sequenceLength)
+            for pos in 0..<sequenceLength {
+                var dot: Float = 0
+                let kOffset = pos * kvDim + kvHead * headDim
+                for d in 0..<headDim {
+                    dot += qFlat[qOffset + d] * kData[kOffset + d]
+                }
+                scores[pos] = dot * scalingFactor
+            }
+
+            // Softmax
+            let maxScore = scores.max() ?? 0
+            var expScores = scores.map { exp($0 - maxScore) }
+            let sumExp = expScores.reduce(0, +)
+            expScores = expScores.map { $0 / sumExp }
+
+            allAttnWeights.append(contentsOf: expScores)
+
+            // Weighted sum of values
+            let ctxOffset = head * headDim
+            for pos in 0..<sequenceLength {
+                let w = expScores[pos]
+                let vOffset = pos * kvDim + kvHead * headDim
+                for d in 0..<headDim {
+                    contextData[ctxOffset + d] += w * vData[vOffset + d]
+                }
+            }
         }
 
-        let scores = (queryForScores.matmul(keysForScores.transpose())) * scalingFactor
-        let attentionWeights = scores.softmax()
-
-        // X-Ray hook: attention weights showing which past tokens matter
+        // X-Ray hook: attention weights (flattened: numHeads * seqLen)
         observer?.didComputeAttention(
             layerIndex: layerIndex,
-            weights: attentionWeights.data,
+            weights: allAttnWeights,
             position: currentPosition
         )
 
-        let context = attentionWeights.matmul(valuesForContext)
+        // Context as [1, numHeads * headDim] row matrix for output projection
+        let context = Tensor<Float>(shape: TensorShape(1, numHeads * headDim), data: contextData)
 
         return layerWeights.output.apply(toRow: context)
     }

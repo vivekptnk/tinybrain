@@ -63,6 +63,7 @@ struct ChatDemoApp: App {
         // Load tokenizer (auto-detects format)
         let tokenizer = TokenizerLoader.loadBestAvailable()
 
+
         // Create view model
         let vm = ChatViewModel(runner: runner, tokenizer: tokenizer)
         _viewModel = StateObject(wrappedValue: vm)

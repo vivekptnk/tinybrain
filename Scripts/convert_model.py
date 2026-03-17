@@ -189,8 +189,8 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
                 f'h.{layer_idx}.attn.{proj}.weight',
             ])
             if key:
-                # TRANSPOSE: [out, in] -> [in, out]
-                layer_weights[proj] = to_numpy(state_dict[key]).T
+                # Keep as [out, in] — quantize per output channel, then transpose
+                layer_weights[proj] = to_numpy(state_dict[key])
 
         # MLP projections
         for proj in ['gate_proj', 'up_proj', 'down_proj']:
@@ -200,18 +200,17 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
                 f'h.{layer_idx}.mlp.{proj}.weight',
             ])
             if key:
-                # TRANSPOSE: [out, in] -> [in, out]
-                layer_weights[proj] = to_numpy(state_dict[key]).T
+                # Keep as [out, in] — quantize per output channel, then transpose
+                layer_weights[proj] = to_numpy(state_dict[key])
 
         # Handle merged gate+up projection (some models combine these)
         if 'gate_proj' not in layer_weights and 'up_proj' not in layer_weights:
             key = find_key([f'layers.{layer_idx}.mlp.fc1.weight'])
             if key:
-                # Split into gate and up, then transpose
-                full_weight = to_numpy(state_dict[key]).T  # Transpose first
-                mid = full_weight.shape[1] // 2  # Now split on dim 1
-                layer_weights['gate_proj'] = full_weight[:, :mid]
-                layer_weights['up_proj'] = full_weight[:, mid:]
+                full_weight = to_numpy(state_dict[key])  # [out, in]
+                mid = full_weight.shape[0] // 2  # Split on dim 0 (output)
+                layer_weights['gate_proj'] = full_weight[:mid, :]
+                layer_weights['up_proj'] = full_weight[mid:, :]
 
         # Layer norms
         for norm in ['input_layernorm', 'post_attention_layernorm']:
@@ -236,14 +235,14 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
     # 4. Extract LM head
     lm_head_key = find_key(['lm_head.weight', 'output.weight', 'head.weight'])
     if lm_head_key:
-        # TRANSPOSE: LM head is also a linear layer [vocab_size, hidden_dim] -> [hidden_dim, vocab_size]
-        weights['lm_head'] = to_numpy(state_dict[lm_head_key]).T
+        # Keep as [vocab_size, hidden_dim] — quantize per output channel, then transpose
+        weights['lm_head'] = to_numpy(state_dict[lm_head_key])
         print(f"  LM Head: {weights['lm_head'].shape}")
     else:
         # Some models tie embeddings and LM head
         print("  LM head not found, using tied embeddings")
-        # Embeddings are already [vocab_size, hidden_dim], need to transpose for matmul
-        weights['lm_head'] = weights['embeddings'].T.copy()
+        # Embeddings are [vocab_size, hidden_dim] — same layout as lm_head
+        weights['lm_head'] = weights['embeddings'].copy()
 
     return weights
 
@@ -358,18 +357,42 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
     quantized_weights = {}
 
     def prepare_tensor(name: str, tensor: np.ndarray):
+        """Quantize tensor per output channel (dim 0), then transpose to [in, out] layout.
+
+        Weights arrive as [out, in] from PyTorch. We:
+        1. Quantize per dim 0 (output channels) — correct per-channel quantization
+        2. Transpose quantized data to [in, out] for TinyBrain's matmul layout
+        3. Store scales per output channel (applied per column in Swift dequantizer)
+        """
         if quantize_mode == 'int4' and len(tensor.shape) >= 1:
             q_tensor, scales, zero_points = quantize_int4_per_group(tensor, group_size=group_size)
+            # INT4 is flattened, transpose doesn't apply the same way
+            # Store original shape transposed for matmul layout
+            transposed_shape = tuple(reversed(tensor.shape)) if tensor.ndim == 2 else tensor.shape
             quantized_weights[name] = {
                 'data': q_tensor,
                 'scales': scales,
                 'zero_points': zero_points,
-                'shape': tensor.shape,  # Original shape (not packed shape)
+                'shape': transposed_shape,
                 'quantized': True,
                 'precision': 'int4',
                 'group_size': group_size,
             }
+        elif quantize_mode == 'int8' and tensor.ndim == 2:
+            # Quantize per output channel (dim 0 of [out, in])
+            q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
+            # Transpose quantized data: [out, in] -> [in, out]
+            q_transposed = np.ascontiguousarray(q_tensor.T)
+            quantized_weights[name] = {
+                'data': q_transposed,
+                'scales': scales,
+                'zero_points': zero_points,
+                'shape': q_transposed.shape,  # [in, out]
+                'quantized': True,
+                'precision': 'int8',
+            }
         elif quantize_mode == 'int8' and len(tensor.shape) >= 1:
+            # 1D tensors (norms): no transpose needed
             q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
             quantized_weights[name] = {
                 'data': q_tensor,
@@ -501,39 +524,45 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
         padded_pos = ((current_pos + 4095) // 4096) * 4096
         f.write(b'\x00' * (padded_pos - current_pos))
 
-        # 3. Write tensor index section
+        # 3. Write tensor index section (two-pass: placeholders then patch)
         f.write(struct.pack('<I', len(quantized_weights)))
 
-        # We'll write data next and track offsets
-        data_start = ((f.tell() + (len(quantized_weights) * 100) + 4095) // 4096) * 4096  # Estimate
-
         tensor_list = list(quantized_weights.items())
-        current_data_offset = 0
 
+        # Pass 1: write index entries with placeholder offsets, record positions to patch
+        offset_positions = []  # (file_pos, data_size) for each tensor
         for name, info in tensor_list:
-            # Name
             name_bytes = name.encode('utf-8')
             f.write(struct.pack('<I', len(name_bytes)))
             f.write(name_bytes)
 
-            # Shape
             f.write(struct.pack('<I', len(info['shape'])))
             for dim in info['shape']:
                 f.write(struct.pack('<i', dim))
 
-            # Data offset and size (will be in data section)
             data_size = info['data'].nbytes
-            f.write(struct.pack('<Q', data_start + current_data_offset))
+            offset_positions.append((f.tell(), data_size))
+            f.write(struct.pack('<Q', 0))  # placeholder offset
             f.write(struct.pack('<Q', data_size))
-
-            # Track offset for next tensor (4KB aligned)
-            padded_size = ((data_size + 4095) // 4096) * 4096
-            current_data_offset += padded_size
 
         # Pad index to 4KB
         current_pos = f.tell()
         padded_pos = ((current_pos + 4095) // 4096) * 4096
         f.write(b'\x00' * (padded_pos - current_pos))
+
+        # Now we know the actual data_start
+        data_start = padded_pos
+
+        # Pass 2: patch the offset placeholders with correct absolute offsets
+        current_data_offset = 0
+        for file_pos, data_size in offset_positions:
+            f.seek(file_pos)
+            f.write(struct.pack('<Q', data_start + current_data_offset))
+            padded_size = ((data_size + 4095) // 4096) * 4096
+            current_data_offset += padded_size
+
+        # Seek back to data section start
+        f.seek(data_start)
 
         # 4. Write weight data blobs (4KB aligned per tensor)
         pbar = tqdm(total=len(tensor_list), desc="Writing weights")
