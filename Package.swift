@@ -32,6 +32,11 @@ let package = Package(
             name: "TinyBrainDemo",
             targets: ["TinyBrainDemo"]
         ),
+        // ProximaKit bridge (optional — brings in ProximaKit dependency)
+        .library(
+            name: "TinyBrainProximaKit",
+            targets: ["TinyBrainProximaKit"]
+        ),
         // Demo chat app
         .executable(
             name: "tinybrain-chat",
@@ -47,7 +52,9 @@ let package = Package(
         // Swift Argument Parser for CLI tools
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         // YAML parsing for benchmark scenarios
-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
+        // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge)
+        .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main")
     ],
     targets: [
         // MARK: - Umbrella Module
@@ -122,6 +129,22 @@ let package = Package(
             path: "Tests/TinyBrainDemoTests"
         ),
         
+        // MARK: - ProximaKit Bridge
+        .target(
+            name: "TinyBrainProximaKit",
+            dependencies: [
+                "TinyBrainRuntime",
+                "TinyBrainTokenizer",
+                .product(name: "ProximaKit", package: "ProximaKit")
+            ],
+            path: "Sources/TinyBrainProximaKit"
+        ),
+        .testTarget(
+            name: "TinyBrainProximaKitTests",
+            dependencies: ["TinyBrainProximaKit"],
+            path: "Tests/TinyBrainProximaKitTests"
+        ),
+
         // MARK: - Chat Demo Executable
         .executableTarget(
             name: "ChatDemo",

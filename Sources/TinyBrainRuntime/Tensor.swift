@@ -337,11 +337,22 @@ public struct Tensor<Element: TensorElement> {
     /// ```
     internal var data: [Element] {
         get { storage.getCPUData() }
-        set { 
+        set {
             ensureUniqueStorage()
-            storage.cpuData = newValue 
+            storage.cpuData = newValue
         }
     }
+
+    /// The underlying numerical data as a flat, read-only array.
+    ///
+    /// Elements are in row-major order. Use this to extract tensor contents
+    /// from other modules (e.g. converting to ProximaKit `Vector`).
+    ///
+    /// ```swift
+    /// let embedding = runner.extractEmbedding(for: tokenIds)
+    /// let floats = embedding.scalars  // [Float] of length hiddenDim
+    /// ```
+    public var scalars: [Element] { data }
     
     /// **TB-004 CoW:** Ensure storage is uniquely owned before mutation
     ///
