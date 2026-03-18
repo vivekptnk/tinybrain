@@ -64,4 +64,21 @@ public protocol InferenceObserver: AnyObject {
     ///   - logits: Raw logit scores `[vocabSize]` before sampling
     ///   - position: Current token position in the sequence
     func didComputeLogits(logits: [Float], position: Int)
+
+    /// Called after final RMSNorm, before output projection to logits.
+    ///
+    /// The hidden state at this point is the standard text embedding
+    /// representation — post-normalization, pre-projection. Shape: `[hiddenDim]`.
+    ///
+    /// - Parameters:
+    ///   - hiddenState: The normalized hidden state vector `[hiddenDim]`
+    ///   - position: Current token position in the sequence
+    func didComputeFinalHiddenState(_ hiddenState: [Float], position: Int)
+}
+
+// MARK: - Default implementations (non-breaking extensibility)
+
+public extension InferenceObserver {
+    /// Default no-op — existing conformances are unaffected.
+    func didComputeFinalHiddenState(_ hiddenState: [Float], position: Int) {}
 }

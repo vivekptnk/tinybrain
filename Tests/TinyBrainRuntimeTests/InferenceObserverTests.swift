@@ -11,6 +11,7 @@ final class MockInferenceObserver: InferenceObserver {
     var attentionCalls: [(layerIndex: Int, weights: [Float], position: Int)] = []
     var layerEntryCalls: [(layerIndex: Int, norm: Float, position: Int)] = []
     var logitsCalls: [(logits: [Float], position: Int)] = []
+    var finalHiddenStateCalls: [(hiddenState: [Float], position: Int)] = []
 
     func didComputeAttention(layerIndex: Int, weights: [Float], position: Int) {
         attentionCalls.append((layerIndex, weights, position))
@@ -22,6 +23,10 @@ final class MockInferenceObserver: InferenceObserver {
 
     func didComputeLogits(logits: [Float], position: Int) {
         logitsCalls.append((logits, position))
+    }
+
+    func didComputeFinalHiddenState(_ hiddenState: [Float], position: Int) {
+        finalHiddenStateCalls.append((hiddenState, position))
     }
 }
 
@@ -117,5 +122,100 @@ final class InferenceObserverTests: XCTestCase {
         runner.observer = nil
         _ = runner.step(tokenId: 1)
         XCTAssertEqual(observer.logitsCalls.count, 1, "Should not receive callbacks after detach")
+    }
+
+    // MARK: - Final Hidden State Hook Tests
+
+    func testFinalHiddenStateHookFiresDuringStep() {
+        let config = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 2, vocabSize: 50)
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+        let observer = MockInferenceObserver()
+        runner.observer = observer
+
+        _ = runner.step(tokenId: 1)
+
+        // Hook should fire once per step
+        XCTAssertEqual(observer.finalHiddenStateCalls.count, 1,
+                       "didComputeFinalHiddenState should fire once per step")
+
+        // Shape should be [hiddenDim]
+        XCTAssertEqual(observer.finalHiddenStateCalls[0].hiddenState.count, 64,
+                       "Hidden state should have hiddenDim elements")
+
+        // Position should match
+        XCTAssertEqual(observer.finalHiddenStateCalls[0].position, 0)
+    }
+
+    func testFinalHiddenStatePositionIncrementsAcrossSteps() {
+        let config = ModelConfig(numLayers: 1, hiddenDim: 32, numHeads: 1, vocabSize: 20)
+        let weights = ModelWeights.makeToyModel(config: config, seed: 99)
+        let runner = ModelRunner(weights: weights)
+        let observer = MockInferenceObserver()
+        runner.observer = observer
+
+        _ = runner.step(tokenId: 0)
+        _ = runner.step(tokenId: 1)
+        _ = runner.step(tokenId: 2)
+
+        XCTAssertEqual(observer.finalHiddenStateCalls.count, 3)
+        XCTAssertEqual(observer.finalHiddenStateCalls[0].position, 0)
+        XCTAssertEqual(observer.finalHiddenStateCalls[1].position, 1)
+        XCTAssertEqual(observer.finalHiddenStateCalls[2].position, 2)
+    }
+
+    // MARK: - extractEmbedding Tests
+
+    func testExtractEmbeddingShape() {
+        let config = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 2, vocabSize: 50)
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+
+        let embedding = runner.extractEmbedding(for: [1, 2, 3])
+
+        // Shape should be [1, hiddenDim]
+        XCTAssertEqual(embedding.shape.dimensions, [1, 64],
+                       "Embedding should have shape [1, hiddenDim]")
+    }
+
+    func testExtractEmbeddingResetsState() {
+        let config = ModelConfig(numLayers: 1, hiddenDim: 32, numHeads: 1, vocabSize: 20)
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+
+        // Run some steps first
+        _ = runner.step(tokenId: 0)
+        _ = runner.step(tokenId: 1)
+        XCTAssertEqual(runner.currentPosition, 2)
+
+        // extractEmbedding should reset and produce a clean result
+        let embedding = runner.extractEmbedding(for: [5])
+        XCTAssertEqual(embedding.shape.dimensions, [1, 32])
+        XCTAssertEqual(runner.currentPosition, 1)
+    }
+
+    func testExtractEmbeddingDeterministic() {
+        let config = ModelConfig(numLayers: 1, hiddenDim: 32, numHeads: 1, vocabSize: 20)
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+
+        let runner1 = ModelRunner(weights: weights)
+        let runner2 = ModelRunner(weights: weights)
+
+        let emb1 = runner1.extractEmbedding(for: [1, 2, 3])
+        let emb2 = runner2.extractEmbedding(for: [1, 2, 3])
+
+        XCTAssertEqual(emb1.data, emb2.data, "Embeddings should be deterministic")
+    }
+
+    func testExtractEmbeddingDiffersForDifferentInputs() {
+        let config = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 2, vocabSize: 50)
+        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+        let runner = ModelRunner(weights: weights)
+
+        let emb1 = runner.extractEmbedding(for: [1, 2, 3])
+        let emb2 = runner.extractEmbedding(for: [4, 5, 6])
+
+        XCTAssertNotEqual(emb1.data, emb2.data,
+                          "Different inputs should produce different embeddings")
     }
 }

@@ -143,6 +143,9 @@ public final class ModelRunner {
             hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
         }
 
+        // X-Ray hook: final hidden state (post-norm, pre-projection — the embedding vector)
+        observer?.didComputeFinalHiddenState(hiddenRow.squeezedRowVector().data, position: currentPosition)
+
         // 4. Output projection to logits
         let logitsRow = weights.output.apply(toRow: hiddenRow)
         let logits = logitsRow.squeezedRowVector()
@@ -244,6 +247,44 @@ public final class ModelRunner {
                 continuation.finish()
             }
         }
+    }
+
+    // MARK: - Embedding extraction
+
+    /// Extract the text embedding for a sequence of token IDs.
+    ///
+    /// Runs a forward pass through all transformer layers and final RMSNorm,
+    /// then returns the hidden state vector **without** computing the output
+    /// projection to logits — cheaper than a full `step()` when you only
+    /// need the embedding.
+    ///
+    /// The returned tensor has shape `[1, hiddenDim]`.
+    ///
+    /// - Parameter tokenIds: Input token IDs to encode
+    /// - Returns: Final hidden state tensor of shape `[1, hiddenDim]`
+    public func extractEmbedding(for tokenIds: [Int]) -> Tensor<Float> {
+        reset()
+
+        var hiddenRow = Tensor<Float>(shape: TensorShape(1, config.hiddenDim),
+                                      data: [Float](repeating: 0, count: config.hiddenDim))
+
+        for tokenId in tokenIds {
+            let clampedId = max(0, min(tokenId, config.vocabSize - 1))
+            hiddenRow = weights.embedding(for: clampedId).asRowMatrix()
+
+            for (layerIndex, layerWeights) in weights.layers.enumerated() {
+                hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
+            }
+
+            currentPosition += 1
+        }
+
+        // Final RMSNorm — this is the embedding representation
+        if let finalNorm = weights.finalNormWeights {
+            hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+        }
+
+        return hiddenRow
     }
 
     // MARK: - Legacy API (TB-004 compatibility)
