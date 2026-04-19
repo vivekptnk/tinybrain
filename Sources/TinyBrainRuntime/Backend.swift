@@ -76,6 +76,23 @@ public final class TinyBrainBackend {
         return (try? backend.silu(input)) ?? cpuFallback()
     }
 
+    /// Dispatch fused attention to GPU if the backend supports it
+    ///
+    /// Falls back to the closure `cpuFallback` when Metal is unavailable.
+    public static func dispatchAttention(
+        query: Tensor<Float>, keys: Tensor<Float>, values: Tensor<Float>,
+        mask: Tensor<Float>?, headDim: Int, numHeads: Int, numKVHeads: Int,
+        cpuFallback: () -> Tensor<Float>
+    ) -> Tensor<Float> {
+        guard let backend = metalBackend as? AttentionBackend else {
+            return cpuFallback()
+        }
+        return (try? backend.attention(
+            query: query, keys: keys, values: values,
+            mask: mask, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads
+        )) ?? cpuFallback()
+    }
+
     /// Dispatch GELU activation to GPU if the backend supports it
     public static func dispatchGELU(
         _ input: Tensor<Float>,
@@ -178,6 +195,27 @@ public protocol RMSNormBackend {
     ///   - eps: Epsilon for numerical stability (default 1e-5)
     /// - Returns: Normalized tensor of same shape
     func rmsnorm(_ input: Tensor<Float>, weight: Tensor<Float>, eps: Float) throws -> Tensor<Float>
+}
+
+/// Protocol for GPU-accelerated fused attention (FlashAttention)
+///
+/// Fuses QK^T + softmax + V into a single GPU pass, eliminating the
+/// O(seqLen²) intermediate attention matrix.  Supports grouped-query
+/// attention (GQA) where `numKVHeads` may be less than `numHeads`.
+public protocol AttentionBackend {
+    /// Compute multi-head (or grouped-query) attention on GPU.
+    ///
+    /// - Parameters:
+    ///   - query:  [batch?, seqLen, numHeads * headDim]
+    ///   - keys:   [batch?, kvSeqLen, numKVHeads * headDim]
+    ///   - values: [batch?, kvSeqLen, numKVHeads * headDim]
+    ///   - mask:   Optional [kvSeqLen] additive mask (0 = attend, -inf = ignore)
+    ///   - headDim:    Dimension per head
+    ///   - numHeads:   Number of query heads
+    ///   - numKVHeads: Number of key/value heads (GQA when < numHeads)
+    /// - Returns: Tensor of same shape as `query`
+    func attention(query: Tensor<Float>, keys: Tensor<Float>, values: Tensor<Float>,
+                   mask: Tensor<Float>?, headDim: Int, numHeads: Int, numKVHeads: Int) throws -> Tensor<Float>
 }
 
 /// Protocol for GPU-accelerated element-wise activation functions

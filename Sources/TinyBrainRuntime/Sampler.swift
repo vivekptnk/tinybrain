@@ -366,7 +366,7 @@ public struct Sampler {
 /// **Educational:** Linear Congruential Generator (LCG)
 /// Not cryptographically secure, but good enough for reproducible sampling.
 ///
-public struct SeededRandomGenerator {
+public struct SeededRandomGenerator: RandomNumberGenerator {
     internal var state: UInt64
     
     public init(seed: UInt64) {

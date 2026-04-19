@@ -56,21 +56,65 @@ public struct GenerationConfig {
     /// stopTokens: [tokenizer.eosToken]  // Stop at EOS
     /// ```
     public var stopTokens: [Int]
-    
+
+    /// Optional JSON schema for structured output generation
+    ///
+    /// When set, the constrained sampler masks logits to only allow
+    /// tokens that produce valid JSON matching this schema.
+    /// `nil` means unconstrained generation (backward compatible).
+    ///
+    /// **Example:**
+    /// ```swift
+    /// config.outputSchema = .object(properties: [
+    ///     JSONSchemaProperty(name: "answer", schema: .string, required: true)
+    /// ], required: ["answer"])
+    /// ```
+    public var outputSchema: JSONSchema?
+
+    /// How strictly to enforce the output schema
+    ///
+    /// - `.strict`: Invalid tokens masked to `-infinity` (guaranteed valid JSON)
+    /// - `.guided`: Invalid tokens biased negatively (mostly valid, allows recovery)
+    /// - `.none`: No constraint applied
+    public var constraintMode: ConstraintMode
+
+    /// Optional tool calling configuration for tool-augmented generation
+    ///
+    /// When set, enables tool calling with the specified tools and choice policy.
+    /// `nil` means no tool calling (backward compatible).
+    ///
+    /// **Example:**
+    /// ```swift
+    /// config.toolCallingConfig = ToolCallingConfig(
+    ///     tools: [weatherTool],
+    ///     toolChoice: .auto
+    /// )
+    /// ```
+    public var toolCallingConfig: ToolCallingConfig?
+
     /// Initialize generation configuration
     ///
     /// - Parameters:
     ///   - maxTokens: Maximum tokens to generate (default: 100)
     ///   - sampler: Sampling configuration (default: temperature=1.0)
     ///   - stopTokens: Tokens that halt generation (default: empty)
+    ///   - outputSchema: Optional JSON schema for constrained output (default: nil)
+    ///   - constraintMode: Constraint strictness (default: .none)
+    ///   - toolCallingConfig: Optional tool calling configuration (default: nil)
     public init(
         maxTokens: Int = 100,
         sampler: SamplerConfig = SamplerConfig(),
-        stopTokens: [Int] = []
+        stopTokens: [Int] = [],
+        outputSchema: JSONSchema? = nil,
+        constraintMode: ConstraintMode = .none,
+        toolCallingConfig: ToolCallingConfig? = nil
     ) {
         self.maxTokens = maxTokens
         self.sampler = sampler
         self.stopTokens = stopTokens
+        self.outputSchema = outputSchema
+        self.constraintMode = constraintMode
+        self.toolCallingConfig = toolCallingConfig
     }
 }
 
@@ -140,20 +184,29 @@ public struct TokenOutput {
     
     /// Optional energy sample for this token (Joules), if available
     public let energyJoules: Double?
-    
+
+    /// Current position in the schema constraint state machine
+    ///
+    /// `nil` when no output schema is active. When constrained generation
+    /// is enabled, this shows where in the JSON structure the generator
+    /// currently is (e.g., "expecting key", "expecting value(string)").
+    public let constraintState: String?
+
     /// Initialize token output
     ///
     /// - Parameters:
     ///   - tokenId: Generated token ID
     ///   - probability: Confidence/probability (0.0-1.0)
     ///   - timestamp: Generation timestamp (default: now)
+    ///   - constraintState: Current schema position (default: nil)
     public init(
         tokenId: Int,
         probability: Float,
         entropy: Float = 0.0,
         timestamp: Date = Date(),
         strategy: String? = nil,
-        energyJoules: Double? = nil
+        energyJoules: Double? = nil,
+        constraintState: String? = nil
     ) {
         self.tokenId = tokenId
         self.probability = probability
@@ -161,6 +214,7 @@ public struct TokenOutput {
         self.timestamp = timestamp
         self.strategy = strategy
         self.energyJoules = energyJoules
+        self.constraintState = constraintState
     }
 }
 

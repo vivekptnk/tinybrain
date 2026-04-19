@@ -35,6 +35,9 @@ class ModelConfig:
     intermediate_dim: int = None  # FFN intermediate size (default: 4 * hidden_dim)
     max_seq_len: int = 2048
     num_kv_heads: int = None  # For GQA/MQA (defaults to num_heads for MHA)
+    architecture: str = "llama"  # "llama" (default) or "gemma"; gates runtime-visible
+                                 # divergences like RMSNorm `(1+w)` and sqrt(hidden)
+                                 # embedding scaling.
 
     def __post_init__(self):
         if self.intermediate_dim is None:
@@ -59,7 +62,8 @@ def write_tbf_header(f, config: ModelConfig):
         'numKVHeads': config.num_kv_heads,  # Add GQA support
         'vocabSize': config.vocab_size,
         'maxSeqLen': config.max_seq_len,
-        'intermediateDim': config.intermediate_dim
+        'intermediateDim': config.intermediate_dim,
+        'architecture': config.architecture,  # Swift decodeIfPresent -> "llama"
     }
     config_json = json.dumps(config_dict).encode('utf-8')
 
@@ -622,7 +626,13 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
             intermediate_dim = hf_config.get('intermediate_size', 4 * hidden_dim)
             max_seq_len = hf_config.get('max_position_embeddings', 2048)
 
+            # Gate runtime-visible arch divergences via the TBF `architecture` field.
+            # Gemma needs `RMSNorm * (1 + w)` and `sqrt(hidden) * embed` at runtime.
+            raw_model_type = (hf_config.get('model_type') or '').lower()
+            architecture = 'gemma' if raw_model_type.startswith('gemma') else 'llama'
+
             print("\nInferred configuration:")
+            print(f"  Architecture: {architecture} (HF model_type={raw_model_type or '?'})")
             print(f"  Vocab size: {vocab_size}")
             print(f"  Hidden dim: {hidden_dim}")
             print(f"  Num layers: {num_layers}")
@@ -637,7 +647,8 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
                 num_kv_heads=num_kv_heads,
                 vocab_size=vocab_size,
                 intermediate_dim=intermediate_dim,
-                max_seq_len=max_seq_len
+                max_seq_len=max_seq_len,
+                architecture=architecture,
             )
 
     # Fallback: infer from weight shapes

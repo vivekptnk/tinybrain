@@ -46,6 +46,12 @@ public struct ModelConfig: Codable {
     /// FFN intermediate dimension (defaults to 4 * hiddenDim)
     public let intermediateDim: Int
 
+    /// Model architecture family. Determines runtime-visible divergences
+    /// from the default LLaMA-style path (e.g. Gemma's `RMSNorm * (1 + w)`
+    /// and `sqrt(hiddenDim)` embedding scale). Decoded as "llama" for
+    /// older .tbf files that omit the field.
+    public let architecture: String
+
     /// Computed: KV dimension (hiddenDim / numHeads * numKVHeads)
     public var kvDim: Int {
         return (hiddenDim / numHeads) * numKVHeads
@@ -56,7 +62,13 @@ public struct ModelConfig: Codable {
         return hiddenDim / numHeads
     }
 
-    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil) {
+    /// Computed: true when architecture needs Gemma's post-embed scale and
+    /// RMSNorm offset semantics.
+    public var isGemmaStyle: Bool {
+        return architecture == "gemma"
+    }
+
+    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil, architecture: String = "llama") {
         self.numLayers = numLayers
         self.hiddenDim = hiddenDim
         self.numHeads = numHeads
@@ -64,10 +76,11 @@ public struct ModelConfig: Codable {
         self.vocabSize = vocabSize
         self.maxSeqLen = maxSeqLen
         self.intermediateDim = intermediateDim ?? (4 * hiddenDim)
+        self.architecture = architecture
     }
 
     enum CodingKeys: String, CodingKey {
-        case numLayers, hiddenDim, numHeads, numKVHeads, vocabSize, maxSeqLen, intermediateDim
+        case numLayers, hiddenDim, numHeads, numKVHeads, vocabSize, maxSeqLen, intermediateDim, architecture
     }
 
     public init(from decoder: Decoder) throws {
@@ -79,6 +92,7 @@ public struct ModelConfig: Codable {
         vocabSize = try container.decode(Int.self, forKey: .vocabSize)
         maxSeqLen = try container.decode(Int.self, forKey: .maxSeqLen)
         intermediateDim = try container.decodeIfPresent(Int.self, forKey: .intermediateDim) ?? (4 * hiddenDim)
+        architecture = try container.decodeIfPresent(String.self, forKey: .architecture) ?? "llama"
     }
 }
 
@@ -131,16 +145,21 @@ public final class ModelRunner {
         // 1. Embed input token
         var hiddenRow = weights.embedding(for: tokenId).asRowMatrix()
 
-        // Diagnostic removed (was corrupting KV cache)
+        // Gemma scales the embedding by sqrt(hidden_dim) right after lookup.
+        if config.isGemmaStyle {
+            hiddenRow = hiddenRow * sqrt(Float(config.hiddenDim))
+        }
 
         // 2. Transformer layers with cached attention + quantized matmuls
         for (layerIndex, layerWeights) in weights.layers.enumerated() {
             hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
         }
 
-        // 3. Final RMSNorm before output projection (LLaMA-style)
+        // 3. Final RMSNorm before output projection (LLaMA-style; Gemma adds +1 offset)
         if let finalNorm = weights.finalNormWeights {
-            hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+            hiddenRow = config.isGemmaStyle
+                ? hiddenRow.rmsNormWithOffset(weight: finalNorm)
+                : hiddenRow.rmsNorm(weight: finalNorm)
         }
 
         // X-Ray hook: final hidden state (post-norm, pre-projection — the embedding vector)
@@ -272,6 +291,10 @@ public final class ModelRunner {
             let clampedId = max(0, min(tokenId, config.vocabSize - 1))
             hiddenRow = weights.embedding(for: clampedId).asRowMatrix()
 
+            if config.isGemmaStyle {
+                hiddenRow = hiddenRow * sqrt(Float(config.hiddenDim))
+            }
+
             for (layerIndex, layerWeights) in weights.layers.enumerated() {
                 hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
             }
@@ -281,7 +304,9 @@ public final class ModelRunner {
 
         // Final RMSNorm — this is the embedding representation
         if let finalNorm = weights.finalNormWeights {
-            hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+            hiddenRow = config.isGemmaStyle
+                ? hiddenRow.rmsNormWithOffset(weight: finalNorm)
+                : hiddenRow.rmsNorm(weight: finalNorm)
         }
 
         return hiddenRow
@@ -341,10 +366,12 @@ private extension ModelRunner {
             position: currentPosition
         )
 
-        // Pre-attention RMSNorm (LLaMA-style pre-norm architecture)
+        // Pre-attention RMSNorm (LLaMA-style pre-norm architecture; Gemma adds +1 offset)
         let normedForAttn: Tensor<Float>
         if let normWeights = layerWeights.inputNormWeights {
-            normedForAttn = hiddenRow.rmsNorm(weight: normWeights)
+            normedForAttn = config.isGemmaStyle
+                ? hiddenRow.rmsNormWithOffset(weight: normWeights)
+                : hiddenRow.rmsNorm(weight: normWeights)
         } else {
             normedForAttn = hiddenRow
         }
@@ -354,10 +381,12 @@ private extension ModelRunner {
                                         layerIndex: layerIndex)
         let residual1 = hiddenRow + attentionOutput
 
-        // Pre-FFN RMSNorm
+        // Pre-FFN RMSNorm (Gemma adds +1 offset)
         let normedForFFN: Tensor<Float>
         if let normWeights = layerWeights.postAttentionNormWeights {
-            normedForFFN = residual1.rmsNorm(weight: normWeights)
+            normedForFFN = config.isGemmaStyle
+                ? residual1.rmsNormWithOffset(weight: normWeights)
+                : residual1.rmsNorm(weight: normWeights)
         } else {
             normedForFFN = residual1
         }

@@ -92,3 +92,7 @@ benchmarks/results/*.json
 
 .cursor/
 .claude/worktrees/
+
+# Cross-team dependency sources cloned locally for development
+# (see Sources/TinyBrainCartographerBridge/README.md).
+Dependencies/

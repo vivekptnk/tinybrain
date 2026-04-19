@@ -9,9 +9,10 @@ import TinyBrainRuntime
 
 /// Metal backend for accelerated tensor operations
 ///
-/// **REVIEW HITLER FIX:** Now includes INT8 quantized operations!
+/// Supports FP32/INT8/INT4 matmul, softmax, RMSNorm, activations, and FlashAttention.
 public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader, QuantizedMatMulBackend,
-                                  SoftmaxBackend, RMSNormBackend, ActivationBackend {
+                                  SoftmaxBackend, RMSNormBackend, ActivationBackend,
+                                  AttentionBackend {
     /// Shared Metal device (the GPU)
     private let device: MTLDevice
     
@@ -365,6 +366,145 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             float x3 = x * x * x;
             float inner = 0.7978845608 * (x + 0.044715 * x3);
             output[gid] = 0.5 * x * (1.0 + tanh(inner));
+        }
+
+        // ── Phase 3: FlashAttention ─────────────────────────────────────
+        // Fused QK^T + online softmax + V in a single GPU pass.
+        // Tile sizes are compile-time constants (Br=Bc=32).
+
+        struct AttentionParams {
+            uint seqLen;
+            uint kvSeqLen;
+            uint headDim;
+            uint numHeads;
+            uint numKVHeads;
+            uint batch;
+            float scale;
+            uint useMask;
+        };
+
+        constant uint TILE_Br = 32;
+        constant uint TILE_Bc = 32;
+
+        kernel void flash_attention(
+            device const float* query   [[buffer(0)]],
+            device const float* keys    [[buffer(1)]],
+            device const float* values  [[buffer(2)]],
+            device float*       output  [[buffer(3)]],
+            device const float* mask    [[buffer(4)]],
+            constant AttentionParams& params [[buffer(5)]],
+            uint3 tgid [[threadgroup_position_in_grid]],
+            uint3 tid  [[thread_position_in_threadgroup]],
+            threadgroup float* smem [[threadgroup(0)]]
+        ) {
+            const uint head     = tgid.x;
+            const uint qBlock   = tgid.y;
+            const uint batchIdx = tgid.z;
+
+            const uint headDim   = params.headDim;
+            const uint seqLen    = params.seqLen;
+            const uint kvSeqLen  = params.kvSeqLen;
+            const uint numHeads  = params.numHeads;
+            const uint numKVHeads = params.numKVHeads;
+            const float scaleFactor = params.scale;
+
+            const uint kvHead = head / (numHeads / numKVHeads);
+            const uint tr = tid.y;
+            const uint tc = tid.x;
+            const uint qRow = qBlock * TILE_Br + tr;
+            const bool validRow = (qRow < seqLen);
+
+            const uint qStride  = numHeads * headDim;
+            const uint kvStride = numKVHeads * headDim;
+
+            device const float* Q_base = query  + batchIdx * seqLen * qStride;
+            device const float* K_base = keys   + batchIdx * kvSeqLen * kvStride;
+            device const float* V_base = values + batchIdx * kvSeqLen * kvStride;
+            device float*       O_base = output + batchIdx * seqLen * qStride;
+
+            device const float* q_row = Q_base + qRow * qStride + head * headDim;
+            device float*       o_row = O_base + qRow * qStride + head * headDim;
+
+            threadgroup float* S_tile  = smem;
+            threadgroup float* row_max = smem + TILE_Br * TILE_Bc;
+            threadgroup float* row_sum = row_max + TILE_Br;
+            threadgroup float* O_acc   = row_sum + TILE_Br;
+
+            if (tc == 0) {
+                row_max[tr] = -INFINITY;
+                row_sum[tr] = 0.0;
+            }
+            for (uint d = tc; d < headDim; d += TILE_Bc) {
+                O_acc[tr * headDim + d] = 0.0;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint numKVTiles = (kvSeqLen + TILE_Bc - 1) / TILE_Bc;
+
+            for (uint kvTile = 0; kvTile < numKVTiles; kvTile++) {
+                const uint kvStart = kvTile * TILE_Bc;
+                const uint kvCol = kvStart + tc;
+
+                float score = -INFINITY;
+                if (validRow && kvCol < kvSeqLen) {
+                    score = 0.0;
+                    device const float* k_col = K_base + kvCol * kvStride + kvHead * headDim;
+                    for (uint d = 0; d < headDim; d++) {
+                        score += q_row[d] * k_col[d];
+                    }
+                    score *= scaleFactor;
+                    if (params.useMask != 0 && mask != nullptr) {
+                        score += mask[kvCol];
+                    }
+                }
+
+                S_tile[tr * TILE_Bc + tc] = score;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (tc == 0 && validRow) {
+                    float tile_max = -INFINITY;
+                    for (uint c = 0; c < TILE_Bc; c++) {
+                        tile_max = max(tile_max, S_tile[tr * TILE_Bc + c]);
+                    }
+                    float prev_max = row_max[tr];
+                    float new_max = max(prev_max, tile_max);
+                    float prev_correction = exp(prev_max - new_max);
+                    float new_sum = row_sum[tr] * prev_correction;
+                    for (uint c = 0; c < TILE_Bc; c++) {
+                        float s = S_tile[tr * TILE_Bc + c];
+                        float p = exp(s - new_max);
+                        S_tile[tr * TILE_Bc + c] = p;
+                        new_sum += p;
+                    }
+                    for (uint d = 0; d < headDim; d++) {
+                        O_acc[tr * headDim + d] *= prev_correction;
+                    }
+                    row_max[tr] = new_max;
+                    row_sum[tr] = new_sum;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (validRow) for (uint d = tc; d < headDim; d += TILE_Bc) {
+                    float acc = 0.0;
+                    for (uint c = 0; c < TILE_Bc; c++) {
+                        uint kvPos = kvStart + c;
+                        if (kvPos < kvSeqLen) {
+                            float p = S_tile[tr * TILE_Bc + c];
+                            device const float* v_row = V_base + kvPos * kvStride + kvHead * headDim;
+                            acc += p * v_row[d];
+                        }
+                    }
+                    O_acc[tr * headDim + d] += acc;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+
+            if (validRow) {
+                float inv_sum = 1.0 / (row_sum[tr] + 1e-7);
+                for (uint d = tc; d < headDim; d += TILE_Bc) {
+                    o_row[d] = O_acc[tr * headDim + d] * inv_sum;
+                }
+            }
         }
         """
         
@@ -1219,6 +1359,163 @@ private extension MetalBackend {
     }
 }
 
+// MARK: - Phase 3: FlashAttention (AttentionBackend)
+
+extension MetalBackend {
+
+    /// Fused multi-head attention on GPU using FlashAttention kernel.
+    ///
+    /// Dispatches `flash_attention` which tiles Q×K^T + softmax + V into a
+    /// single pass with O(Br×Bc) threadgroup memory instead of O(seqLen²).
+    /// Supports grouped-query attention (numKVHeads < numHeads).
+    ///
+    /// - Parameters:
+    ///   - query:  [batch?, seqLen, numHeads * headDim]
+    ///   - keys:   [batch?, kvSeqLen, numKVHeads * headDim]
+    ///   - values: [batch?, kvSeqLen, numKVHeads * headDim]
+    ///   - mask:   Optional [kvSeqLen] additive mask (0.0 = attend, -inf = ignore)
+    ///   - headDim:    Dimension per attention head
+    ///   - numHeads:   Number of query heads
+    ///   - numKVHeads: Number of key/value heads
+    /// - Returns: Tensor of same shape as `query`
+    public func attention(
+        query: Tensor<Float>, keys: Tensor<Float>, values: Tensor<Float>,
+        mask: Tensor<Float>?, headDim: Int, numHeads: Int, numKVHeads: Int
+    ) throws -> Tensor<Float> {
+        precondition(numHeads >= numKVHeads && numHeads % numKVHeads == 0,
+                     "numHeads must be a multiple of numKVHeads")
+
+        // ── Parse shapes ──────────────────────────────────────────────────
+        let qDims = query.shape.dimensions
+        let kDims = keys.shape.dimensions
+        let batch: Int
+        let seqLen: Int
+        let kvSeqLen: Int
+
+        if qDims.count == 3 {
+            batch     = qDims[0]
+            seqLen    = qDims[1]
+            kvSeqLen  = kDims[1]
+        } else {
+            batch     = 1
+            seqLen    = qDims[0]
+            kvSeqLen  = kDims[0]
+        }
+
+        let outputElementCount = batch * seqLen * numHeads * headDim
+
+        // ── Upload tensors to GPU ─────────────────────────────────────────
+        let qContiguous = query.isContiguous  ? query  : query.makeContiguousCopy()
+        let kContiguous = keys.isContiguous   ? keys   : keys.makeContiguousCopy()
+        let vContiguous = values.isContiguous ? values : values.makeContiguousCopy()
+
+        let (bufQ, releaseQ) = try createBufferWithTracking(from: qContiguous)
+        let (bufK, releaseK) = try createBufferWithTracking(from: kContiguous)
+        let (bufV, releaseV) = try createBufferWithTracking(from: vContiguous)
+        let bufOut = try createBuffer(elementCount: outputElementCount)
+
+        // Mask buffer (or a tiny dummy — kernel checks useMask flag)
+        let bufMask: MTLBuffer
+        let releaseMask: Bool
+        let useMask: UInt32
+        if let mask = mask {
+            let mContiguous = mask.isContiguous ? mask : mask.makeContiguousCopy()
+            let pair = try createBufferWithTracking(from: mContiguous)
+            bufMask     = pair.0
+            releaseMask = pair.1
+            useMask     = 1
+        } else {
+            // Dummy 1-element buffer; kernel won't read it when useMask == 0
+            bufMask     = try createBuffer(elementCount: 1)
+            releaseMask = true
+            useMask     = 0
+        }
+
+        // ── Params struct (matches AttentionParams in FlashAttention.metal) ──
+        var params = (
+            /* seqLen */    UInt32(seqLen),
+            /* kvSeqLen */  UInt32(kvSeqLen),
+            /* headDim */   UInt32(headDim),
+            /* numHeads */  UInt32(numHeads),
+            /* numKVHeads */ UInt32(numKVHeads),
+            /* batch */     UInt32(batch),
+            /* scale */     Float(1.0 / sqrt(Float(headDim))),
+            /* useMask */   useMask
+        )
+        let paramsBuffer = device.makeBuffer(bytes: &params,
+                                             length: MemoryLayout.size(ofValue: params),
+                                             options: .storageModeShared)!
+
+        // ── Dispatch kernel ───────────────────────────────────────────────
+        // Tile sizes must match the compile-time constants in the Metal kernel.
+        // The kernel uses TILE_Br=32 and TILE_Bc=32.
+        let tileBr: Int = 32
+        let tileBc: Int = 32
+
+        let pipeline = try loadKernel(named: "flash_attention")
+
+        // Verify the device can handle our threadgroup size (Br × Bc threads)
+        let requestedThreads = tileBr * tileBc
+        let maxThreads = pipeline.maxTotalThreadsPerThreadgroup
+        guard requestedThreads <= maxThreads else {
+            throw MetalError.invalidKernelConfiguration(
+                "FlashAttention requires \(requestedThreads) threads/threadgroup but device supports \(maxThreads)")
+        }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.invalidKernelConfiguration("Failed to create command buffer/encoder for FlashAttention")
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(bufQ,          offset: 0, index: 0)
+        encoder.setBuffer(bufK,          offset: 0, index: 1)
+        encoder.setBuffer(bufV,          offset: 0, index: 2)
+        encoder.setBuffer(bufOut,        offset: 0, index: 3)
+        encoder.setBuffer(bufMask,       offset: 0, index: 4)
+        encoder.setBuffer(paramsBuffer,  offset: 0, index: 5)
+
+        // Threadgroup shared memory: S_tile(Br*Bc) + row_max(Br) + row_sum(Br) + O_acc(Br*headDim)
+        let smemFloats = tileBr * tileBc + tileBr + tileBr + tileBr * headDim
+        let smemBytes = smemFloats * MemoryLayout<Float>.stride
+        encoder.setThreadgroupMemoryLength(smemBytes, index: 0)
+
+        // Grid: (numHeads, ceil(seqLen/Br), batch)
+        let threadgroupsPerGrid = MTLSize(
+            width:  numHeads,
+            height: (seqLen + tileBr - 1) / tileBr,
+            depth:  batch
+        )
+        // Threads per threadgroup: (Bc, Br, 1)
+        let threadsPerThreadgroup = MTLSize(width: tileBc, height: tileBr, depth: 1)
+
+        encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if commandBuffer.status == .error {
+            throw MetalError.invalidKernelConfiguration(
+                "FlashAttention GPU error: \(commandBuffer.error?.localizedDescription ?? "unknown")")
+        }
+
+        // ── Release input buffers ─────────────────────────────────────────
+        if releaseQ    { bufferPool.release(bufQ, elementCount: query.shape.count) }
+        if releaseK    { bufferPool.release(bufK, elementCount: keys.shape.count) }
+        if releaseV    { bufferPool.release(bufV, elementCount: values.shape.count) }
+        if releaseMask { bufferPool.release(bufMask, elementCount: mask?.shape.count ?? 1) }
+
+        // ── Wrap output in Tensor ─────────────────────────────────────────
+        let storage = TensorStorage<Float>(gpuBuffer: bufOut, count: outputElementCount)
+        let pool = self.bufferPool
+        storage.releaseCallback = { [weak pool] in
+            pool?.release(bufOut, elementCount: outputElementCount)
+        }
+        return Tensor<Float>(shape: query.shape, storage: storage)
+    }
+}
+
 // Helper extension for making contiguous copies
 extension Tensor<Float> {
     /// Make a contiguous copy of this tensor (public for Metal backend)
@@ -1245,6 +1542,7 @@ extension Tensor<Float> {
         
         return Tensor(shape: TensorShape(shape.dimensions), data: newData)
     }
+
 }
 
 /// Errors specific to Metal operations

@@ -1506,6 +1506,47 @@ extension Tensor where Element == Float {
         }
         return result
     }
+
+    /// Gemma-style RMSNorm: **out = (x / rms(x)) * (1 + weight)**
+    ///
+    /// Gemma stores its RMSNorm gains as an offset from 1.0 (HF reference
+    /// does `x * (1 + weight)`), so the standard `rmsNorm` would produce
+    /// near-zero outputs for a freshly-initialized Gemma norm. Keeps the
+    /// .tbf weights bit-identical to the HF tensors and lets the runtime
+    /// apply the `+1` at compute time.
+    ///
+    /// CPU-only for now; the common path is still `rmsNorm` and Gemma
+    /// traffic is infrequent enough that a Metal variant is not worth
+    /// landing until benchmarks show it matters.
+    ///
+    /// - Parameters:
+    ///   - weight: Per-feature offset γ (same size as last dimension).
+    ///     Actual scale applied is `(1 + weight[i])`.
+    ///   - epsilon: Numerical stability constant (default: 1e-5).
+    /// - Returns: A new tensor of same shape with Gemma-style RMSNorm applied.
+    public func rmsNormWithOffset(weight: Tensor<Float>, epsilon: Float = 1e-5) -> Tensor {
+        precondition(shape.dimensions.count >= 1, "rmsNormWithOffset requires at least 1D tensor")
+        let hiddenDim = shape.dimensions.last!
+        precondition(weight.shape.count == hiddenDim,
+                     "weight size \(weight.shape.count) must equal last dim \(hiddenDim)")
+
+        let numRows = shape.count / hiddenDim
+        var result  = Tensor.zeros(shape: self.shape)
+
+        for row in 0..<numRows {
+            let startIdx = row * hiddenDim
+            var ss: Float = 0.0
+            for i in 0..<hiddenDim {
+                let x = self.data[startIdx + i]
+                ss += x * x
+            }
+            let invRMS = 1.0 / sqrt(ss / Float(hiddenDim) + epsilon)
+            for i in 0..<hiddenDim {
+                result.data[startIdx + i] = self.data[startIdx + i] * invRMS * (1.0 + weight.data[i])
+            }
+        }
+        return result
+    }
 }
 
 // MARK: - GPU Operations (TB-004)
