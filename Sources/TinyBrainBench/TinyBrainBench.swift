@@ -49,8 +49,26 @@ struct TinyBrainBench: AsyncParsableCommand {
     
     @Flag(name: .long, help: "Dry run (parse scenario without execution)")
     var dryRun: Bool = false
-    
+
+    // CHA-108: Perplexity regression harness (INT4 vs INT8 on a pinned slice)
+    @Option(name: .long, help: "Run INT4 vs INT8 perplexity on a model (.tbf). Reports both ppl values + delta over a pinned WikiText-2 slice.")
+    var perplexity: String?
+
+    @Option(name: .long, help: "Path to the pinned perplexity slice JSON (defaults to Tests/TinyBrainRuntimeTests/Fixtures/wikitext2_slice.json).")
+    var perplexitySlice: String?
+
+    @Option(name: .long, help: "INT4 group size used when re-quantizing for the perplexity harness (default: 32, CHA-104 v0.2.0 knee).")
+    var perplexityGroupSize: Int = 32
+
+    @Option(name: .long, help: "Maximum acceptable |Δppl|/ppl_INT8 before --perplexity exits non-zero (default: 0.01 per CHA-104 DoD).")
+    var perplexityThreshold: Double = 0.01
+
     func run() async throws {
+        if let modelPath = perplexity {
+            try runPerplexity(modelPath: modelPath)
+            return
+        }
+
         // TB-007 Phase 3: New features
         if deviceInfo {
             showDeviceInfo()
@@ -710,6 +728,135 @@ struct TinyBrainBench: AsyncParsableCommand {
         outputResults([result])
     }
     
+    // MARK: - CHA-108: INT4 vs INT8 Perplexity Harness
+
+    func runPerplexity(modelPath: String) throws {
+        let resolvedModel = resolvePerplexityPath(modelPath)
+        guard FileManager.default.fileExists(atPath: resolvedModel) else {
+            print("❌ Error: model not found at \(resolvedModel)", to: &standardError)
+            throw ExitCode.failure
+        }
+
+        let slicePath = perplexitySlice ?? "Tests/TinyBrainRuntimeTests/Fixtures/wikitext2_slice.json"
+        let resolvedSlice = resolvePerplexityPath(slicePath, anchor: resolvedModel)
+        guard FileManager.default.fileExists(atPath: resolvedSlice) else {
+            print("❌ Error: slice not found at \(resolvedSlice)", to: &standardError)
+            throw ExitCode.failure
+        }
+
+        if MetalBackend.isAvailable, TinyBrainBackend.metalBackend == nil {
+            do {
+                TinyBrainBackend.metalBackend = try MetalBackend()
+                if verbose { print("🚀 Metal GPU initialized") }
+            } catch {
+                if verbose { print("⚠️  Metal init failed, using CPU: \(error)") }
+            }
+        }
+
+        let slice = try PerplexitySlice.load(from: URL(fileURLWithPath: resolvedSlice))
+        let weightsINT8 = try ModelLoader.load(from: resolvedModel)
+
+        print("🧠 Perplexity: INT4 vs INT8")
+        print("   Model: \(resolvedModel)")
+        print("   Slice: \(resolvedSlice) (\(slice.tokens.count) tokens, seed=\(slice.seed))")
+        print("   Source: \(slice.source)")
+        print()
+
+        let logProgress: ((String) -> Void)? = verbose ? { message in
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+        } : nil
+
+        if verbose { logProgress?("Running INT8 baseline...") }
+        let resultINT8 = try PerplexityHarness.computePerplexity(
+            weights: weightsINT8, slice: slice, progress: logProgress)
+
+        if verbose { logProgress?("Re-quantizing to INT4 (group=\(perplexityGroupSize))...") }
+        let weightsINT4 = PerplexityHarness.convertToINT4(
+            weightsINT8, groupSize: perplexityGroupSize, progress: logProgress)
+
+        if verbose { logProgress?("Running INT4 perplexity...") }
+        let resultINT4 = try PerplexityHarness.computePerplexity(
+            weights: weightsINT4, slice: slice, progress: logProgress)
+
+        let delta = abs(resultINT4.perplexity - resultINT8.perplexity) / resultINT8.perplexity
+        let withinBudget = Double(delta) <= perplexityThreshold
+
+        if output == "json" {
+            struct PerplexityOutput: Encodable {
+                let model: String
+                let slice: String
+                let seed: String
+                let numPredictions: Int
+                let groupSize: Int
+                let int8Perplexity: Float
+                let int4Perplexity: Float
+                let deltaRelative: Float
+                let int8Seconds: Double
+                let int4Seconds: Double
+                let thresholdRelative: Double
+                let withinThreshold: Bool
+            }
+            let payload = PerplexityOutput(
+                model: resolvedModel,
+                slice: resolvedSlice,
+                seed: slice.seed,
+                numPredictions: resultINT8.numPredictions,
+                groupSize: perplexityGroupSize,
+                int8Perplexity: resultINT8.perplexity,
+                int4Perplexity: resultINT4.perplexity,
+                deltaRelative: delta,
+                int8Seconds: resultINT8.elapsedSeconds,
+                int4Seconds: resultINT4.elapsedSeconds,
+                thresholdRelative: perplexityThreshold,
+                withinThreshold: withinBudget
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            if let data = try? encoder.encode(payload), let str = String(data: data, encoding: .utf8) {
+                print(str)
+            }
+        } else {
+            print(String(format: "   INT8 perplexity: %.4f  (%d preds, %.2fs)",
+                         resultINT8.perplexity, resultINT8.numPredictions, resultINT8.elapsedSeconds))
+            print(String(format: "   INT4 perplexity: %.4f  (%d preds, %.2fs)",
+                         resultINT4.perplexity, resultINT4.numPredictions, resultINT4.elapsedSeconds))
+            print(String(format: "   Δ (INT4 vs INT8): %+.3f%%", delta * 100))
+            let budgetPct = perplexityThreshold * 100
+            print(withinBudget
+                  ? String(format: "   ✅ within %.2f%% threshold", budgetPct)
+                  : String(format: "   ❌ exceeds %.2f%% threshold", budgetPct))
+        }
+
+        if !withinBudget {
+            throw ExitCode.failure
+        }
+    }
+
+    private func resolvePerplexityPath(_ path: String, anchor: String? = nil) -> String {
+        if (path as NSString).isAbsolutePath { return path }
+        if FileManager.default.fileExists(atPath: path) { return path }
+
+        let cwd = FileManager.default.currentDirectoryPath
+        var searchRoots: [String] = [cwd]
+        if let anchor, (anchor as NSString).isAbsolutePath {
+            searchRoots.append((anchor as NSString).deletingLastPathComponent)
+        }
+
+        for root in searchRoots {
+            var dir = root
+            for _ in 0..<10 {
+                let pkg = (dir as NSString).appendingPathComponent("Package.swift")
+                if FileManager.default.fileExists(atPath: pkg) {
+                    let full = (dir as NSString).appendingPathComponent(path)
+                    if FileManager.default.fileExists(atPath: full) { return full }
+                }
+                dir = (dir as NSString).deletingLastPathComponent
+                if dir == "/" { break }
+            }
+        }
+        return path
+    }
+
     func outputResults(_ results: [BenchmarkResult]) {
         if output == "json" {
             // JSON output

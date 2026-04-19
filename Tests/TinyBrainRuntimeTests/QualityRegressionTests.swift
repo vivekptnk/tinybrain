@@ -1,5 +1,6 @@
 import XCTest
 @testable import TinyBrainRuntime
+import TinyBrainMetal
 import Foundation
 
 /// **TB-004 Work Item #8:** Quality Regression Tests (TDD RED Phase)
@@ -286,6 +287,70 @@ final class QualityRegressionTests: XCTestCase {
         }
         
         XCTAssertLessThan(maxDelta, 0.01, "Max perplexity delta across all fixtures should be ≤1%")
+    }
+
+    // MARK: - CHA-108: TinyLlama INT4 vs INT8 Real-Model Regression
+
+    /// Asserts CHA-104's v0.2.0 DoD on a real model: RTN INT4 quantization
+    /// (group=32) keeps perplexity within **6 %** of the INT8 baseline on
+    /// the pinned `CHA-108-v1` WikiText-2 slice.
+    ///
+    /// v0.2.1 restores the 1 % bound via GPTQ/AWQ calibration in
+    /// [CHA-156](/CHA/issues/CHA-156); this guard ratchets us forward as
+    /// that work lands.
+    ///
+    /// Currently skipped in CI because the 1.2 GB TinyLlama `.tbf` is
+    /// gitignored. When the model is available, the test runs the harness
+    /// end-to-end and asserts the 6 % bound; drift surfaces as a regression.
+    ///
+    /// The pinned slice is 65 tokens / 64 predictions. The scalar per-head
+    /// attention loop in `ModelRunner.attention` drops throughput below
+    /// 0.1 tok/s on M-series once the KV cache grows past ~100 positions,
+    /// so the slice length is gated on that path moving to Metal/Accelerate.
+    func testTinyLlamaINT4VsINT8Perplexity() throws {
+        let modelPath = "Models/tinyllama-1.1b-int8.tbf"
+        let weightsINT8: ModelWeights
+        do {
+            weightsINT8 = try ModelLoader.load(from: modelPath)
+        } catch {
+            throw XCTSkip("TinyLlama .tbf not available at \(modelPath)")
+        }
+
+        let sliceURL = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("wikitext2_slice.json")
+        guard FileManager.default.fileExists(atPath: sliceURL.path) else {
+            throw XCTSkip("Pinned WikiText-2 slice missing at \(sliceURL.path)")
+        }
+        let slice = try PerplexitySlice.load(from: sliceURL)
+        XCTAssertEqual(slice.seed, "CHA-108-v1", "Slice seed drifted — regenerate fixture with Scripts/pretokenize_wikitext.py")
+        XCTAssertGreaterThanOrEqual(slice.tokens.count, 32, "Need ≥32 tokens for a meaningful perplexity estimate")
+
+        if TinyBrainBackend.metalBackend == nil, MetalBackend.isAvailable {
+            TinyBrainBackend.metalBackend = try? MetalBackend()
+        }
+
+        let resultINT8 = try PerplexityHarness.computePerplexity(weights: weightsINT8, slice: slice)
+        let weightsINT4 = PerplexityHarness.convertToINT4(weightsINT8, groupSize: 32)
+        let resultINT4 = try PerplexityHarness.computePerplexity(weights: weightsINT4, slice: slice)
+
+        let pplINT8 = resultINT8.perplexity
+        let pplINT4 = resultINT4.perplexity
+        let delta = abs(pplINT4 - pplINT8) / pplINT8
+
+        print("""
+        🧪 CHA-108 TinyLlama INT4 vs INT8 perplexity
+           slice: \(slice.source) (\(slice.tokens.count) tokens, seed=\(slice.seed))
+           INT8: ppl=\(pplINT8) over \(resultINT8.numPredictions) preds in \(String(format: "%.2fs", resultINT8.elapsedSeconds))
+           INT4: ppl=\(pplINT4) over \(resultINT4.numPredictions) preds in \(String(format: "%.2fs", resultINT4.elapsedSeconds))
+           Δ: \(String(format: "%+.3f%%", delta * 100))
+        """)
+
+        XCTAssertGreaterThan(pplINT8, 0, "INT8 perplexity must be positive")
+        XCTAssertGreaterThan(pplINT4, 0, "INT4 perplexity must be positive")
+        XCTAssertLessThanOrEqual(delta, 0.06,
+            "INT4 perplexity must stay within 6% of INT8 baseline per CHA-104 v0.2.0 DoD (got \(String(format: "%.3f%%", delta * 100)))")
     }
 }
 

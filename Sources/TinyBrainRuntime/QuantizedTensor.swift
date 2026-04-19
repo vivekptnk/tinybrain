@@ -352,9 +352,11 @@ extension Tensor where Element == Float {
     ///
     /// - Parameters:
     ///   - mode: Quantization strategy (default: .perChannel for INT8)
-    ///   - groupSize: Group size for INT4 per-group quantization (default: 128)
+    ///   - groupSize: Group size for INT4 per-group quantization (default: 32,
+    ///     CHA-104 v0.2.0 knee — keeps ppl within 6 % of INT8 baseline on the
+    ///     CHA-108 TinyLlama slice; see `docs/benchmarking.md`).
     /// - Returns: QuantizedTensor with quantized data and scales
-    public func quantize(mode: QuantizationMode = .perChannel, groupSize: Int = 128) -> QuantizedTensor {
+    public func quantize(mode: QuantizationMode = .perChannel, groupSize: Int = 32) -> QuantizedTensor {
         switch mode {
         case .perChannel:
             return quantizePerChannel()
@@ -495,9 +497,9 @@ extension Tensor where Element == Float {
     /// **Overhead:** One FP32 scale + one INT4 zero point per group
     ///   For group_size=128: 5 bytes / 128 values = ~4% overhead
     ///
-    /// - Parameter groupSize: Number of elements per quantization group (default: 128)
+    /// - Parameter groupSize: Number of elements per quantization group (default: 32)
     /// - Returns: QuantizedTensor with packed INT4 data
-    private func quantizeINT4(groupSize: Int = 128) -> QuantizedTensor {
+    private func quantizeINT4(groupSize: Int = 32) -> QuantizedTensor {
         let totalElements = shape.count
         let numGroups = (totalElements + groupSize - 1) / groupSize
 

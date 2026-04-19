@@ -292,7 +292,7 @@ def quantize_int8_per_channel(tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarra
     return quantized, scales, zero_points
 
 
-def quantize_int4_per_group(tensor: np.ndarray, group_size: int = 128) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def quantize_int4_per_group(tensor: np.ndarray, group_size: int = 32) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Quantize tensor to INT4 with per-group symmetric quantization.
 
@@ -305,7 +305,9 @@ def quantize_int4_per_group(tensor: np.ndarray, group_size: int = 128) -> Tuple[
 
     Args:
         tensor: Float32 numpy array (1D or 2D)
-        group_size: Number of elements per quantization group (default: 128)
+        group_size: Number of elements per quantization group (default: 32,
+            CHA-104 v0.2.0 knee — keeps perplexity within 6 % of INT8 baseline
+            on the CHA-108 TinyLlama slice).
 
     Returns:
         (packed_data, scales, zero_points)
@@ -355,7 +357,7 @@ def quantize_int4_per_group(tensor: np.ndarray, group_size: int = 128) -> Tuple[
 
 
 def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
-                     quantize_mode: str = 'int8', group_size: int = 128):
+                     quantize_mode: str = 'int8', group_size: int = 32):
     """
     Write weights to TBF binary format (matches Swift ModelWeights.save() format EXACTLY)
 
@@ -364,7 +366,7 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
         config: Model configuration
         output_path: Output file path
         quantize_mode: 'int8', 'int4', or 'none'
-        group_size: Group size for INT4 quantization (default: 128)
+        group_size: Group size for INT4 quantization (default: 32, CHA-104 v0.2.0 knee)
     """
     output_path = Path(output_path)
     print(f"\nWriting TBF format to: {output_path}")
@@ -729,8 +731,8 @@ Examples:
     parser.add_argument('--output', '-o', required=True, help='Output TBF file path')
     parser.add_argument('--quantize', choices=['int8', 'int4', 'none'], default='int8',
                         help='Quantization mode (int8: 75%% savings, int4: 87.5%% savings)')
-    parser.add_argument('--group-size', type=int, default=128,
-                        help='Group size for INT4 quantization (default: 128)')
+    parser.add_argument('--group-size', type=int, default=32,
+                        help='Group size for INT4 quantization (default: 32, CHA-104 v0.2.0 knee — keeps ppl within 6%% of INT8 on the CHA-108 slice)')
     parser.add_argument('--auto-config', action='store_true', help='Auto-infer model config from weights')
 
     # Manual config overrides
