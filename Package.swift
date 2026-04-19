@@ -37,6 +37,15 @@ let package = Package(
             name: "TinyBrainProximaKit",
             targets: ["TinyBrainProximaKit"]
         ),
+        // Cartographer bridge (optional — conforms to Cartographer's
+        // SmartAnnotationService protocol). Requires a sibling Cartographer
+        // checkout under Dependencies/cartographer until Cartographer v0.2
+        // publishes the protocol branch to origin/main (see
+        // Sources/TinyBrainCartographerBridge/README.md).
+        .library(
+            name: "TinyBrainCartographerBridge",
+            targets: ["TinyBrainCartographerBridge"]
+        ),
         // Demo chat app
         .executable(
             name: "tinybrain-chat",
@@ -54,7 +63,11 @@ let package = Package(
         // YAML parsing for benchmark scenarios
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
         // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge)
-        .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main")
+        .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main"),
+        // Cartographer — map annotation engine (used by TinyBrainCartographerBridge).
+        // Local path until Cartographer v0.2 ships the SmartAnnotationService
+        // protocol to origin/main. See CHA-153 plan / INTEGRATION-TINYBRAIN.md.
+        .package(path: "Dependencies/cartographer")
     ],
     targets: [
         // MARK: - Umbrella Module
@@ -143,6 +156,26 @@ let package = Package(
             name: "TinyBrainProximaKitTests",
             dependencies: ["TinyBrainProximaKit"],
             path: "Tests/TinyBrainProximaKitTests"
+        ),
+
+        // MARK: - Cartographer Bridge
+        .target(
+            name: "TinyBrainCartographerBridge",
+            dependencies: [
+                "TinyBrainRuntime",
+                "TinyBrainTokenizer",
+                .product(name: "Cartographer", package: "cartographer")
+            ],
+            path: "Sources/TinyBrainCartographerBridge",
+            exclude: ["README.md"]
+        ),
+        .testTarget(
+            name: "TinyBrainCartographerBridgeTests",
+            dependencies: [
+                "TinyBrainCartographerBridge",
+                .product(name: "Cartographer", package: "cartographer")
+            ],
+            path: "Tests/TinyBrainCartographerBridgeTests"
         ),
 
         // MARK: - Chat Demo Executable
