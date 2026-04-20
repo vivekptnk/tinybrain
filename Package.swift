@@ -65,9 +65,14 @@ let package = Package(
         // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge)
         .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main"),
         // Cartographer — map annotation engine (used by TinyBrainCartographerBridge).
-        // Local path until Cartographer v0.2 ships the SmartAnnotationService
-        // protocol to origin/main. See CHA-153 plan / INTEGRATION-TINYBRAIN.md.
-        .package(path: "Dependencies/cartographer")
+        // Pinned to the commit on feat/cg-003-demo-app-wiring that introduces
+        // SmartAnnotationService. Cartographer origin/main (901feb8e) does not
+        // yet include this protocol; re-pin to a merge commit once the branch
+        // lands on main. See CHA-175 / INTEGRATION-TINYBRAIN.md.
+        .package(
+            url: "https://github.com/vivekptnk/cartographer",
+            revision: "e126f7cdfadb858a2e985ba86008a467ff14fc42"
+        )
     ],
     targets: [
         // MARK: - Umbrella Module
