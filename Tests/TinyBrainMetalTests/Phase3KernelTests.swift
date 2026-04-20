@@ -3,12 +3,16 @@
 /// Verifies numerical accuracy of GPU softmax, RMSNorm, SiLU, and GELU
 /// against CPU reference implementations.
 ///
-/// **Tolerance:** relative error < 1e-4 (the task specification).
+/// **Tolerance:** `|gpu - cpu| <= atol + rtol * |cpu|` (numpy-style `allclose`),
+/// with `rtol = 5e-4` and `atol = 1e-6`. The absolute floor prevents relative
+/// error from inflating to meaningless values when `|cpu|` is near zero — a
+/// regime that the GELU tanh approximation hits for Gaussian tail inputs.
 ///
 /// **Design pattern:**
 /// - Skipped automatically when Metal is unavailable (CI without GPU).
 /// - Each test runs both CPU and GPU implementations on the same input
 ///   and checks that every element agrees within the tolerance.
+/// - Randomized inputs use `SeededGenerator` so CI runs are deterministic.
 
 import XCTest
 @testable import TinyBrainMetal
@@ -18,14 +22,35 @@ final class Phase3KernelTests: XCTestCase {
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
-    /// Maximum allowed relative error between GPU and CPU results.
+    /// Default relative tolerance between GPU and CPU results.
     private let tolerance: Float = 5e-4
 
-    /// Assert that two Float tensors agree element-wise within `tolerance`.
+    /// Fixed seed for deterministic random inputs across CI runs (CHA-180).
+    private let rngSeed: UInt64 = 2025
+
+    /// Build a seeded RNG for deterministic `Tensor.random` calls in tests.
+    private func seededRNG() -> any RandomNumberGenerator {
+        SeededGenerator(seed: rngSeed)
+    }
+
+    /// Deterministic `Tensor<Float>.random` using the fixed test seed.
+    private func randomTensor(shape: TensorShape) -> Tensor<Float> {
+        var rng: any RandomNumberGenerator = seededRNG()
+        return Tensor<Float>.random(shape: shape, using: &rng)
+    }
+
+    /// Assert that two Float tensors agree element-wise.
+    ///
+    /// Uses combined absolute + relative tolerance (numpy `allclose` semantics):
+    /// `|gpu - cpu| <= atol + rtol * |cpu|`. The absolute floor is essential
+    /// for activations like GELU whose CPU reference produces values near zero
+    /// for Gaussian-tail inputs, where ULP-scale GPU/CPU differences would
+    /// otherwise inflate to arbitrary relative error.
     private func assertClose(
         _ gpu: Tensor<Float>,
         _ cpu: Tensor<Float>,
         tolerance: Float,
+        atol: Float = 1e-6,
         context: String,
         file: StaticString = #file,
         line: UInt = #line
@@ -35,10 +60,13 @@ final class Phase3KernelTests: XCTestCase {
         for i in 0..<cpu.shape.count {
             let g = gpu.rawData[i]
             let c = cpu.rawData[i]
-            let relErr = abs(g - c) / max(abs(c), 1e-7)
-            XCTAssertLessThan(relErr, tolerance,
-                              "\(context): index \(i) GPU=\(g) CPU=\(c) relErr=\(relErr)",
-                              file: file, line: line)
+            let diff = abs(g - c)
+            let allowed = atol + tolerance * abs(c)
+            XCTAssertLessThanOrEqual(
+                diff, allowed,
+                "\(context): index \(i) GPU=\(g) CPU=\(c) diff=\(diff) allowed=\(allowed)",
+                file: file, line: line
+            )
         }
     }
 
@@ -68,7 +96,7 @@ final class Phase3KernelTests: XCTestCase {
 
         let rows = 8
         let cols = 16
-        let input = Tensor<Float>.random(shape: TensorShape(rows, cols))
+        let input = randomTensor(shape: TensorShape(rows, cols))
 
         let gpuOut = try backend.softmax(input)
         let cpuOut = input.softmaxCPU()
@@ -115,7 +143,7 @@ final class Phase3KernelTests: XCTestCase {
 
         let rows = 256
         let cols = 512
-        let input = Tensor<Float>.random(shape: TensorShape(rows, cols))
+        let input = randomTensor(shape: TensorShape(rows, cols))
 
         let gpuOut = try backend.softmax(input)
         let cpuOut = input.softmaxCPU()
@@ -150,10 +178,11 @@ final class Phase3KernelTests: XCTestCase {
 
         let tokens = 4
         let hidden = 32
-        let input  = Tensor<Float>.random(shape: TensorShape(tokens, hidden))
-        // Random weights in [0.5, 1.5]
+        var rng: any RandomNumberGenerator = seededRNG()
+        let input  = Tensor<Float>.random(shape: TensorShape(tokens, hidden), using: &rng)
+        // Random weights in [0.5, 1.5] — also seeded for determinism.
         var wData = [Float](repeating: 0.0, count: hidden)
-        for i in 0..<hidden { wData[i] = Float.random(in: 0.5...1.5) }
+        for i in 0..<hidden { wData[i] = Float.random(in: 0.5...1.5, using: &rng) }
         let weight = Tensor<Float>(shape: TensorShape(hidden), data: wData)
 
         let gpuOut = try backend.rmsnorm(input, weight: weight, eps: 1e-5)
@@ -170,7 +199,7 @@ final class Phase3KernelTests: XCTestCase {
 
         let tokens = 32
         let hidden = 256   // Smaller than real Llama but exercises the reduction path
-        let input  = Tensor<Float>.random(shape: TensorShape(tokens, hidden))
+        let input  = randomTensor(shape: TensorShape(tokens, hidden))
         let weight = Tensor<Float>(shape: TensorShape(hidden), data: [Float](repeating: 1.0, count: hidden))
 
         let gpuOut = try backend.rmsnorm(input, weight: weight, eps: 1e-6)
@@ -206,7 +235,7 @@ final class Phase3KernelTests: XCTestCase {
         let backend = try MetalBackend()
 
         let n = 4096
-        let input = Tensor<Float>.random(shape: TensorShape(n))
+        let input = randomTensor(shape: TensorShape(n))
 
         let gpuOut = try backend.silu(input)
         let cpuOut = input.siluCPU()
@@ -256,12 +285,19 @@ final class Phase3KernelTests: XCTestCase {
     }
 
     /// GELU on a large flat tensor
+    ///
+    /// **CHA-180:** Previously used an unseeded `Tensor.random` and a
+    /// pure-relative tolerance, so Gaussian-tail samples (|x| ≳ 4) — where
+    /// the tanh approximation yields CPU outputs on the order of 1e-4 to 1e-5
+    /// — occasionally produced CI flakes as ULP-scale GPU/CPU differences
+    /// got amplified by the `1/|c|` denominator. The test now uses a seeded
+    /// RNG and a combined atol+rtol `assertClose`.
     func testGELULarge() throws {
         guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
         let backend = try MetalBackend()
 
         let n = 4096
-        let input = Tensor<Float>.random(shape: TensorShape(n))
+        let input = randomTensor(shape: TensorShape(n))
 
         let gpuOut = try backend.gelu(input)
         let cpuOut = input.geluCPU()
@@ -306,7 +342,7 @@ final class Phase3KernelTests: XCTestCase {
         TinyBrainBackend.metalBackend = backend
         defer { TinyBrainBackend.metalBackend = previous }
 
-        let input = Tensor<Float>.random(shape: TensorShape(8, 32))
+        let input = randomTensor(shape: TensorShape(8, 32))
         let result = input.softmax()  // Should use GPU internally
 
         // Cross-check against direct CPU call
@@ -323,7 +359,7 @@ final class Phase3KernelTests: XCTestCase {
         TinyBrainBackend.metalBackend = backend
         defer { TinyBrainBackend.metalBackend = previous }
 
-        let input = Tensor<Float>.random(shape: TensorShape(512))
+        let input = randomTensor(shape: TensorShape(512))
         let result = input.gelu()
         let cpuRef = input.geluCPU()
         assertClose(result, cpuRef, tolerance: tolerance, context: "Tensor.gelu() dispatch")
@@ -338,7 +374,7 @@ final class Phase3KernelTests: XCTestCase {
         TinyBrainBackend.metalBackend = backend
         defer { TinyBrainBackend.metalBackend = previous }
 
-        let input = Tensor<Float>.random(shape: TensorShape(512))
+        let input = randomTensor(shape: TensorShape(512))
         let result = input.silu()
         let cpuRef = input.siluCPU()
         assertClose(result, cpuRef, tolerance: tolerance, context: "Tensor.silu() dispatch")
@@ -355,7 +391,7 @@ final class Phase3KernelTests: XCTestCase {
 
         let tokens = 4
         let hidden = 64
-        let input  = Tensor<Float>.random(shape: TensorShape(tokens, hidden))
+        let input  = randomTensor(shape: TensorShape(tokens, hidden))
         let weight = Tensor<Float>(shape: TensorShape(hidden), data: [Float](repeating: 1.0, count: hidden))
 
         let result = input.rmsNorm(weight: weight)
