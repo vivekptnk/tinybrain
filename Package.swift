@@ -37,15 +37,11 @@ let package = Package(
             name: "TinyBrainProximaKit",
             targets: ["TinyBrainProximaKit"]
         ),
-        // Cartographer bridge (optional — conforms to Cartographer's
-        // SmartAnnotationService protocol). Requires a sibling Cartographer
-        // checkout under Dependencies/cartographer until Cartographer v0.2
-        // publishes the protocol branch to origin/main (see
-        // Sources/TinyBrainCartographerBridge/README.md).
-        .library(
-            name: "TinyBrainCartographerBridge",
-            targets: ["TinyBrainCartographerBridge"]
-        ),
+        // TinyBrainCartographerBridge product removed from the default build
+        // because the upstream `vivekptnk/cartographer` repo is private and
+        // CI has no credentials to fetch it. Source files remain in
+        // `Sources/TinyBrainCartographerBridge/` and will be re-enabled once
+        // cartographer is public OR CI auth is provisioned (tracked in CHA-177).
         // Demo chat app
         .executable(
             name: "tinybrain-chat",
@@ -63,16 +59,10 @@ let package = Package(
         // YAML parsing for benchmark scenarios
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
         // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge)
-        .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main"),
-        // Cartographer — map annotation engine (used by TinyBrainCartographerBridge).
-        // Pinned to the commit on feat/cg-003-demo-app-wiring that introduces
-        // SmartAnnotationService. Cartographer origin/main (901feb8e) does not
-        // yet include this protocol; re-pin to a merge commit once the branch
-        // lands on main. See CHA-175 / INTEGRATION-TINYBRAIN.md.
-        .package(
-            url: "https://github.com/vivekptnk/cartographer",
-            revision: "e126f7cdfadb858a2e985ba86008a467ff14fc42"
-        )
+        .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main")
+        // Cartographer dep removed — repo is private and CI can't auth.
+        // Re-add via pinned git URL once CHA-177 provisions CI creds or
+        // the repo is made public.
     ],
     targets: [
         // MARK: - Umbrella Module
@@ -163,25 +153,10 @@ let package = Package(
             path: "Tests/TinyBrainProximaKitTests"
         ),
 
-        // MARK: - Cartographer Bridge
-        .target(
-            name: "TinyBrainCartographerBridge",
-            dependencies: [
-                "TinyBrainRuntime",
-                "TinyBrainTokenizer",
-                .product(name: "Cartographer", package: "cartographer")
-            ],
-            path: "Sources/TinyBrainCartographerBridge",
-            exclude: ["README.md"]
-        ),
-        .testTarget(
-            name: "TinyBrainCartographerBridgeTests",
-            dependencies: [
-                "TinyBrainCartographerBridge",
-                .product(name: "Cartographer", package: "cartographer")
-            ],
-            path: "Tests/TinyBrainCartographerBridgeTests"
-        ),
+        // MARK: - Cartographer Bridge (disabled — see CHA-177)
+        // Target declarations removed to unbreak CI while cartographer repo
+        // is private. Re-enable by restoring this block and the matching
+        // dependency/product entries above.
 
         // MARK: - Chat Demo Executable
         .executableTarget(
