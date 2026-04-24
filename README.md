@@ -260,6 +260,20 @@ Measured on MacBook Pro M4 Max:
 
 ---
 
+## Roadmap
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full versioned milestone plan. Quick summary:
+
+| Version | Status | Highlights |
+|---------|--------|-----------|
+| **v0.2.0** | In progress | INT4 quantization (group=32), Flash Attention, speculative decoding, Gemma/Phi-2 coverage, ProximaKit + Cartographer bridges |
+| **v0.2.1** | Planned | GPTQ/AWQ for ≤1% INT4 perplexity delta, binary SentencePiece tokenizer |
+| **v0.3.0** | Planned | iOS 17 deployment, Mistral/Llama-3 support, 8K context, TikToken adapter |
+
+The [INT4 1% precision target](docs/ROADMAP.md#v021--int4-precision--tokenizer-completeness) (GPTQ/AWQ) was deliberately deferred from v0.2.0 — the 6% baseline at group=32 ships first.
+
+---
+
 ## Supported Models
 
 TinyBrain works with any HuggingFace model that has a `tokenizer.json`:
@@ -268,10 +282,24 @@ TinyBrain works with any HuggingFace model that has a `tokenizer.json`:
 |-------|-----------|--------|
 | TinyLlama | 1.1B | Tested and working |
 | Llama 2/3 | Various | Compatible (same format) |
-| Phi (Microsoft) | Various | Compatible |
-| Gemma (Google) | Various | Compatible |
+| Phi-2 (Microsoft) | 2.7B | Compatible via `tokenizer.json` |
+| Gemma (Google) | 2B+ | Compatible via `tokenizer.json` |
+
+Binary SentencePiece (native Gemma/Mistral checkpoints) is planned for v0.2.1. For now, use the HuggingFace `tokenizer.json` conversion path.
 
 To add a new model, just download it and run the converter script. No code changes needed.
+
+---
+
+## Requirements
+
+- **Hardware:** Mac with Apple Silicon (M1 or newer)
+- **OS:** macOS 14 (Sonoma) or later
+- **Xcode:** 16 or later — free from the App Store
+- **Swift:** 5.10 or later (bundled with Xcode 16)
+- **Python:** 3.11+ — only needed for model conversion, not for building or running TinyBrain
+
+GPU acceleration uses Metal and is automatic. TinyBrain falls back to CPU (Accelerate/BLAS) on any Mac, including Intel, but performance is significantly lower.
 
 ---
 
