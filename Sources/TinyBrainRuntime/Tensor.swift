@@ -1447,6 +1447,56 @@ extension Tensor where Element == Float {
         return result
     }
 
+    /// Apply Layer Normalization with learned affine transform.
+    ///
+    /// Formula: `γ * (x − mean) / sqrt(var + ε) + β`
+    ///
+    /// Used by Phi-2 (LayerNorm, not RMSNorm). The bare `layerNorm()` method
+    /// applies only the normalization step; this variant applies the per-feature
+    /// learned scale (weight γ) and optional shift (bias β) on top.
+    ///
+    /// - Parameters:
+    ///   - weight: Per-feature scale γ, shape `[lastDim]`
+    ///   - bias: Per-feature shift β, shape `[lastDim]`. Pass `nil` to omit.
+    ///   - epsilon: Numerical stability constant (default: 1e-5)
+    /// - Returns: A new tensor of same shape with affine LayerNorm applied per row.
+    public func layerNorm(weight: Tensor<Float>, bias: Tensor<Float>? = nil, epsilon: Float = 1e-5) -> Tensor {
+        precondition(shape.dimensions.count >= 1, "layerNorm requires at least 1D tensor")
+        let hiddenDim = shape.dimensions.last!
+        precondition(weight.shape.count == hiddenDim,
+                     "weight size \(weight.shape.count) must equal last dim \(hiddenDim)")
+        if let bias = bias {
+            precondition(bias.shape.count == hiddenDim,
+                         "bias size \(bias.shape.count) must equal last dim \(hiddenDim)")
+        }
+
+        let numRows = shape.count / hiddenDim
+        var result = Tensor.zeros(shape: self.shape)
+
+        for row in 0..<numRows {
+            let startIdx = row * hiddenDim
+            // Mean
+            var mean: Float = 0.0
+            for i in 0..<hiddenDim { mean += self.data[startIdx + i] }
+            mean /= Float(hiddenDim)
+            // Variance
+            var variance: Float = 0.0
+            for i in 0..<hiddenDim {
+                let diff = self.data[startIdx + i] - mean
+                variance += diff * diff
+            }
+            variance /= Float(hiddenDim)
+            let invStd = 1.0 / sqrt(variance + epsilon)
+            // Normalize, scale, shift
+            for i in 0..<hiddenDim {
+                let normalized = (self.data[startIdx + i] - mean) * invStd
+                let scaled = normalized * weight.data[i]
+                result.data[startIdx + i] = bias != nil ? scaled + bias!.data[i] : scaled
+            }
+        }
+        return result
+    }
+
     /// Apply RMSNorm (Root Mean Square Layer Normalization)
     ///
     /// Simpler than LayerNorm: no mean subtraction, only RMS-based scaling.

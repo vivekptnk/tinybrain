@@ -71,7 +71,7 @@ let package = Package(
         // upstream (CHA-175 follow-up for cto-cartographer).
         .package(
             url: "https://github.com/vivekptnk/cartographer.git",
-            revision: "e126f7cdfadb858a2e985ba86008a467ff14fc42"
+            revision: "1b150485860679e227bd37799e5f3357dcc3a7fe"
         )
     ],
     targets: [

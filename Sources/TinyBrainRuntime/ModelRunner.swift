@@ -48,9 +48,16 @@ public struct ModelConfig: Codable {
 
     /// Model architecture family. Determines runtime-visible divergences
     /// from the default LLaMA-style path (e.g. Gemma's `RMSNorm * (1 + w)`
-    /// and `sqrt(hiddenDim)` embedding scale). Decoded as "llama" for
-    /// older .tbf files that omit the field.
+    /// and `sqrt(hiddenDim)` embedding scale, or Phi-2's LayerNorm and
+    /// parallel residual). Decoded as "llama" for older .tbf files that
+    /// omit the field.
     public let architecture: String
+
+    /// Fraction of head dimensions that receive RoPE rotation.
+    /// 1.0 = full RoPE (LLaMA, Gemma). 0.4 = Phi-2 partial RoPE.
+    /// Stored in the TBF header so the runtime can compute `rotaryDims`
+    /// without knowing the architecture.
+    public let partialRotaryFactor: Float
 
     /// Computed: KV dimension (hiddenDim / numHeads * numKVHeads)
     public var kvDim: Int {
@@ -62,25 +69,41 @@ public struct ModelConfig: Codable {
         return hiddenDim / numHeads
     }
 
+    /// Computed: number of head dimensions that receive RoPE rotation.
+    public var rotaryDims: Int {
+        return Int(Float(headDim) * partialRotaryFactor)
+    }
+
     /// Computed: true when architecture needs Gemma's post-embed scale and
     /// RMSNorm offset semantics.
     public var isGemmaStyle: Bool {
         return architecture == "gemma"
     }
 
-    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int, maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil, architecture: String = "llama") {
+    /// Computed: true when architecture uses Phi-2 semantics:
+    /// LayerNorm (not RMSNorm), parallel attention+MLP residual, partial RoPE,
+    /// and attention/FFN bias terms.
+    public var isPhiStyle: Bool {
+        return architecture == "phi"
+    }
+
+    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int,
+                maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil,
+                architecture: String = "llama", partialRotaryFactor: Float = 1.0) {
         self.numLayers = numLayers
         self.hiddenDim = hiddenDim
         self.numHeads = numHeads
-        self.numKVHeads = numKVHeads ?? numHeads  // Default to MHA if not specified
+        self.numKVHeads = numKVHeads ?? numHeads
         self.vocabSize = vocabSize
         self.maxSeqLen = maxSeqLen
         self.intermediateDim = intermediateDim ?? (4 * hiddenDim)
         self.architecture = architecture
+        self.partialRotaryFactor = partialRotaryFactor
     }
 
     enum CodingKeys: String, CodingKey {
-        case numLayers, hiddenDim, numHeads, numKVHeads, vocabSize, maxSeqLen, intermediateDim, architecture
+        case numLayers, hiddenDim, numHeads, numKVHeads, vocabSize, maxSeqLen,
+             intermediateDim, architecture, partialRotaryFactor
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,6 +116,7 @@ public struct ModelConfig: Codable {
         maxSeqLen = try container.decode(Int.self, forKey: .maxSeqLen)
         intermediateDim = try container.decodeIfPresent(Int.self, forKey: .intermediateDim) ?? (4 * hiddenDim)
         architecture = try container.decodeIfPresent(String.self, forKey: .architecture) ?? "llama"
+        partialRotaryFactor = try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 1.0
     }
 }
 
@@ -155,11 +179,16 @@ public final class ModelRunner {
             hiddenRow = applyLayer(hiddenRow, layerWeights: layerWeights, layerIndex: layerIndex)
         }
 
-        // 3. Final RMSNorm before output projection (LLaMA-style; Gemma adds +1 offset)
+        // 3. Final norm before output projection.
+        // LLaMA: RMSNorm  |  Gemma: RMSNorm*(1+w)  |  Phi-2: LayerNorm with bias
         if let finalNorm = weights.finalNormWeights {
-            hiddenRow = config.isGemmaStyle
-                ? hiddenRow.rmsNormWithOffset(weight: finalNorm)
-                : hiddenRow.rmsNorm(weight: finalNorm)
+            if config.isPhiStyle {
+                hiddenRow = hiddenRow.layerNorm(weight: finalNorm, bias: weights.finalNormBias)
+            } else if config.isGemmaStyle {
+                hiddenRow = hiddenRow.rmsNormWithOffset(weight: finalNorm)
+            } else {
+                hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+            }
         }
 
         // X-Ray hook: final hidden state (post-norm, pre-projection — the embedding vector)
@@ -302,11 +331,15 @@ public final class ModelRunner {
             currentPosition += 1
         }
 
-        // Final RMSNorm — this is the embedding representation
+        // Final norm — this is the embedding representation
         if let finalNorm = weights.finalNormWeights {
-            hiddenRow = config.isGemmaStyle
-                ? hiddenRow.rmsNormWithOffset(weight: finalNorm)
-                : hiddenRow.rmsNorm(weight: finalNorm)
+            if config.isPhiStyle {
+                hiddenRow = hiddenRow.layerNorm(weight: finalNorm, bias: weights.finalNormBias)
+            } else if config.isGemmaStyle {
+                hiddenRow = hiddenRow.rmsNormWithOffset(weight: finalNorm)
+            } else {
+                hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+            }
         }
 
         return hiddenRow
@@ -366,7 +399,25 @@ private extension ModelRunner {
             position: currentPosition
         )
 
-        // Pre-attention RMSNorm (LLaMA-style pre-norm architecture; Gemma adds +1 offset)
+        if config.isPhiStyle {
+            // Phi-2: single LayerNorm, then attention and MLP computed in parallel
+            // from the same normalized input. Both outputs added to residual together.
+            let normed: Tensor<Float>
+            if let w = layerWeights.inputNormWeights {
+                normed = hiddenRow.layerNorm(weight: w, bias: layerWeights.inputNormBias)
+            } else {
+                normed = hiddenRow
+            }
+            let attnOut = attention(hiddenRow: normed, layerWeights: layerWeights.attention,
+                                    layerIndex: layerIndex)
+            let ffnUp = layerWeights.feedForward.up.apply(toRow: normed).gelu()
+            let ffnOut = layerWeights.feedForward.down.apply(toRow: ffnUp)
+            return hiddenRow + attnOut + ffnOut
+        }
+
+        // Standard sequential pre-norm (LLaMA / Gemma)
+
+        // Pre-attention norm
         let normedForAttn: Tensor<Float>
         if let normWeights = layerWeights.inputNormWeights {
             normedForAttn = config.isGemmaStyle
@@ -381,7 +432,7 @@ private extension ModelRunner {
                                         layerIndex: layerIndex)
         let residual1 = hiddenRow + attentionOutput
 
-        // Pre-FFN RMSNorm (Gemma adds +1 offset)
+        // Pre-FFN norm
         let normedForFFN: Tensor<Float>
         if let normWeights = layerWeights.postAttentionNormWeights {
             normedForFFN = config.isGemmaStyle
@@ -407,14 +458,24 @@ private extension ModelRunner {
         return residual1 + ffnOutput
     }
 
-    /// Apply Rotary Position Embeddings (RoPE) to a vector of shape [dim]
-    /// where dim = numHeads * headDim. RoPE is applied per-head.
-    func applyRoPE(_ vec: [Float], headDim: Int, numHeads: Int, position: Int) -> [Float] {
+    /// Apply Rotary Position Embeddings (RoPE) to a vector of shape [numHeads * headDim].
+    ///
+    /// - Parameters:
+    ///   - vec: Flat vector of shape `[numHeads * headDim]`.
+    ///   - headDim: Size of each attention head.
+    ///   - numHeads: Number of heads.
+    ///   - position: Token position in the sequence.
+    ///   - rotaryDims: How many dims per head to rotate (default = headDim for full RoPE).
+    ///     Phi-2 uses `Int(headDim * 0.4)`; remaining dims are left unchanged.
+    func applyRoPE(_ vec: [Float], headDim: Int, numHeads: Int, position: Int,
+                   rotaryDims: Int? = nil) -> [Float] {
         var result = vec
+        let rDims = rotaryDims ?? headDim
         for head in 0..<numHeads {
             let offset = head * headDim
-            for i in stride(from: 0, to: headDim, by: 2) {
-                let freqIdx = Float(i) / Float(headDim)
+            for i in stride(from: 0, to: rDims, by: 2) {
+                // Frequencies computed over the rotary subspace (rDims), not full headDim.
+                let freqIdx = Float(i) / Float(rDims)
                 let theta = pow(10000.0, -freqIdx)
                 let angle = Float(position) * theta
 
@@ -427,6 +488,7 @@ private extension ModelRunner {
                 result[offset + i]     = x0 * cosA - x1 * sinA
                 result[offset + i + 1] = x0 * sinA + x1 * cosA
             }
+            // Dims rDims..<headDim remain unchanged in `result` (already copied from `vec`).
         }
         return result
     }
@@ -438,14 +500,17 @@ private extension ModelRunner {
         let keyRow = layerWeights.key.apply(toRow: hiddenRow)
         let valueRow = layerWeights.value.apply(toRow: hiddenRow)
 
-        // Apply RoPE to query and key (not value)
+        // Apply RoPE to query and key (not value). Phi-2 uses partial RoPE.
         let headDim = config.headDim
+        let rotaryDims = config.rotaryDims  // = headDim for full RoPE (LLaMA/Gemma)
         let queryData = applyRoPE(query.squeezedRowVector().data, headDim: headDim,
-                                   numHeads: config.numHeads, position: currentPosition)
+                                   numHeads: config.numHeads, position: currentPosition,
+                                   rotaryDims: rotaryDims)
         query = Tensor<Float>(shape: query.shape, data: queryData)
 
         let keyData = applyRoPE(keyRow.squeezedRowVector().data, headDim: headDim,
-                                 numHeads: config.numKVHeads, position: currentPosition)
+                                 numHeads: config.numKVHeads, position: currentPosition,
+                                 rotaryDims: rotaryDims)
         let keyVec = Tensor<Float>(shape: TensorShape(config.kvDim), data: keyData)
         let valueVec = valueRow.squeezedRowVector()
 

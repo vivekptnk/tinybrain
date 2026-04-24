@@ -35,9 +35,8 @@ class ModelConfig:
     intermediate_dim: int = None  # FFN intermediate size (default: 4 * hidden_dim)
     max_seq_len: int = 2048
     num_kv_heads: int = None  # For GQA/MQA (defaults to num_heads for MHA)
-    architecture: str = "llama"  # "llama" (default) or "gemma"; gates runtime-visible
-                                 # divergences like RMSNorm `(1+w)` and sqrt(hidden)
-                                 # embedding scaling.
+    architecture: str = "llama"  # "llama", "gemma", or "phi"
+    partial_rotary_factor: float = 1.0  # Phi-2 uses 0.4; others use 1.0 (full RoPE)
 
     def __post_init__(self):
         if self.intermediate_dim is None:
@@ -59,11 +58,12 @@ def write_tbf_header(f, config: ModelConfig):
         'numLayers': config.num_layers,
         'hiddenDim': config.hidden_dim,
         'numHeads': config.num_heads,
-        'numKVHeads': config.num_kv_heads,  # Add GQA support
+        'numKVHeads': config.num_kv_heads,
         'vocabSize': config.vocab_size,
         'maxSeqLen': config.max_seq_len,
         'intermediateDim': config.intermediate_dim,
-        'architecture': config.architecture,  # Swift decodeIfPresent -> "llama"
+        'architecture': config.architecture,
+        'partialRotaryFactor': config.partial_rotary_factor,
     }
     config_json = json.dumps(config_dict).encode('utf-8')
 
@@ -87,7 +87,10 @@ def load_pytorch_checkpoint(checkpoint_path: str) -> Dict:
     Load PyTorch checkpoint and extract state_dict
 
     Args:
-        checkpoint_path: Path to .pt or .safetensors file
+        checkpoint_path: Path to .pt, .safetensors, or a HuggingFace snapshot
+            directory. For directories, this handles both single-file
+            (`model.safetensors`) and sharded (`model.safetensors.index.json`
+            + `model-NNNNN-of-MMMMM.safetensors`) layouts.
 
     Returns:
         state_dict: Dictionary of weight tensors
@@ -102,6 +105,43 @@ def load_pytorch_checkpoint(checkpoint_path: str) -> Dict:
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    # Directory → HuggingFace snapshot (possibly sharded)
+    if checkpoint_path.is_dir():
+        try:
+            from safetensors import safe_open
+        except ImportError:
+            print("Error: safetensors not installed. Run: pip install safetensors", file=sys.stderr)
+            sys.exit(1)
+
+        index_path = checkpoint_path / 'model.safetensors.index.json'
+        state_dict: Dict = {}
+
+        if index_path.exists():
+            print(f"Loading sharded checkpoint via {index_path}")
+            with open(index_path) as f:
+                index = json.load(f)
+            weight_map = index.get('weight_map', {})
+            shard_files = sorted(set(weight_map.values()))
+            for shard in shard_files:
+                shard_path = checkpoint_path / shard
+                print(f"  shard: {shard}")
+                with safe_open(shard_path, framework="pt", device="cpu") as sf:
+                    for key in sf.keys():
+                        state_dict[key] = sf.get_tensor(key)
+            return state_dict
+
+        single = checkpoint_path / 'model.safetensors'
+        if single.exists():
+            print(f"Loading single-file checkpoint: {single}")
+            with safe_open(single, framework="pt", device="cpu") as sf:
+                for key in sf.keys():
+                    state_dict[key] = sf.get_tensor(key)
+            return state_dict
+
+        raise FileNotFoundError(
+            f"No safetensors index or single-file checkpoint under directory {checkpoint_path}"
+        )
 
     print(f"Loading checkpoint: {checkpoint_path}")
 
@@ -189,17 +229,24 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
         head_dim = config.hidden_dim // config.num_heads
         kv_dim = config.num_kv_heads * head_dim
 
+        # Attention weight projections.
+        # Phi-2 uses 'model.layers.{i}.' prefix and 'self_attn.dense' for o_proj.
         for proj in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
             key = find_key([
+                f'model.layers.{layer_idx}.self_attn.{proj}.weight',  # phi prefix
                 f'layers.{layer_idx}.self_attn.{proj}.weight',
                 f'layers.{layer_idx}.attention.{proj}.weight',
                 f'h.{layer_idx}.attn.{proj}.weight',
             ])
+            if key is None and proj == 'o_proj':
+                # Phi-2 names the output projection 'dense', not 'o_proj'
+                key = find_key([
+                    f'model.layers.{layer_idx}.self_attn.dense.weight',
+                    f'layers.{layer_idx}.self_attn.dense.weight',
+                ])
             if key:
-                # Keep as [out, in] — quantize per output channel, then transpose
                 w = to_numpy(state_dict[key])
 
-                # Validate GQA shapes: K/V should be [kv_dim, hidden_dim]
                 if proj in ('k_proj', 'v_proj') and w.ndim == 2:
                     expected_out = kv_dim
                     if w.shape[0] != expected_out:
@@ -213,7 +260,17 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
 
                 layer_weights[proj] = w
 
-        # MLP projections
+            # Attention biases (Phi-2 has bias on all projections)
+            bias_proj_name = 'dense' if proj == 'o_proj' else proj
+            bias_key = find_key([
+                f'model.layers.{layer_idx}.self_attn.{bias_proj_name}.bias',
+                f'layers.{layer_idx}.self_attn.{bias_proj_name}.bias',
+                f'layers.{layer_idx}.self_attn.{proj}.bias',
+            ])
+            if bias_key:
+                layer_weights[f'{proj}_bias'] = to_numpy(state_dict[bias_key])
+
+        # MLP projections (LLaMA/Gemma gated style: gate, up, down)
         for proj in ['gate_proj', 'up_proj', 'down_proj']:
             key = find_key([
                 f'layers.{layer_idx}.mlp.{proj}.weight',
@@ -221,49 +278,91 @@ def extract_weights(state_dict: Dict, config: ModelConfig) -> Dict:
                 f'h.{layer_idx}.mlp.{proj}.weight',
             ])
             if key:
-                # Keep as [out, in] — quantize per output channel, then transpose
                 layer_weights[proj] = to_numpy(state_dict[key])
 
-        # Handle merged gate+up projection (some models combine these)
+        # Phi-2 style FFN: fc1 = up only (no gate), fc2 = down.
+        # Must be checked before the merged-fc1 fallback below so we don't
+        # accidentally split Phi-2's fc1 into gate+up halves.
+        if 'up_proj' not in layer_weights and 'gate_proj' not in layer_weights:
+            fc2_key = find_key([
+                f'model.layers.{layer_idx}.mlp.fc2.weight',
+                f'layers.{layer_idx}.mlp.fc2.weight',
+            ])
+            if fc2_key:
+                fc1_key = find_key([
+                    f'model.layers.{layer_idx}.mlp.fc1.weight',
+                    f'layers.{layer_idx}.mlp.fc1.weight',
+                ])
+                if fc1_key:
+                    layer_weights['up_proj']   = to_numpy(state_dict[fc1_key])
+                    layer_weights['down_proj'] = to_numpy(state_dict[fc2_key])
+                    # FFN biases
+                    for fc, dest in [('fc1', 'up_proj_bias'), ('fc2', 'down_proj_bias')]:
+                        fb_key = find_key([
+                            f'model.layers.{layer_idx}.mlp.{fc}.bias',
+                            f'layers.{layer_idx}.mlp.{fc}.bias',
+                        ])
+                        if fb_key:
+                            layer_weights[dest] = to_numpy(state_dict[fb_key])
+
+        # Handle merged gate+up projection (some models pack gate and up into fc1)
         if 'gate_proj' not in layer_weights and 'up_proj' not in layer_weights:
             key = find_key([f'layers.{layer_idx}.mlp.fc1.weight'])
             if key:
                 full_weight = to_numpy(state_dict[key])  # [out, in]
-                mid = full_weight.shape[0] // 2  # Split on dim 0 (output)
+                mid = full_weight.shape[0] // 2
                 layer_weights['gate_proj'] = full_weight[:mid, :]
-                layer_weights['up_proj'] = full_weight[mid:, :]
+                layer_weights['up_proj']   = full_weight[mid:, :]
 
-        # Layer norms
+        # Layer norms (weight). Phi-2 uses 'model.layers.{i}.' prefix.
         for norm in ['input_layernorm', 'post_attention_layernorm']:
             key = find_key([
+                f'model.layers.{layer_idx}.{norm}.weight',      # phi prefix
                 f'layers.{layer_idx}.{norm}.weight',
                 f'h.{layer_idx}.ln_{1 if "input" in norm else 2}.weight',
             ])
             if key:
                 layer_weights[norm] = to_numpy(state_dict[key])
 
+            # LayerNorm bias (Phi-2 uses full LayerNorm, not RMSNorm)
+            bias_key = find_key([
+                f'model.layers.{layer_idx}.{norm}.bias',
+                f'h.{layer_idx}.ln_{1 if "input" in norm else 2}.bias',
+            ])
+            if bias_key:
+                layer_weights[f'{norm}_bias'] = to_numpy(state_dict[bias_key])
+
         weights['layers'].append(layer_weights)
         print(f"  Layer {layer_idx}: {len(layer_weights)} weight tensors")
 
-    # 3. Extract final norm (RMSNorm before output projection)
-    final_norm_key = find_key(['model.norm.weight', 'norm.weight'])
+    # 3. Extract final norm (RMSNorm / LayerNorm before output projection)
+    # Phi-2 names it 'model.final_layernorm'; LLaMA/Gemma use 'model.norm'.
+    final_norm_key = find_key(['model.norm.weight', 'norm.weight',
+                                'model.final_layernorm.weight'])
     if final_norm_key:
         weights['final_norm'] = to_numpy(state_dict[final_norm_key])
         print(f"  Final norm: {weights['final_norm'].shape}")
     else:
         print("  Final norm not found (model may not use pre-output normalization)")
 
+    # Final norm bias (Phi-2 only)
+    final_norm_bias_key = find_key(['model.final_layernorm.bias'])
+    if final_norm_bias_key:
+        weights['final_norm_bias'] = to_numpy(state_dict[final_norm_bias_key])
+
     # 4. Extract LM head
     lm_head_key = find_key(['lm_head.weight', 'output.weight', 'head.weight'])
     if lm_head_key:
-        # Keep as [vocab_size, hidden_dim] — quantize per output channel, then transpose
         weights['lm_head'] = to_numpy(state_dict[lm_head_key])
         print(f"  LM Head: {weights['lm_head'].shape}")
     else:
-        # Some models tie embeddings and LM head
         print("  LM head not found, using tied embeddings")
-        # Embeddings are [vocab_size, hidden_dim] — same layout as lm_head
         weights['lm_head'] = weights['embeddings'].copy()
+
+    # LM head bias (Phi-2 only)
+    lm_head_bias_key = find_key(['lm_head.bias'])
+    if lm_head_bias_key:
+        weights['lm_head_bias'] = to_numpy(state_dict[lm_head_bias_key])
 
     return weights
 
@@ -444,59 +543,65 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
         'quantized': False
     }
 
-    # Layers (quantized)
-    pbar = tqdm(total=len(weights['layers']) * 9, desc="Quantizing")
-    for layer_idx, layer in enumerate(weights['layers']):
-        # Attention projections
-        prepare_tensor(f'layer_{layer_idx}_attn_q', layer['q_proj'])
-        pbar.update(1)
-        prepare_tensor(f'layer_{layer_idx}_attn_k', layer['k_proj'])
-        pbar.update(1)
-        prepare_tensor(f'layer_{layer_idx}_attn_v', layer['v_proj'])
-        pbar.update(1)
-        prepare_tensor(f'layer_{layer_idx}_attn_o', layer['o_proj'])
-        pbar.update(1)
+    def float32_entry(arr: np.ndarray) -> dict:
+        """Helper: create an unquantized float32 tensor entry."""
+        return {
+            'data': arr.astype(np.float32),
+            'scales': [],
+            'zero_points': None,
+            'shape': arr.shape,
+            'quantized': False,
+        }
 
-        # FFN projections (gated FFN: gate_proj, up_proj, down_proj)
+    # Layers (quantized weights + float32 norms/biases)
+    for layer_idx, layer in tqdm(enumerate(weights['layers']), total=len(weights['layers']),
+                                  desc="Quantizing layers"):
+        # Attention weight projections
+        prepare_tensor(f'layer_{layer_idx}_attn_q', layer['q_proj'])
+        prepare_tensor(f'layer_{layer_idx}_attn_k', layer['k_proj'])
+        prepare_tensor(f'layer_{layer_idx}_attn_v', layer['v_proj'])
+        prepare_tensor(f'layer_{layer_idx}_attn_o', layer['o_proj'])
+
+        # FFN weight projections (gated FFN or ungated)
         if 'gate_proj' in layer:
             prepare_tensor(f'layer_{layer_idx}_ffn_gate', layer['gate_proj'])
-        pbar.update(1)
-        prepare_tensor(f'layer_{layer_idx}_ffn_up', layer['up_proj'])
-        pbar.update(1)
+        prepare_tensor(f'layer_{layer_idx}_ffn_up',   layer['up_proj'])
         prepare_tensor(f'layer_{layer_idx}_ffn_down', layer['down_proj'])
-        pbar.update(1)
 
-        # Layer norms (Float32, not quantized for numerical stability)
-        quantized_weights[f'layer_{layer_idx}_ln_input'] = {
-            'data': layer['input_layernorm'].astype(np.float32),
-            'scales': [],
-            'zero_points': None,
-            'shape': layer['input_layernorm'].shape,
-            'quantized': False
-        }
-        pbar.update(1)
-        quantized_weights[f'layer_{layer_idx}_ln_post'] = {
-            'data': layer['post_attention_layernorm'].astype(np.float32),
-            'scales': [],
-            'zero_points': None,
-            'shape': layer['post_attention_layernorm'].shape,
-            'quantized': False
-        }
-        pbar.update(1)
-    pbar.close()
+        # Norm weights (Float32)
+        if 'input_layernorm' in layer:
+            quantized_weights[f'layer_{layer_idx}_ln_input'] = float32_entry(
+                layer['input_layernorm'])
+        if 'input_layernorm_bias' in layer:
+            quantized_weights[f'layer_{layer_idx}_ln_input_bias'] = float32_entry(
+                layer['input_layernorm_bias'])
+        if 'post_attention_layernorm' in layer:
+            quantized_weights[f'layer_{layer_idx}_ln_post'] = float32_entry(
+                layer['post_attention_layernorm'])
 
-    # Final norm (Float32, not quantized for numerical stability)
+        # Attention projection biases (Float32, Phi-2 only)
+        for proj, key in [('q', 'q_proj_bias'), ('k', 'k_proj_bias'),
+                           ('v', 'v_proj_bias'), ('o', 'o_proj_bias')]:
+            if key in layer:
+                quantized_weights[f'layer_{layer_idx}_attn_{proj}_bias'] = float32_entry(
+                    layer[key])
+
+        # FFN biases (Float32, Phi-2 only)
+        for dest, key in [('up', 'up_proj_bias'), ('down', 'down_proj_bias')]:
+            if key in layer:
+                quantized_weights[f'layer_{layer_idx}_ffn_{dest}_bias'] = float32_entry(
+                    layer[key])
+
+    # Final norm (Float32)
     if 'final_norm' in weights:
-        quantized_weights['final_norm'] = {
-            'data': weights['final_norm'].astype(np.float32),
-            'scales': [],
-            'zero_points': None,
-            'shape': weights['final_norm'].shape,
-            'quantized': False
-        }
+        quantized_weights['final_norm'] = float32_entry(weights['final_norm'])
+    if 'final_norm_bias' in weights:
+        quantized_weights['final_norm_bias'] = float32_entry(weights['final_norm_bias'])
 
-    # Output projection
+    # Output projection (quantized) + optional bias
     prepare_tensor('output', weights['lm_head'])
+    if 'lm_head_bias' in weights:
+        quantized_weights['output_bias'] = float32_entry(weights['lm_head_bias'])
 
     print(f"Writing to: {output_path}")
 
@@ -610,7 +715,11 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
     """
     # First, try to load config.json if checkpoint path is provided
     if checkpoint_path:
-        checkpoint_dir = Path(checkpoint_path).parent
+        # Support both "--input path/to/model.safetensors" (legacy) and
+        # "--input path/to/hf_snapshot_dir" (HF directory layout, needed for
+        # sharded checkpoints like Gemma 2B).
+        ckpt = Path(checkpoint_path)
+        checkpoint_dir = ckpt if ckpt.is_dir() else ckpt.parent
         config_json_path = checkpoint_dir / 'config.json'
 
         if config_json_path.exists():
@@ -627,9 +736,16 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
             max_seq_len = hf_config.get('max_position_embeddings', 2048)
 
             # Gate runtime-visible arch divergences via the TBF `architecture` field.
-            # Gemma needs `RMSNorm * (1 + w)` and `sqrt(hidden) * embed` at runtime.
             raw_model_type = (hf_config.get('model_type') or '').lower()
-            architecture = 'gemma' if raw_model_type.startswith('gemma') else 'llama'
+            if raw_model_type.startswith('gemma'):
+                architecture = 'gemma'
+            elif raw_model_type.startswith('phi'):
+                architecture = 'phi'
+            else:
+                architecture = 'llama'
+
+            # Phi-2 uses partial RoPE (only first 40% of head dims are rotated).
+            partial_rotary_factor = float(hf_config.get('partial_rotary_factor', 1.0))
 
             print("\nInferred configuration:")
             print(f"  Architecture: {architecture} (HF model_type={raw_model_type or '?'})")
@@ -639,6 +755,8 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
             print(f"  Num heads: {num_heads}")
             print(f"  Num KV heads: {num_kv_heads}")
             print(f"  Intermediate dim: {intermediate_dim}")
+            if partial_rotary_factor != 1.0:
+                print(f"  Partial RoPE factor: {partial_rotary_factor}")
 
             return ModelConfig(
                 num_layers=num_layers,
@@ -649,6 +767,7 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
                 intermediate_dim=intermediate_dim,
                 max_seq_len=max_seq_len,
                 architecture=architecture,
+                partial_rotary_factor=partial_rotary_factor,
             )
 
     # Fallback: infer from weight shapes

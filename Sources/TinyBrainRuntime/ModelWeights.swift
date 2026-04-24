@@ -98,23 +98,37 @@ public struct FeedForwardWeights {
 public struct TransformerLayerWeights {
     public let attention: AttentionProjectionWeights
     public let feedForward: FeedForwardWeights
-    public let inputNormWeights: Tensor<Float>?     // RMSNorm weights for pre-attention norm
-    public let postAttentionNormWeights: Tensor<Float>?  // RMSNorm weights for pre-FFN norm
+    public let inputNormWeights: Tensor<Float>?         // Norm scale (RMSNorm or LayerNorm γ)
+    public let inputNormBias: Tensor<Float>?            // LayerNorm shift β (Phi-2 only)
+    public let postAttentionNormWeights: Tensor<Float>? // Pre-FFN norm scale (LLaMA/Gemma)
 
     /// Convenience init without norm weights (backward compatible with toy models)
     public init(attention: AttentionProjectionWeights, feedForward: FeedForwardWeights) {
         self.attention = attention
         self.feedForward = feedForward
         self.inputNormWeights = nil
+        self.inputNormBias = nil
         self.postAttentionNormWeights = nil
     }
 
-    /// Full init with norm weights for real models
+    /// Init for LLaMA/Gemma-style models: RMSNorm, no bias, sequential residual
     public init(attention: AttentionProjectionWeights, feedForward: FeedForwardWeights,
                 inputNormWeights: Tensor<Float>, postAttentionNormWeights: Tensor<Float>) {
         self.attention = attention
         self.feedForward = feedForward
         self.inputNormWeights = inputNormWeights
+        self.inputNormBias = nil
+        self.postAttentionNormWeights = postAttentionNormWeights
+    }
+
+    /// Init for Phi-2-style models: LayerNorm with bias, parallel residual (no post-attn norm)
+    public init(attention: AttentionProjectionWeights, feedForward: FeedForwardWeights,
+                inputNormWeights: Tensor<Float>, inputNormBias: Tensor<Float>?,
+                postAttentionNormWeights: Tensor<Float>? = nil) {
+        self.attention = attention
+        self.feedForward = feedForward
+        self.inputNormWeights = inputNormWeights
+        self.inputNormBias = inputNormBias
         self.postAttentionNormWeights = postAttentionNormWeights
     }
 }
@@ -125,13 +139,15 @@ public struct ModelWeights {
     public let tokenEmbeddings: Tensor<Float>   // [vocabSize, hiddenDim]
     public let layers: [TransformerLayerWeights]
     public let output: LinearLayerWeights
-    public let finalNormWeights: Tensor<Float>?  // Final RMSNorm before output projection
+    public let finalNormWeights: Tensor<Float>?  // Final norm scale (RMSNorm or LayerNorm γ)
+    public let finalNormBias: Tensor<Float>?     // Final LayerNorm shift β (Phi-2 only)
 
     public init(config: ModelConfig,
                 tokenEmbeddings: Tensor<Float>,
                 layers: [TransformerLayerWeights],
                 output: LinearLayerWeights,
-                finalNormWeights: Tensor<Float>? = nil) {
+                finalNormWeights: Tensor<Float>? = nil,
+                finalNormBias: Tensor<Float>? = nil) {
         precondition(tokenEmbeddings.shape == TensorShape(config.vocabSize, config.hiddenDim),
                      "Embedding matrix must be [vocabSize, hiddenDim]")
         precondition(layers.count == config.numLayers,
@@ -141,6 +157,7 @@ public struct ModelWeights {
         self.layers = layers
         self.output = output
         self.finalNormWeights = finalNormWeights
+        self.finalNormBias = finalNormBias
     }
 
     /// Returns the embedding row for a given token id
@@ -311,9 +328,40 @@ public struct ModelWeights {
                 allTensors.append(TensorEntry(name: "layer_\(layerIdx)_ln_input", quantized: nil,
                                                floatData: inNorm.data, shape: inNorm.shape))
             }
+            if let inNormBias = layer.inputNormBias {
+                allTensors.append(TensorEntry(name: "layer_\(layerIdx)_ln_input_bias",
+                                               quantized: nil,
+                                               floatData: inNormBias.data, shape: inNormBias.shape))
+            }
             if let postNorm = layer.postAttentionNormWeights {
                 allTensors.append(TensorEntry(name: "layer_\(layerIdx)_ln_post", quantized: nil,
                                                floatData: postNorm.data, shape: postNorm.shape))
+            }
+
+            // Attention projection biases (Float32, Phi-2 style)
+            let attnBiases: [(String, Tensor<Float>?)] = [
+                ("layer_\(layerIdx)_attn_q_bias", layer.attention.query.bias),
+                ("layer_\(layerIdx)_attn_k_bias", layer.attention.key.bias),
+                ("layer_\(layerIdx)_attn_v_bias", layer.attention.value.bias),
+                ("layer_\(layerIdx)_attn_o_bias", layer.attention.output.bias),
+            ]
+            for (name, bias) in attnBiases {
+                if let b = bias {
+                    allTensors.append(TensorEntry(name: name, quantized: nil,
+                                                   floatData: b.data, shape: b.shape))
+                }
+            }
+
+            // FFN biases (Float32, Phi-2 style)
+            let ffnBiases: [(String, Tensor<Float>?)] = [
+                ("layer_\(layerIdx)_ffn_up_bias", layer.feedForward.up.bias),
+                ("layer_\(layerIdx)_ffn_down_bias", layer.feedForward.down.bias),
+            ]
+            for (name, bias) in ffnBiases {
+                if let b = bias {
+                    allTensors.append(TensorEntry(name: name, quantized: nil,
+                                                   floatData: b.data, shape: b.shape))
+                }
             }
         }
 
@@ -321,6 +369,10 @@ public struct ModelWeights {
         if let finalNorm = finalNormWeights {
             allTensors.append(TensorEntry(name: "final_norm", quantized: nil,
                                            floatData: finalNorm.data, shape: finalNorm.shape))
+        }
+        if let finalNormB = finalNormBias {
+            allTensors.append(TensorEntry(name: "final_norm_bias", quantized: nil,
+                                           floatData: finalNormB.data, shape: finalNormB.shape))
         }
 
         // Output projection (quantized)
@@ -663,60 +715,75 @@ public struct ModelWeights {
             let vWeights = loadQuantizedTensor(name: "layer_\(layerIdx)_attn_v")
             let oWeights = loadQuantizedTensor(name: "layer_\(layerIdx)_attn_o")
 
-            // Load gate projection if present (LLaMA-style gated FFN)
+            // Gate projection (LLaMA-style gated FFN)
             let gateWeights: QuantizedTensor? = tensorIndex["layer_\(layerIdx)_ffn_gate"] != nil
                 ? loadQuantizedTensor(name: "layer_\(layerIdx)_ffn_gate") : nil
 
             let upWeights = loadQuantizedTensor(name: "layer_\(layerIdx)_ffn_up")
             let downWeights = loadQuantizedTensor(name: "layer_\(layerIdx)_ffn_down")
 
-            // Load norm weights (Float32)
+            // Norm weights (Float32)
             let inputNorm = loadFloat32Tensor(name: "layer_\(layerIdx)_ln_input")
+            let inputNormBias = loadFloat32Tensor(name: "layer_\(layerIdx)_ln_input_bias")
             let postAttnNorm = loadFloat32Tensor(name: "layer_\(layerIdx)_ln_post")
 
+            // Attention projection biases (Float32, phi-2 style; nil for LLaMA/Gemma)
+            let qBias = loadFloat32Tensor(name: "layer_\(layerIdx)_attn_q_bias")
+            let kBias = loadFloat32Tensor(name: "layer_\(layerIdx)_attn_k_bias")
+            let vBias = loadFloat32Tensor(name: "layer_\(layerIdx)_attn_v_bias")
+            let oBias = loadFloat32Tensor(name: "layer_\(layerIdx)_attn_o_bias")
+
+            // FFN biases (Float32, phi-2 style)
+            let upBias   = loadFloat32Tensor(name: "layer_\(layerIdx)_ffn_up_bias")
+            let downBias = loadFloat32Tensor(name: "layer_\(layerIdx)_ffn_down_bias")
+
             let attention = AttentionProjectionWeights(
-                query: LinearLayerWeights(weights: qWeights, bias: nil),
-                key: LinearLayerWeights(weights: kWeights, bias: nil),
-                value: LinearLayerWeights(weights: vWeights, bias: nil),
-                output: LinearLayerWeights(weights: oWeights, bias: nil)
+                query:  LinearLayerWeights(weights: qWeights, bias: qBias),
+                key:    LinearLayerWeights(weights: kWeights, bias: kBias),
+                value:  LinearLayerWeights(weights: vWeights, bias: vBias),
+                output: LinearLayerWeights(weights: oWeights, bias: oBias)
             )
 
             let feedForward: FeedForwardWeights
             if let gateW = gateWeights {
                 feedForward = FeedForwardWeights(
                     gate: LinearLayerWeights(weights: gateW, bias: nil),
-                    up: LinearLayerWeights(weights: upWeights, bias: nil),
-                    down: LinearLayerWeights(weights: downWeights, bias: nil)
+                    up:   LinearLayerWeights(weights: upWeights,   bias: upBias),
+                    down: LinearLayerWeights(weights: downWeights, bias: downBias)
                 )
             } else {
                 feedForward = FeedForwardWeights(
-                    up: LinearLayerWeights(weights: upWeights, bias: nil),
-                    down: LinearLayerWeights(weights: downWeights, bias: nil)
+                    up:   LinearLayerWeights(weights: upWeights,   bias: upBias),
+                    down: LinearLayerWeights(weights: downWeights, bias: downBias)
                 )
             }
 
-            if let inNorm = inputNorm, let postNorm = postAttnNorm {
+            if let inNorm = inputNorm {
                 layers.append(TransformerLayerWeights(
                     attention: attention, feedForward: feedForward,
-                    inputNormWeights: inNorm, postAttentionNormWeights: postNorm))
+                    inputNormWeights: inNorm, inputNormBias: inputNormBias,
+                    postAttentionNormWeights: postAttnNorm))
             } else {
                 layers.append(TransformerLayerWeights(attention: attention, feedForward: feedForward))
             }
         }
 
-        // Load final norm (Float32) if present
-        let finalNorm = loadFloat32Tensor(name: "final_norm")
+        // Final norm (Float32) if present
+        let finalNorm     = loadFloat32Tensor(name: "final_norm")
+        let finalNormBias = loadFloat32Tensor(name: "final_norm_bias")
 
-        // Load output weights
+        // Output weights (may have bias for lm_head)
         let outputWeights = loadQuantizedTensor(name: "output")
-        let output = LinearLayerWeights(weights: outputWeights, bias: nil)
+        let outputBias    = loadFloat32Tensor(name: "output_bias")
+        let output        = LinearLayerWeights(weights: outputWeights, bias: outputBias)
 
         return ModelWeights(
             config: config,
             tokenEmbeddings: embeddings,
             layers: layers,
             output: output,
-            finalNormWeights: finalNorm
+            finalNormWeights: finalNorm,
+            finalNormBias: finalNormBias
         )
     }
 }

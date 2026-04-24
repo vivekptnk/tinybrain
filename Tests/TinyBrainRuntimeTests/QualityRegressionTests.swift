@@ -291,6 +291,68 @@ final class QualityRegressionTests: XCTestCase {
 
     // MARK: - CHA-108: TinyLlama INT4 vs INT8 Real-Model Regression
 
+    // MARK: - CHA-109: Gemma 2B INT4 vs INT8 Real-Model Regression
+
+    /// Asserts CHA-109's v0.2.0 DoD on a real Gemma 2B model: RTN INT4
+    /// quantization (group=32) keeps perplexity within **6%** of the INT8
+    /// baseline on the pinned `CHA-109-v1` WikiText-2 slice tokenized with
+    /// the Gemma tokenizer.
+    ///
+    /// Skipped in CI — `Models/gemma-2b-int8.tbf` is gitignored. To run
+    /// locally:
+    ///   1. `python3 Scripts/convert_model.py --input <hf_dir> --output Models/gemma-2b-int8.tbf --quantize int8 --auto-config`
+    ///   2. `python3 Scripts/pretokenize_wikitext.py --model gemma`
+    ///   3. `swift test --filter testGemmaINT4VsINT8Perplexity`
+    func testGemmaINT4VsINT8Perplexity() throws {
+        let modelPath = "Models/gemma-2b-int8.tbf"
+        let weightsINT8: ModelWeights
+        do {
+            weightsINT8 = try ModelLoader.load(from: modelPath)
+        } catch {
+            throw XCTSkip("Gemma 2B .tbf not available at \(modelPath) — convert first with Scripts/convert_model.py")
+        }
+
+        let sliceURL = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("wikitext2_gemma_slice.json")
+        guard FileManager.default.fileExists(atPath: sliceURL.path) else {
+            throw XCTSkip("Gemma wikitext2 slice missing at \(sliceURL.path) — regenerate with: python3 Scripts/pretokenize_wikitext.py --model gemma")
+        }
+        let slice = try PerplexitySlice.load(from: sliceURL)
+        XCTAssertEqual(slice.seed, "CHA-109-v1",
+                       "Slice seed drifted — regenerate with: python3 Scripts/pretokenize_wikitext.py --model gemma")
+        XCTAssertGreaterThanOrEqual(slice.tokens.count, 32,
+                                    "Need ≥32 tokens for a meaningful perplexity estimate")
+
+        if TinyBrainBackend.metalBackend == nil, MetalBackend.isAvailable {
+            TinyBrainBackend.metalBackend = try? MetalBackend()
+        }
+
+        let resultINT8 = try PerplexityHarness.computePerplexity(weights: weightsINT8, slice: slice)
+        let weightsINT4 = PerplexityHarness.convertToINT4(weightsINT8, groupSize: 32)
+        let resultINT4 = try PerplexityHarness.computePerplexity(weights: weightsINT4, slice: slice)
+
+        let pplINT8 = resultINT8.perplexity
+        let pplINT4 = resultINT4.perplexity
+        let delta = abs(pplINT4 - pplINT8) / pplINT8
+
+        print("""
+        🧪 CHA-109 Gemma 2B INT4 vs INT8 perplexity
+           slice: \(slice.source) (\(slice.tokens.count) tokens, seed=\(slice.seed))
+           INT8: ppl=\(pplINT8) over \(resultINT8.numPredictions) preds in \(String(format: "%.2fs", resultINT8.elapsedSeconds))
+           INT4: ppl=\(pplINT4) over \(resultINT4.numPredictions) preds in \(String(format: "%.2fs", resultINT4.elapsedSeconds))
+           Δ: \(String(format: "%+.3f%%", delta * 100))
+        """)
+
+        XCTAssertGreaterThan(pplINT8, 0, "INT8 perplexity must be positive")
+        XCTAssertGreaterThan(pplINT4, 0, "INT4 perplexity must be positive")
+        XCTAssertLessThanOrEqual(delta, 0.06,
+            "INT4 perplexity must stay within 6% of INT8 baseline per CHA-104 v0.2.0 DoD (got \(String(format: "%.3f%%", delta * 100)))")
+    }
+
+
+
     /// Asserts CHA-104's v0.2.0 DoD on a real model: RTN INT4 quantization
     /// (group=32) keeps perplexity within **6 %** of the INT8 baseline on
     /// the pinned `CHA-108-v1` WikiText-2 slice.
