@@ -63,6 +63,12 @@ struct TinyBrainBench: AsyncParsableCommand {
     @Option(name: .long, help: "Maximum acceptable |Δppl|/ppl_INT8 before --perplexity exits non-zero (default: 0.01 per CHA-104 DoD).")
     var perplexityThreshold: Double = 0.01
 
+    // SwiftPM passes XCTest flags when running via `swift test -c release`.
+    // These absorb the unknown arguments so ArgumentParser doesn't reject them.
+    @Option(name: .customLong("test-bundle-path"), help: .hidden) var testBundlePath: String?
+    @Option(name: .customLong("filter"), help: .hidden) var xcFilter: String?
+    @Argument(parsing: .captureForPassthrough) var remainingArgs: [String] = []
+
     func run() async throws {
         if let modelPath = perplexity {
             try runPerplexity(modelPath: modelPath)
