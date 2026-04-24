@@ -568,7 +568,7 @@ public struct ModelWeights {
         let metadataCount = readUInt32()
 
         // Store metadata by name for later reconstruction
-        var quantMetadata: [String: (precision: UInt8, mode: UInt8, scales: [Float], zeroPoints: [Int8]?)] = [:]
+        var quantMetadata: [String: (precision: UInt8, mode: UInt8, groupSize: UInt32, scales: [Float], zeroPoints: [Int8]?)] = [:]
 
         for _ in 0..<metadataCount {
             let nameLength = readUInt32()
@@ -581,7 +581,7 @@ public struct ModelWeights {
             let mode = readUInt8()
 
             // Group size (UInt32): used by INT4 quantization, 0 for INT8
-            let _ = readUInt32()
+            let groupSize = readUInt32()
 
             let scalesCount = readUInt32()
 
@@ -600,7 +600,7 @@ public struct ModelWeights {
                 }
             }
 
-            quantMetadata[name] = (precision, mode, scales, zeroPoints)
+            quantMetadata[name] = (precision, mode, groupSize, scales, zeroPoints)
         }
 
         // Skip to index section (4KB aligned)
@@ -665,21 +665,31 @@ public struct ModelWeights {
             let shape = TensorShape(index.shape)
             let tensorOffset = index.dataOffset
 
-            // Bulk copy INT8 data from absolute offset
+            // Bulk copy quantized data from absolute offset.
+            // dataSize is in bytes: ceil(shape.count/2) for INT4, shape.count for INT8.
             let quantData: [Int8] = data.withUnsafeBytes { rawPtr in
                 let base = rawPtr.baseAddress!.advanced(by: tensorOffset)
                     .assumingMemoryBound(to: Int8.self)
                 return Array(UnsafeBufferPointer(start: base, count: index.dataSize))
             }
 
-            let mode: QuantizationMode = metadata.mode == 2 ? .perChannel : .symmetric
+            // precision: 1 = INT8, 2 = INT4 (matches Python converter and save code)
+            // mode:      2 = INT8 per-channel, 3 = INT4 per-group
+            let precision: QuantizationPrecision = metadata.precision == 2 ? .int4 : .int8
+            let mode: QuantizationMode
+            if precision == .int4 {
+                mode = .int4
+            } else {
+                mode = metadata.mode == 2 ? .perChannel : .symmetric
+            }
             return QuantizedTensor(
                 shape: shape,
                 data: quantData,
                 scales: metadata.scales,
                 zeroPoints: metadata.zeroPoints,
                 mode: mode,
-                precision: .int8
+                precision: precision,
+                groupSize: Int(metadata.groupSize)
             )
         }
 

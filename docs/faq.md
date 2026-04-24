@@ -147,6 +147,38 @@ python Scripts/convert_model.py \
   --auto-config
 ```
 
+### How do I convert Gemma 2B to INT4 TBF? (CHA-109)
+
+Requires accepting the Google Gemma license on HuggingFace first.
+
+```bash
+# 1. Download weights (requires HF login + license acceptance)
+huggingface-cli download google/gemma-2b \
+  --local-dir Models/gemma-2b-raw
+
+# 2. Convert to INT8 (needed for the perplexity baseline)
+python3 Scripts/convert_model.py \
+  --input Models/gemma-2b-raw \
+  --output Models/gemma-2b-int8.tbf \
+  --quantize int8 \
+  --auto-config
+
+# 3. Convert to INT4 (v0.2.0 shipping format, group_size=32)
+python3 Scripts/convert_model.py \
+  --input Models/gemma-2b-raw \
+  --output Models/gemma-2b-int4.tbf \
+  --quantize int4 \
+  --group-size 32 \
+  --auto-config
+
+# 4. Verify: run the smoke test and perplexity gate
+swift test --filter GemmaSmokeTest
+swift test --filter testGemmaINT4VsINT8Perplexity
+```
+
+**Expected output sizes:** INT8 ≈ 4.3 GB, INT4 ≈ 3.5 GB.  
+**Perplexity DoD:** `|Δppl|/ppl_INT8 ≤ 0.06` at group=32 (v0.2.0).
+
 ---
 
 ## Development
