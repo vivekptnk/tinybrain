@@ -117,9 +117,11 @@ public enum HuggingFaceAdapter {
             #endif
 
             // Add placeholder tokens for missing IDs
+            var usedIds = Set(vocab.values)
             for id in 0..<expectedVocabSize {
-                if !vocab.values.contains(id) {
+                if !usedIds.contains(id) {
                     vocab["<unk_\(id)>"] = id
+                    usedIds.insert(id)
                 }
             }
         }
@@ -268,4 +270,3 @@ public enum HuggingFaceAdapter {
         )
     }
 }
-

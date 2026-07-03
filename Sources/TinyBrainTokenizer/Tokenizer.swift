@@ -255,22 +255,27 @@ public struct BPETokenizer: Tokenizer {
     /// Apply BPE merge rules to token sequence
     ///
     /// **Algorithm:**
-    /// 1. Find highest-priority merge in current tokens
-    /// 2. Apply that merge
+    /// 1. Find the highest-priority merge currently present
+    /// 2. Apply that merge to every non-overlapping occurrence
     /// 3. Repeat until no merges left
     ///
-    /// **Time complexity:** O(n² × m) where n = tokens, m = merges
-    /// This is acceptable for educational purposes; production would optimize.
+    /// Batched merging keeps the same BPE rank order as repeatedly merging the
+    /// best pair, but avoids rescanning and reallocating the token array once
+    /// per pair occurrence in repeated text.
     ///
     /// - Parameter tokens: Initial token sequence
     /// - Returns: Merged token sequence
     private func applyBPEMerges(_ tokens: [String]) -> [String] {
-        var currentTokens = tokens
+        guard tokens.count > 1 else {
+            return tokens
+        }
         
-        // Keep merging until no more merges possible
+        var currentTokens = tokens
+
+        // Keep merging until no more merges are present.
         while true {
             // Find best (lowest priority number = highest priority) merge
-            var bestMerge: (index: Int, priority: Int)? = nil
+            var bestMerge: (first: String, second: String, priority: Int)? = nil
             
             for i in 0..<(currentTokens.count - 1) {
                 let first = currentTokens[i]
@@ -279,7 +284,7 @@ public struct BPETokenizer: Tokenizer {
                 // Check if this pair has a merge rule
                 if let priority = mergePriority[first]?[second] {
                     if bestMerge == nil || priority < bestMerge!.priority {
-                        bestMerge = (index: i, priority: priority)
+                        bestMerge = (first: first, second: second, priority: priority)
                     }
                 }
             }
@@ -289,9 +294,25 @@ public struct BPETokenizer: Tokenizer {
                 break
             }
             
-            // Apply the merge
-            let merged = currentTokens[merge.index] + currentTokens[merge.index + 1]
-            currentTokens.replaceSubrange(merge.index...merge.index + 1, with: [merged])
+            // Apply the best merge to all non-overlapping occurrences in one pass.
+            let mergedToken = merge.first + merge.second
+            var mergedTokens: [String] = []
+            mergedTokens.reserveCapacity(currentTokens.count)
+
+            var index = 0
+            while index < currentTokens.count {
+                if index < currentTokens.count - 1,
+                   currentTokens[index] == merge.first,
+                   currentTokens[index + 1] == merge.second {
+                    mergedTokens.append(mergedToken)
+                    index += 2
+                } else {
+                    mergedTokens.append(currentTokens[index])
+                    index += 1
+                }
+            }
+
+            currentTokens = mergedTokens
         }
         
         return currentTokens
@@ -405,4 +426,3 @@ public enum TokenizerError: Error, CustomStringConvertible {
         }
     }
 }
-

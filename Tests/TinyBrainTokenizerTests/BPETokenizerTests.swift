@@ -201,6 +201,19 @@ final class BPETokenizerTests: XCTestCase {
         let decoded = tokenizer.decode(tokens)
         XCTAssertEqual(longText, decoded, "Long text round-trip should work")
     }
+
+    /// **Test:** Repeated long text should not regress to per-merge rescans
+    func testBPEEncodeRepeatedTextPerformanceRegression() throws {
+        let tokenizer = try BPETokenizer(vocabularyPath: vocabPath)
+        let longText = String(repeating: "Hello world! ", count: 1000)
+
+        let start = Date()
+        let tokens = tokenizer.encode(longText)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertGreaterThan(tokens.count, 1000, "Long text should produce many tokens")
+        XCTAssertLessThan(elapsed, 5.0, "Encoding repeated text should stay comfortably below the historical slow path")
+    }
     
     /// **Test:** Decode handles invalid token IDs gracefully
     func testDecodeInvalidTokens() throws {
@@ -266,4 +279,3 @@ final class BPETokenizerTests: XCTestCase {
         XCTAssertFalse(tokens.isEmpty, "Should handle accented characters")
     }
 }
-

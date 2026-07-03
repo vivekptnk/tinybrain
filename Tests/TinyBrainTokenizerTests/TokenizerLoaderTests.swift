@@ -84,12 +84,43 @@ final class TokenizerLoaderTests: XCTestCase {
         XCTAssertGreaterThan(tokenizer.vocabularySize, 0)
     }
     
-    func testLoadBestAvailable() {
-        // Should find and load any available tokenizer
-        let tokenizer = TokenizerLoader.loadBestAvailable()
+    func testLoadBestAvailable() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent("TinyBrainTokenizerTests-\(UUID().uuidString)")
+        let modelsDirectory = tempRoot.appendingPathComponent("Models")
+        let tinyLlamaDirectory = modelsDirectory.appendingPathComponent("tinyllama-raw")
+        try fileManager.createDirectory(at: tinyLlamaDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let tokenizerURL = tinyLlamaDirectory.appendingPathComponent("tokenizer.json")
+        let tokenizerJSON = """
+        {
+          "vocab": {
+            "<BOS>": 0,
+            "<EOS>": 1,
+            "<UNK>": 2,
+            "<PAD>": 3,
+            "H": 4,
+            "i": 5,
+            "Hi": 6
+          },
+          "merges": [["H", "i"]],
+          "special_tokens": {
+            "bos_token": "<BOS>",
+            "eos_token": "<EOS>",
+            "unk_token": "<UNK>",
+            "pad_token": "<PAD>"
+          }
+        }
+        """
+        try tokenizerJSON.write(to: tokenizerURL, atomically: true, encoding: .utf8)
+
+        // Should find and load the best tokenizer from an explicit small Models fixture.
+        let tokenizer = TokenizerLoader.loadBestAvailable(in: modelsDirectory.path)
         
         // Should at least return something (even if fallback)
         XCTAssertGreaterThan(tokenizer.vocabularySize, 0)
+        XCTAssertEqual(tokenizer.encode("Hi"), [6])
     }
     
     // MARK: - SentencePiece Format Detection
@@ -195,4 +226,3 @@ final class TokenizerLoaderTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempURL)
     }
 }
-

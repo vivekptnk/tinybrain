@@ -181,7 +181,30 @@ public enum TokenizerLoader {
         }
 
         let modelsPath = resolvePath("Models") ?? "Models"
+        return loadBestAvailable(in: modelsPath, includeTinyLlamaPriority: false)
+    }
+
+    /// Load the best tokenizer from an explicit Models directory.
+    ///
+    /// Internal for hermetic tests; the public `loadBestAvailable()` keeps the
+    /// repository-relative discovery behavior used by the demo.
+    static func loadBestAvailable(in modelsPath: String) -> any Tokenizer {
+        return loadBestAvailable(in: modelsPath, includeTinyLlamaPriority: true)
+    }
+
+    private static func loadBestAvailable(
+        in modelsPath: String,
+        includeTinyLlamaPriority: Bool
+    ) -> any Tokenizer {
         let fm = FileManager.default
+
+        // Priority 1: TinyLlama HuggingFace tokenizer
+        if includeTinyLlamaPriority {
+            let tinyLlamaPath = (modelsPath as NSString).appendingPathComponent("tinyllama-raw/tokenizer.json")
+            if fm.fileExists(atPath: tinyLlamaPath), let tokenizer = try? load(from: tinyLlamaPath) {
+                return tokenizer
+            }
+        }
 
         // Priority 2: Any HuggingFace tokenizer.json in Models/
         if let files = try? fm.contentsOfDirectory(atPath: modelsPath) {
@@ -282,4 +305,3 @@ public enum TokenizerLoader {
         return nil
     }
 }
-
