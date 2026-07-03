@@ -393,16 +393,17 @@ public struct SamplerResult {
 }
 
 extension Sampler {
-    /// Detailed sampling that returns token, probability, and entropy
+    /// Computes the final sampling distribution without consuming RNG.
     ///
-    /// This method applies repetition penalty, optional top-k/top-p filtering,
-    /// temperature scaling, then samples from the resulting softmax distribution.
-    /// It maintains RNG state via `SamplerConfig` for deterministic sequences.
-    public static func sampleDetailed(
+    /// Applies the same post-processing pipeline used by ``sampleDetailed``:
+    /// repetition penalty, top-k/top-p filtering, temperature scaling, then
+    /// softmax. Speculative decoding uses this to store the exact draft
+    /// distribution that produced a sampled token.
+    internal static func samplingDistribution(
         logits: Tensor<Float>,
-        config: inout SamplerConfig,
+        config: SamplerConfig,
         history: [Int]
-    ) -> SamplerResult {
+    ) -> [Float] {
         // Step 1: Apply repetition penalty (sign-aware, per docs)
         var adjustedData = logits.data
         if config.repetitionPenalty != 1.0 && !history.isEmpty {
@@ -418,10 +419,6 @@ extension Sampler {
             }
         }
         var workingLogits = Tensor<Float>(shape: logits.shape, data: adjustedData)
-
-        // Extract RNG to local var to pass as inout and persist back
-        var rng = config.rng
-        defer { config.rng = rng }
 
         // Step 2: Apply top-k or top-p filtering if configured
         if let k = config.topK {
@@ -458,18 +455,35 @@ extension Sampler {
         }
         let scaledLogits = Tensor<Float>(shape: workingLogits.shape, data: scaledData)
 
-        // Step 4: Compute final probabilities and entropy
-        let finalProbs = scaledLogits.softmax().data
+        // Step 4: Compute final probabilities
+        return scaledLogits.softmax().data
+    }
+
+    /// Detailed sampling that returns token, probability, and entropy
+    ///
+    /// This method applies repetition penalty, optional top-k/top-p filtering,
+    /// temperature scaling, then samples from the resulting softmax distribution.
+    /// It maintains RNG state via `SamplerConfig` for deterministic sequences.
+    public static func sampleDetailed(
+        logits: Tensor<Float>,
+        config: inout SamplerConfig,
+        history: [Int]
+    ) -> SamplerResult {
+        let finalProbs = samplingDistribution(logits: logits, config: config, history: history)
+
+        // Extract RNG to local var to pass as inout and persist back
+        var rng = config.rng
+        defer { config.rng = rng }
+
         var entropy: Float = 0
         for p in finalProbs where p > 0 {
             entropy -= p * log(p)
         }
 
-        // Step 5: Sample token from final distribution
+        // Sample token from final distribution
         let tokenId = sampleFromDistribution(finalProbs, rng: &rng)
         let probability = finalProbs[tokenId]
 
         return SamplerResult(tokenId: tokenId, probability: probability, entropy: entropy)
     }
 }
-

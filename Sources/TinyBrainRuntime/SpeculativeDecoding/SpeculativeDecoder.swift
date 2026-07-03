@@ -61,6 +61,9 @@ public final class SpeculativeDecoder {
 
     private let statsLock = NSLock()
     private var protectedStats: SpeculativeStats = SpeculativeStats()
+#if DEBUG
+    private var didWarnMissingDraftDistribution = false
+#endif
 
     /// Statistics for monitoring acceptance rates
     public private(set) var stats: SpeculativeStats {
@@ -215,6 +218,7 @@ public final class SpeculativeDecoder {
                         }
                         continue
                     }
+                    self.warnIfDraftDistributionMissing(in: draftTokens)
 
                     // === VERIFY PHASE ===
                     // Run target model on all draft tokens, collecting logits
@@ -324,6 +328,23 @@ public final class SpeculativeDecoder {
         withStatsLock {
             update(&protectedStats)
         }
+    }
+
+    private func warnIfDraftDistributionMissing(in draftTokens: [DraftToken]) {
+#if DEBUG
+        guard draftTokens.contains(where: { $0.probabilityDistribution == nil }) else {
+            return
+        }
+
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        guard !didWarnMissingDraftDistribution else {
+            return
+        }
+
+        didWarnMissingDraftDistribution = true
+        print("TinyBrain warning: speculative decoding received DraftToken without probabilityDistribution; verification falls back to selected-token approximation.")
+#endif
     }
 
     private func withStatsLock<T>(_ body: () -> T) -> T {

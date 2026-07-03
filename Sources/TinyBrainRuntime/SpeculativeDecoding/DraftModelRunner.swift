@@ -82,7 +82,7 @@ public final class DraftModelRunner {
 
         for _ in 0..<count {
             let logits = runner.step(tokenId: currentToken)
-            let probabilityDistribution = Self.samplingDistribution(
+            let probabilityDistribution = Sampler.samplingDistribution(
                 logits: logits,
                 config: mutableConfig,
                 history: history
@@ -125,69 +125,5 @@ public final class DraftModelRunner {
     /// Current position in the draft model's sequence
     public var currentPosition: Int {
         runner.currentPosition
-    }
-
-    /// Computes the final draft sampling distribution without consuming RNG.
-    ///
-    /// This mirrors `Sampler.sampleDetailed` through repetition penalty,
-    /// top-k/top-p filtering, and temperature scaling so verification receives
-    /// the same distribution the draft token was sampled from.
-    private static func samplingDistribution(
-        logits: Tensor<Float>,
-        config: SamplerConfig,
-        history: [Int]
-    ) -> [Float] {
-        var adjustedData = logits.data
-        if config.repetitionPenalty != 1.0 && !history.isEmpty {
-            let penalty = config.repetitionPenalty
-            for tokenId in history where tokenId >= 0 && tokenId < adjustedData.count {
-                if adjustedData[tokenId] > 0 {
-                    adjustedData[tokenId] /= penalty
-                } else {
-                    adjustedData[tokenId] *= penalty
-                }
-            }
-        }
-
-        var workingLogits = Tensor<Float>(shape: logits.shape, data: adjustedData)
-
-        if let k = config.topK {
-            let sorted = workingLogits.data.enumerated().sorted { $0.element > $1.element }
-            let keep = Set(sorted.prefix(max(0, k)).map { $0.offset })
-            var filtered = workingLogits.data
-            for i in 0..<filtered.count where !keep.contains(i) {
-                filtered[i] = -Float.infinity
-            }
-            workingLogits = Tensor<Float>(shape: workingLogits.shape, data: filtered)
-        } else if let p = config.topP {
-            let probs = workingLogits.softmax().data
-            let sorted = probs.enumerated().sorted { $0.element > $1.element }
-            var cumulative: Float = 0
-            var cutoff = sorted.count
-            for (i, (_, probability)) in sorted.enumerated() {
-                cumulative += probability
-                if cumulative >= p {
-                    cutoff = i + 1
-                    break
-                }
-            }
-
-            let keep = Set(sorted.prefix(cutoff).map { $0.offset })
-            var filtered = workingLogits.data
-            for i in 0..<filtered.count where !keep.contains(i) {
-                filtered[i] = -Float.infinity
-            }
-            workingLogits = Tensor<Float>(shape: workingLogits.shape, data: filtered)
-        }
-
-        let temperature = max(0, config.temperature)
-        let scaledData: [Float]
-        if temperature < 0.01 {
-            scaledData = workingLogits.data
-        } else {
-            scaledData = workingLogits.data.map { $0 / temperature }
-        }
-
-        return Tensor<Float>(shape: workingLogits.shape, data: scaledData).softmax().data
     }
 }

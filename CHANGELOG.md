@@ -23,6 +23,7 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 - Tool calling and constrained JSON generation module.
 - Gemma RMSNorm variant using `(1 + w) * x`.
 - Gemma 2B and Phi-2 architecture support.
+- On-device RAG module and `tinybrain-rag` demo (TB-010).
 
 #### Bridges and Demo App
 - TinyBrainProximaKit bridge with `TextEmbedder`.
@@ -32,9 +33,11 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 #### Benchmark Harness
 - `tinybrain-bench` scenario system for scripted benchmark runs.
 
-### Known issues
+### Fixed
 
-- A comprehensive correctness audit (2026-07-03) identified INT4 converter and RoPE convention defects under repair; see repo issues/commit history.
+- HuggingFace tokenizer parity for `byte_fallback` and special-token pre-splitting.
+- Gemma coherence via exact-GELU gate behavior and INT8 output matching the HuggingFace reference.
+- INT4 converter transpose handling, RoPE rotate-half convention, and speculative-decoding exact-distribution correction.
 
 ## [0.1.0] — 2025-10-25
 

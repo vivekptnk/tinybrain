@@ -259,10 +259,19 @@ public struct VerificationSampler {
                 adjusted[i] /= sum
             }
         } else {
-            // Fallback: uniform distribution (should not happen in practice)
-            let uniform = 1.0 / Float(vocabSize)
-            for i in 0..<vocabSize {
-                adjusted[i] = uniform
+            // If p_target == p_draft, correction mass is zero. Fall back to
+            // the target distribution instead of introducing uniform noise.
+            adjusted = Array(targetProbs.prefix(vocabSize))
+            let targetSum = adjusted.reduce(0, +)
+            if targetSum > 0 {
+                for i in 0..<vocabSize {
+                    adjusted[i] /= targetSum
+                }
+            } else {
+                let uniform = 1.0 / Float(vocabSize)
+                for i in 0..<vocabSize {
+                    adjusted[i] = uniform
+                }
             }
         }
 

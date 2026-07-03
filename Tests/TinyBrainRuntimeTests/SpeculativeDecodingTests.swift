@@ -316,6 +316,35 @@ final class VerificationSamplerTests: XCTestCase {
         )
     }
 
+    /// **Test:** When target and draft distributions match, rejection correction has zero mass.
+    ///
+    /// The mathematically safe fallback is to sample from the target distribution, not
+    /// from a uniform distribution that can introduce tokens the target assigns zero
+    /// probability.
+    func testAdjustedResampleFallsBackToTargetDistributionWhenCorrectionMassIsZero() {
+        let vocabSize = 4
+        let targetLogits = Tensor<Float>(
+            shape: TensorShape(vocabSize),
+            data: [-Float.infinity, -Float.infinity, 0.0, -Float.infinity]
+        )
+        let draft = DraftToken(
+            tokenId: 2,
+            logProb: 0.0,
+            probabilityDistribution: [0.0, 0.0, 1.0, 0.0]
+        )
+
+        for seed in UInt64(0)..<UInt64(10) {
+            var sampler = VerificationSampler(seed: seed, acceptanceThreshold: 1.1)
+            let result = sampler.verify(draft: draft, targetLogits: targetLogits, vocabSize: vocabSize)
+
+            if case .rejected(let resampledId) = result {
+                XCTAssertEqual(resampledId, 2, "Fallback should resample from target distribution")
+            } else {
+                XCTFail("Acceptance threshold should force rejection before fallback sampling")
+            }
+        }
+    }
+
     private func sampleIndex(from probabilities: [Float], rng: inout SeededRandomGenerator) -> Int {
         let threshold = Float(rng.next()) / Float(UInt64.max)
         var cumulative: Float = 0
@@ -334,6 +363,67 @@ final class VerificationSamplerTests: XCTestCase {
 // MARK: - DraftModelRunner Tests
 
 final class DraftModelRunnerTests: XCTestCase {
+
+    /// **Test:** The detailed sampler and reusable distribution helper stay exactly aligned.
+    ///
+    /// Speculative decoding stores the draft distribution separately from the sampled
+    /// token. This regression proves both values come from the same post-processing
+    /// pipeline and the same seeded RNG draw.
+    func testSamplerSamplingDistributionMatchesDetailedSeededDraw() {
+        let logits = Tensor<Float>(
+            shape: TensorShape(7),
+            data: [0.25, -0.5, 1.4, 0.8, -1.2, 0.05, 1.1]
+        )
+        let history = [2, 2, 4, -1, 99]
+
+        let cases: [(name: String, config: SamplerConfig, seed: UInt64)] = [
+            (
+                name: "top-k",
+                config: SamplerConfig(temperature: 0.7, topK: 4, repetitionPenalty: 1.25, seed: 0xC1C),
+                seed: 0xC1C
+            ),
+            (
+                name: "top-p",
+                config: SamplerConfig(temperature: 0.9, topP: 0.72, repetitionPenalty: 1.25, seed: 0xC1D),
+                seed: 0xC1D
+            )
+        ]
+
+        for testCase in cases {
+            let distribution = Sampler.samplingDistribution(
+                logits: logits,
+                config: testCase.config,
+                history: history
+            )
+
+            var detailedConfig = testCase.config
+            let detailed = Sampler.sampleDetailed(
+                logits: logits,
+                config: &detailedConfig,
+                history: history
+            )
+
+            var rng = SeededRandomGenerator(seed: testCase.seed)
+            let threshold = Float(rng.next()) / Float(UInt64.max)
+            var cumulative: Float = 0
+            var expectedToken = distribution.count - 1
+            for (index, probability) in distribution.enumerated() {
+                cumulative += probability
+                if threshold <= cumulative {
+                    expectedToken = index
+                    break
+                }
+            }
+
+            let expectedEntropy = distribution.reduce(Float(0)) { entropy, probability in
+                probability > 0 ? entropy - probability * log(probability) : entropy
+            }
+
+            XCTAssertEqual(detailed.tokenId, expectedToken, "\(testCase.name) should use the helper distribution")
+            XCTAssertEqual(detailed.probability.bitPattern, distribution[detailed.tokenId].bitPattern)
+            XCTAssertEqual(detailed.entropy.bitPattern, expectedEntropy.bitPattern)
+        }
+    }
 
     /// **Test:** Draft runner produces tokens with log-probabilities
     func testDraftTokenGeneration() throws {

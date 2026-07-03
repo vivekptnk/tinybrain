@@ -11,6 +11,7 @@
 ///   and checks element-wise agreement within tolerance.
 
 import XCTest
+import Metal
 @testable import TinyBrainMetal
 @testable import TinyBrainRuntime
 
@@ -19,6 +20,15 @@ final class FlashAttentionTests: XCTestCase {
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private let tolerance: Float = 5e-4
+
+    /// Mirrors MetalBackend's FlashAttention shared-memory calculation:
+    /// S_tile(Br*Bc) + row_max(Br) + row_sum(Br) + O_acc(Br*headDim).
+    private func flashAttentionThreadgroupMemoryBytes(headDim: Int) -> Int {
+        let tileBr = 32
+        let tileBc = 32
+        let smemFloats = tileBr * tileBc + tileBr + tileBr + tileBr * headDim
+        return smemFloats * MemoryLayout<Float>.stride
+    }
 
     /// Assert that two Float tensors agree element-wise within `tolerance`.
     private func assertClose(
@@ -420,6 +430,45 @@ final class FlashAttentionTests: XCTestCase {
                     context: "causal attention")
     }
 
+    func testCausalAttentionWithCachedPrefixMatchesCPUReferenceByRow() throws {
+        guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
+        let backend = try MetalBackend()
+
+        let seqLen = 4
+        let kvSeqLen = 12
+        let kvOffset = 8
+        let numHeads = 1
+        let numKVHeads = 1
+        let headDim = 4
+
+        let queryData = (0..<(seqLen * headDim)).map { Float(($0 % 7) - 3) / 5.0 }
+        let keyData = (0..<(kvSeqLen * headDim)).map { Float((($0 * 3) % 11) - 5) / 6.0 }
+        let valueData = (0..<(kvSeqLen * headDim)).map { Float((($0 * 5) % 13) - 6) / 4.0 }
+
+        let query = Tensor<Float>(shape: TensorShape(seqLen, headDim), data: queryData)
+        let keys = Tensor<Float>(shape: TensorShape(kvSeqLen, headDim), data: keyData)
+        let values = Tensor<Float>(shape: TensorShape(kvSeqLen, headDim), data: valueData)
+
+        let gpuOut = try backend.attention(
+            query: query, keys: keys, values: values,
+            mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads,
+            causal: true, kvOffset: kvOffset)
+
+        let cpuOut = cpuAttention(
+            query: query, keys: keys, values: values,
+            mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads,
+            causal: true, kvOffset: kvOffset)
+
+        let rowWidth = numHeads * headDim
+        for row in 0..<seqLen {
+            let range = (row * rowWidth)..<((row + 1) * rowWidth)
+            let gpuRow = Tensor<Float>(shape: TensorShape(rowWidth), data: Array(gpuOut.rawData[range]))
+            let cpuRow = Tensor<Float>(shape: TensorShape(rowWidth), data: Array(cpuOut.rawData[range]))
+            assertClose(gpuRow, cpuRow, tolerance: tolerance,
+                        context: "cached-prefix causal attention row \(row)")
+        }
+    }
+
     func testFullyMaskedAttentionRowsReturnZeros() throws {
         guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
         let backend = try MetalBackend()
@@ -448,6 +497,7 @@ final class FlashAttentionTests: XCTestCase {
     func testHeadDim256ValidatesThreadgroupMemory() throws {
         guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
         let backend = try MetalBackend()
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
 
         let seqLen = 2
         let numHeads = 1
@@ -456,15 +506,25 @@ final class FlashAttentionTests: XCTestCase {
         let query = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
         let keys = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
         let values = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+        let requiredThreadgroupMemory = flashAttentionThreadgroupMemoryBytes(headDim: headDim)
 
-        do {
-            _ = try backend.attention(
+        if device.maxThreadgroupMemoryLength < requiredThreadgroupMemory {
+            XCTAssertThrowsError(try backend.attention(
                 query: query, keys: keys, values: values,
                 mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads)
-        } catch {
-            let message = String(describing: error)
-            XCTAssertTrue(message.contains("FlashAttention") && message.contains("threadgroup memory"),
-                          "Expected descriptive threadgroup memory error, got: \(message)")
+            ) { error in
+                let message = String(describing: error)
+                XCTAssertTrue(message.contains("FlashAttention") && message.contains("threadgroup memory"),
+                              "Expected descriptive threadgroup memory error, got: \(message)")
+            }
+        } else {
+            let output = try backend.attention(
+                query: query, keys: keys, values: values,
+                mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads)
+
+            XCTAssertEqual(output.shape, query.shape)
+            XCTAssertTrue(output.rawData.allSatisfy { $0.isFinite },
+                          "Output should be finite when device threadgroup memory is sufficient")
         }
     }
 
