@@ -50,6 +50,9 @@ struct TinyBrainBench: AsyncParsableCommand {
     @Flag(name: .long, help: "Dry run (parse scenario without execution)")
     var dryRun: Bool = false
 
+    @Flag(name: .long, help: "Allow scenario model load failures to use the built-in toy model")
+    var allowToyFallback: Bool = false
+
     // CHA-108: Perplexity regression harness (INT4 vs INT8 on a pinned slice)
     @Option(name: .long, help: "Run INT4 vs INT8 perplexity on a model (.tbf). Reports both ppl values + delta over a pinned WikiText-2 slice.")
     var perplexity: String?
@@ -64,12 +67,15 @@ struct TinyBrainBench: AsyncParsableCommand {
     var perplexityThreshold: Double = 0.01
 
     // SwiftPM passes XCTest flags when running via `swift test -c release`.
-    // These absorb the unknown arguments so ArgumentParser doesn't reject them.
+    // These absorb the known XCTest arguments; any remaining user arguments are
+    // rejected explicitly in `validateCommandLine()`.
     @Option(name: .customLong("test-bundle-path"), help: .hidden) var testBundlePath: String?
     @Option(name: .customLong("filter"), help: .hidden) var xcFilter: String?
     @Argument(parsing: .captureForPassthrough) var remainingArgs: [String] = []
 
     func run() async throws {
+        try validateCommandLine()
+
         if let modelPath = perplexity {
             try runPerplexity(modelPath: modelPath)
             return
@@ -118,6 +124,50 @@ struct TinyBrainBench: AsyncParsableCommand {
         print("  • Throughput (tokens/sec)")
         print("  • Energy consumption (J/token)")
         print("  • Memory usage (peak MB)")
+    }
+
+    private var normalizedOutput: String? {
+        output?.lowercased()
+    }
+
+    private func validateCommandLine() throws {
+        if !remainingArgs.isEmpty {
+            writeError("Unexpected argument(s): \(remainingArgs.joined(separator: " "))")
+            throw ExitCode.failure
+        }
+
+        if let format = normalizedOutput, format != "json" && format != "markdown" {
+            writeError("Invalid output format '\(format)'. Expected 'json' or 'markdown'.")
+            throw ExitCode.failure
+        }
+
+        guard tokens >= 0 else {
+            writeError("Invalid --tokens value \(tokens). Expected a non-negative integer.")
+            throw ExitCode.failure
+        }
+
+        guard warmup >= 0 else {
+            writeError("Invalid --warmup value \(warmup). Expected a non-negative integer.")
+            throw ExitCode.failure
+        }
+
+        guard perplexityGroupSize > 0 else {
+            writeError("Invalid --perplexity-group-size value \(perplexityGroupSize). Expected a positive integer.")
+            throw ExitCode.failure
+        }
+
+        guard perplexityThreshold >= 0 else {
+            writeError("Invalid --perplexity-threshold value \(perplexityThreshold). Expected a non-negative number.")
+            throw ExitCode.failure
+        }
+
+        if let modelPath = model, !isToyModelName(modelPath) {
+            let resolvedModel = resolveBenchmarkPath(modelPath)
+            guard FileManager.default.fileExists(atPath: resolvedModel) else {
+                writeError("Model file not found: \(resolvedModel)")
+                throw ExitCode.failure
+            }
+        }
     }
     
     func runStreamingDemo() async throws {
@@ -510,17 +560,25 @@ struct TinyBrainBench: AsyncParsableCommand {
     }
     
     func runScenario(path: String) async throws {
-        print("📋 Loading scenario: \(path)")
-        print()
+        printStatus("📋 Loading scenario: \(path)")
+        printStatus("")
         
         guard FileManager.default.fileExists(atPath: path) else {
-            print("❌ Error: Scenario file not found: \(path)", to: &standardError)
+            writeError("Scenario file not found: \(path)")
             throw ExitCode.failure
         }
         
-        let yamlString = try String(contentsOfFile: path, encoding: .utf8)
-        let decoder = YAMLDecoder()
-        let scenarioFile = try decoder.decode(ScenarioFile.self, from: yamlString)
+        let scenarioFile: ScenarioFile
+        do {
+            let yamlString = try String(contentsOfFile: path, encoding: .utf8)
+            let decoder = YAMLDecoder()
+            scenarioFile = try decoder.decode(ScenarioFile.self, from: yamlString)
+        } catch {
+            writeError("Failed to parse scenario file '\(path)': \(error)")
+            throw ExitCode.failure
+        }
+
+        try validateScenarioFile(scenarioFile, scenarioFilePath: path)
         
         if dryRun {
             print("✅ Scenario loaded: \(scenarioFile.scenarios.count) scenarios")
@@ -537,15 +595,15 @@ struct TinyBrainBench: AsyncParsableCommand {
         
         for scenario in scenarioFile.scenarios {
             if verbose {
-                print("Running scenario: \(scenario.name)")
+                printStatus("Running scenario: \(scenario.name)")
             }
             
-            let result = try await runSingleScenario(scenario)
+            let result = try await runSingleScenario(scenario, scenarioFilePath: path)
             results.append(result)
             
             if verbose {
-                print("  ✓ Complete")
-                print()
+                printStatus("  ✓ Complete")
+                printStatus("")
             }
         }
         
@@ -553,23 +611,16 @@ struct TinyBrainBench: AsyncParsableCommand {
         outputResults(results)
     }
     
-    func runSingleScenario(_ scenario: BenchmarkScenario) async throws -> BenchmarkResult {
-        // Create toy model (real models would be loaded here)
-        let config = ModelConfig(
-            numLayers: 2,
-            hiddenDim: 128,
-            numHeads: 4,
-            vocabSize: 100,
-            maxSeqLen: 256
-        )
-        
-        let weights = ModelWeights.makeToyModel(config: config, seed: 42)
+    func runSingleScenario(_ scenario: BenchmarkScenario, scenarioFilePath: String) async throws -> BenchmarkResult {
+        try configureBackend(for: scenario)
+
+        let weights = try loadScenarioWeights(scenario, scenarioFilePath: scenarioFilePath)
         let runner = ModelRunner(weights: weights)
         
         // Warmup
         let actualWarmup = scenario.warmup ?? warmup
         if verbose && actualWarmup > 0 {
-            print("  Warmup: \(actualWarmup) iterations...")
+            printStatus("  Warmup: \(actualWarmup) iterations...")
         }
         
         for _ in 0..<actualWarmup {
@@ -589,7 +640,8 @@ struct TinyBrainBench: AsyncParsableCommand {
         
         for promptText in scenario.prompts {
             // Simple tokenization (character-based for toy model)
-            let prompt = Array(promptText.prefix(10)).map { Int($0.unicodeScalars.first!.value) % 100 }
+            let vocabSize = max(1, weights.config.vocabSize)
+            let prompt = Array(promptText.prefix(10)).map { Int($0.unicodeScalars.first!.value) % vocabSize }
             
             let samplerConfig = SamplerConfig(
                 temperature: scenario.sampler?.temperature ?? 0.7,
@@ -640,6 +692,215 @@ struct TinyBrainBench: AsyncParsableCommand {
             metrics: metrics,
             timestamp: dateFormatter.string(from: Date())
         )
+    }
+
+    private func validateScenarioFile(_ scenarioFile: ScenarioFile, scenarioFilePath: String) throws {
+        guard !scenarioFile.scenarios.isEmpty else {
+            writeError("Scenario file contains no scenarios.")
+            throw ExitCode.failure
+        }
+
+        var names = Set<String>()
+        for (index, scenario) in scenarioFile.scenarios.enumerated() {
+            let label = "scenario \(index + 1)"
+            let name = scenario.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                writeError("Invalid \(label): scenario name must not be empty.")
+                throw ExitCode.failure
+            }
+            guard names.insert(name).inserted else {
+                writeError("Invalid \(label): duplicate scenario name '\(name)'.")
+                throw ExitCode.failure
+            }
+
+            try validateScenario(scenario, label: label, scenarioFilePath: scenarioFilePath)
+        }
+    }
+
+    private func validateScenario(_ scenario: BenchmarkScenario, label: String, scenarioFilePath: String) throws {
+        let modelName = scenario.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelName.isEmpty else {
+            writeError("Invalid \(label): model must not be empty.")
+            throw ExitCode.failure
+        }
+
+        if !isToyModelName(modelName) && !allowToyFallback {
+            let resolvedModel = resolveBenchmarkPath(modelName, anchor: scenarioFilePath)
+            guard FileManager.default.fileExists(atPath: resolvedModel) else {
+                writeError("Invalid \(label) '\(scenario.name)': model not found at \(resolvedModel). Pass --allow-toy-fallback to use the built-in toy model explicitly.")
+                throw ExitCode.failure
+            }
+        }
+
+        guard !scenario.prompts.isEmpty else {
+            writeError("Invalid \(label) '\(scenario.name)': prompts must not be empty.")
+            throw ExitCode.failure
+        }
+
+        guard scenario.maxTokens > 0 else {
+            writeError("Invalid \(label) '\(scenario.name)': max_tokens must be a positive integer.")
+            throw ExitCode.failure
+        }
+
+        if let scenarioWarmup = scenario.warmup, scenarioWarmup < 0 {
+            writeError("Invalid \(label) '\(scenario.name)': warmup must be a non-negative integer.")
+            throw ExitCode.failure
+        }
+
+        if let backend = scenario.backend?.lowercased(), backend != "cpu" && backend != "metal" && backend != "auto" {
+            writeError("Invalid \(label) '\(scenario.name)': backend '\(backend)' is unknown. Expected 'cpu', 'metal', or 'auto'.")
+            throw ExitCode.failure
+        }
+
+        if let temperature = scenario.sampler?.temperature, temperature <= 0 {
+            writeError("Invalid \(label) '\(scenario.name)': sampler.temperature must be greater than zero.")
+            throw ExitCode.failure
+        }
+
+        if let topK = scenario.sampler?.topK, topK <= 0 {
+            writeError("Invalid \(label) '\(scenario.name)': sampler.top_k must be greater than zero.")
+            throw ExitCode.failure
+        }
+
+        if let topP = scenario.sampler?.topP, topP <= 0 || topP > 1 {
+            writeError("Invalid \(label) '\(scenario.name)': sampler.top_p must be in the range (0, 1].")
+            throw ExitCode.failure
+        }
+
+        if let repetitionPenalty = scenario.sampler?.repetitionPenalty, repetitionPenalty <= 0 {
+            writeError("Invalid \(label) '\(scenario.name)': sampler.repetition_penalty must be greater than zero.")
+            throw ExitCode.failure
+        }
+    }
+
+    private func configureBackend(for scenario: BenchmarkScenario) throws {
+        let backend = scenario.backend?.lowercased() ?? "auto"
+
+        switch backend {
+        case "cpu":
+            TinyBrainBackend.preferred = .cpu
+            TinyBrainBackend.metalBackend = nil
+        case "auto":
+            TinyBrainBackend.preferred = .auto
+            if MetalBackend.isAvailable && TinyBrainBackend.metalBackend == nil {
+                do {
+                    TinyBrainBackend.metalBackend = try MetalBackend()
+                } catch {
+                    if verbose {
+                        printStatus("  Metal init failed, using CPU: \(error)")
+                    }
+                }
+            }
+        case "metal":
+            TinyBrainBackend.preferred = .metal
+            guard MetalBackend.isAvailable else {
+                writeError("Scenario '\(scenario.name)' requested Metal backend, but Metal is not available.")
+                throw ExitCode.failure
+            }
+            do {
+                TinyBrainBackend.metalBackend = try MetalBackend()
+            } catch {
+                writeError("Scenario '\(scenario.name)' requested Metal backend, but initialization failed: \(error)")
+                throw ExitCode.failure
+            }
+        default:
+            writeError("Scenario '\(scenario.name)' requested unknown backend '\(backend)'.")
+            throw ExitCode.failure
+        }
+    }
+
+    private func loadScenarioWeights(_ scenario: BenchmarkScenario, scenarioFilePath: String) throws -> ModelWeights {
+        if isToyModelName(scenario.model) {
+            return makeToyScenarioWeights()
+        }
+
+        let resolvedModel = resolveBenchmarkPath(scenario.model, anchor: scenarioFilePath)
+        guard FileManager.default.fileExists(atPath: resolvedModel) else {
+            if allowToyFallback {
+                writeWarning("Scenario '\(scenario.name)' model not found at \(resolvedModel); using toy model because --allow-toy-fallback was passed.")
+                return makeToyScenarioWeights()
+            }
+            writeError("Scenario '\(scenario.name)' model not found at \(resolvedModel). Pass --allow-toy-fallback to use the built-in toy model explicitly.")
+            throw ExitCode.failure
+        }
+
+        do {
+            return try ModelWeights.load(from: resolvedModel)
+        } catch {
+            if allowToyFallback {
+                writeWarning("Scenario '\(scenario.name)' model failed to load from \(resolvedModel): \(error). Using toy model because --allow-toy-fallback was passed.")
+                return makeToyScenarioWeights()
+            }
+            writeError("Scenario '\(scenario.name)' model failed to load from \(resolvedModel): \(error)")
+            throw ExitCode.failure
+        }
+    }
+
+    private func makeToyScenarioWeights() -> ModelWeights {
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        return ModelWeights.makeToyModel(config: config, seed: 42)
+    }
+
+    private func isToyModelName(_ value: String) -> Bool {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "toy"
+    }
+
+    private func resolveBenchmarkPath(_ path: String, anchor: String? = nil) -> String {
+        if (path as NSString).isAbsolutePath { return path }
+        if FileManager.default.fileExists(atPath: path) { return path }
+
+        if let anchor {
+            let anchorDirectory = (anchor as NSString).deletingLastPathComponent
+            let anchoredPath = (anchorDirectory as NSString).appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: anchoredPath) {
+                return anchoredPath
+            }
+        }
+
+        var searchRoots: [String] = [FileManager.default.currentDirectoryPath]
+        if let anchor {
+            searchRoots.append((anchor as NSString).deletingLastPathComponent)
+        }
+
+        for root in searchRoots {
+            var directory = root
+            for _ in 0..<10 {
+                let packagePath = (directory as NSString).appendingPathComponent("Package.swift")
+                if FileManager.default.fileExists(atPath: packagePath) {
+                    return (directory as NSString).appendingPathComponent(path)
+                }
+
+                let parent = (directory as NSString).deletingLastPathComponent
+                if parent == directory || parent == "/" {
+                    break
+                }
+                directory = parent
+            }
+        }
+
+        return path
+    }
+
+    private func printStatus(_ message: String = "") {
+        if normalizedOutput == "json" {
+            print(message, to: &standardError)
+        } else {
+            print(message)
+        }
+    }
+
+    private func writeError(_ message: String) {
+        print("❌ Error: \(message)", to: &standardError)
+    }
+
+    private func writeWarning(_ message: String) {
+        print("⚠️  \(message)", to: &standardError)
     }
     
     func runBenchmark() async throws {
@@ -787,7 +1048,7 @@ struct TinyBrainBench: AsyncParsableCommand {
         let delta = abs(resultINT4.perplexity - resultINT8.perplexity) / resultINT8.perplexity
         let withinBudget = Double(delta) <= perplexityThreshold
 
-        if output == "json" {
+        if normalizedOutput == "json" {
             struct PerplexityOutput: Encodable {
                 let model: String
                 let slice: String
@@ -864,7 +1125,7 @@ struct TinyBrainBench: AsyncParsableCommand {
     }
 
     func outputResults(_ results: [BenchmarkResult]) {
-        if output == "json" {
+        if normalizedOutput == "json" {
             // JSON output
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -873,7 +1134,7 @@ struct TinyBrainBench: AsyncParsableCommand {
                let jsonString = String(data: jsonData, encoding: .utf8) {
                 print(jsonString)
             }
-        } else if output == "markdown" {
+        } else if normalizedOutput == "markdown" {
             // Markdown table output
             print("| Metric | Value |")
             print("|--------|-------|")
@@ -923,4 +1184,3 @@ extension FileHandle: TextOutputStream {
         self.write(data)
     }
 }
-

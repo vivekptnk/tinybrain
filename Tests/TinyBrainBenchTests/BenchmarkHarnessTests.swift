@@ -9,7 +9,22 @@ import Foundation
 /// verify the benchmark harness behavior via subprocess execution.
 final class BenchmarkHarnessTests: XCTestCase {
     
-    let benchPath = ".build/debug/tinybrain-bench"
+    var benchPath: String {
+        let candidateDirectories = [
+            Bundle(for: BenchmarkHarnessTests.self).bundleURL.deletingLastPathComponent(),
+            Bundle.module.bundleURL.deletingLastPathComponent(),
+            Bundle.main.bundleURL.deletingLastPathComponent()
+        ]
+
+        for directory in candidateDirectories {
+            let builtExecutable = directory.appendingPathComponent("tinybrain-bench").path
+            if FileManager.default.isExecutableFile(atPath: builtExecutable) {
+                return builtExecutable
+            }
+        }
+
+        return ".build/debug/tinybrain-bench"
+    }
     
     // MARK: - YAML Scenario Loading
     
@@ -187,11 +202,103 @@ final class BenchmarkHarnessTests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: benchPath)
         process.arguments = ["--invalid-flag"]
+
+        let pipe = Pipe()
+        process.standardError = pipe
         
         try process.run()
         process.waitUntilExit()
         
         XCTAssertNotEqual(process.terminationStatus, 0, "Should fail with invalid arguments")
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(output.contains("invalid") || output.contains("Unexpected"), "Should explain invalid argument")
+    }
+
+    func testInvalidOutputFormat() throws {
+        // Unknown output formats should fail instead of silently falling back.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: benchPath)
+        process.arguments = ["--demo", "--output", "xml", "--tokens", "1"]
+
+        let pipe = Pipe()
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertNotEqual(process.terminationStatus, 0, "Should fail with malformed output format")
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(output.contains("output"), "Should explain invalid output format")
+    }
+
+    func testScenarioMissingModelDoesNotFallbackToToy() throws {
+        // Scenario model paths should be strict unless toy fallback is explicitly enabled.
+        let scenarioPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tinybrain_missing_model_\(UUID().uuidString).yml")
+        let yaml = """
+        scenarios:
+          - name: "Missing Model"
+            model: "Models/does-not-exist-for-bench-test.tbf"
+            prompts:
+              - "Hello"
+            max_tokens: 1
+            backend: cpu
+        """
+        try yaml.write(to: scenarioPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: scenarioPath) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: benchPath)
+        process.arguments = ["--scenario", scenarioPath.path]
+
+        let pipe = Pipe()
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertNotEqual(process.terminationStatus, 0, "Should fail when scenario model is missing")
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(output.contains("model") && output.contains("not found"), "Should explain missing model")
+    }
+
+    func testScenarioAllowsExplicitToyFallback() throws {
+        // The compatibility fallback is allowed only when requested.
+        let scenarioPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tinybrain_allow_fallback_\(UUID().uuidString).yml")
+        let yaml = """
+        scenarios:
+          - name: "Fallback Model"
+            model: "Models/does-not-exist-for-bench-test.tbf"
+            prompts:
+              - "Hello"
+            max_tokens: 1
+            backend: cpu
+        """
+        try yaml.write(to: scenarioPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: scenarioPath) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: benchPath)
+        process.arguments = ["--scenario", scenarioPath.path, "--allow-toy-fallback", "--output", "json"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertEqual(process.terminationStatus, 0, "Explicit toy fallback should keep compatibility")
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(json?["scenario"] as? String, "Fallback Model")
     }
     
     func testZeroTokens() throws {
@@ -207,4 +314,3 @@ final class BenchmarkHarnessTests: XCTestCase {
         XCTAssertTrue(process.terminationStatus == 0 || process.terminationStatus == 1)
     }
 }
-
