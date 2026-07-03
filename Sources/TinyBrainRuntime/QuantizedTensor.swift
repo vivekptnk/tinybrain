@@ -453,10 +453,16 @@ extension Tensor where Element == Float {
         let minVal = rawData.min() ?? 0.0
         let maxVal = rawData.max() ?? 0.0
         
-        // Map [minVal, maxVal] → [-128, 127]
-        let range = maxVal - minVal
+        // Map the observed range into [-128, 127] while keeping zero representable.
+        // If the data is all-positive or all-negative, the ideal zero-point for
+        // [minVal, maxVal] falls outside Int8. Saturating the zero-point expands
+        // the represented range to include zero and keeps round-trip error bounded.
+        let quantMin = min(minVal, 0.0)
+        let quantMax = max(maxVal, 0.0)
+        let range = quantMax - quantMin
         let scale = range > Float.leastNonzeroMagnitude ? range / 255.0 : 1.0
-        let zeroPoint = Int8(round(-minVal / scale - 128.0))
+        let unclampedZeroPoint = round(-quantMin / scale - 128.0)
+        let zeroPoint = Int8(max(-128.0, min(127.0, unclampedZeroPoint)))
         
         var quantizedData = [Int8](repeating: 0, count: shape.count)
         
