@@ -38,11 +38,9 @@ toggling X-Ray while a response is streaming can crash because the observer
 swap is unsynchronized; toggle between generations until the v0.2.x fix lands.
 
 <p align="center">
-  <img src="docs/images/xray-demo.gif" alt="X-Ray Mode Demo" width="700" />
-</p>
-
-<p align="center">
   <img src="docs/images/xray-screenshot.png" alt="X-Ray Mode Screenshot" width="700" />
+  <br />
+  <sub>X-Ray Mode — live attention, layer activations, token probabilities, and KV-cache pages while the model generates.</sub>
 </p>
 
 ---
@@ -125,6 +123,10 @@ swift run tinybrain-chat
 
 This runs with a built-in toy model so you can see the UI immediately. The output won't be real language (it's random weights), but you'll see the full inference pipeline working — streaming tokens, telemetry, and X-Ray Mode.
 
+<p align="center">
+  <img src="docs/images/chat-screenshot.png" alt="TinyBrain chat — streaming generation with live telemetry" width="700" />
+</p>
+
 ### Step 3: Run with a Real Model (Optional)
 
 To get actual language output, you need a real model. Here's how:
@@ -162,7 +164,9 @@ This opens the project in Xcode. Select the **ChatDemo** scheme from the dropdow
 
 The ChatDemo header shows the active model name. Click it to open the model picker — any `.tbf` file in your `Models/` directory appears automatically.
 
-*Screenshots coming with the v0.2.0 release notes.*
+<p align="center">
+  <img src="docs/images/model-picker.png" alt="Model picker — local .tbf models with quantization badges and sizes" width="700" />
+</p>
 
 To switch to Gemma 2B:
 1. Convert the model (see **Supported Models** below for the command)
