@@ -11,12 +11,12 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ### Quantization
 
-- **INT4 quantization (group=32)** — per-group RTN INT4 with FP16 scales and the output head kept INT8. The <=6% v0.2.0 DoD was accepted on measurements later shown vacuous in the 2026-07-03 audit. Corrected M4 Max WikiText-slice artifact measurements are +8.7% Gemma 2B and +13.3% TinyLlama 1.1B perplexity delta vs INT8. The <=6% exit bar now moves to v0.2.1 via GPTQ/AWQ; local real-model gate tests remain red by design and skip on CI.
+- **INT4 quantization (group=32)** — per-group RTN INT4 with FP16 scales and the output head kept INT8. The <=6% v0.2.0 DoD was accepted on measurements later shown vacuous in the 2026-07-03 audit. Corrected M4 Max WikiText-slice artifact measurements are +8.7% Gemma 2B and +13.3% TinyLlama 1.1B perplexity delta vs INT8. The <=6% exit bar now moves to v0.2.1 via GPTQ/AWQ; local real-model gates now run as green regression tripwires above the measured baselines (11%/17%) and skip on CI; the <=6% bound returns as the v0.2.1 exit bar.
 - **INT4 Metal kernel** — fused dequantize+matmul for INT4 weights directly on GPU, eliminating the CPU round-trip that existed in v0.1.0.
 
 ### Attention & Decoding
 
-- **Flash Attention** — O(n) memory attention via tiled computation. Eliminates the full N×N attention matrix for long contexts.
+- **FlashAttention** — Metal kernel implemented and tested in the GPU parity suite; integration into the inference attention path is tracked for v0.3.0.
 - **Speculative decoding** — draft model + verifier loop for faster generation on models with available smaller drafts.
 
 ### Language & Tokenization
@@ -95,7 +95,7 @@ The current `HuggingFaceAdapter` handles `tokenizer.json` (BPE text format). Bin
 
 | Metric | v0.2.0 Target | v0.3.0 Target | Notes |
 |--------|--------------|--------------|-------|
-| TinyLlama tokens/sec (M4 Max) | ≥40 tok/s | ≥60 tok/s | Flash Attention + fused INT4 |
+| TinyLlama tokens/sec (M4 Max) | ≥40 tok/s | ≥60 tok/s | FlashAttention inference-path integration + fused INT4 |
 | TinyLlama memory (INT4) | ~550 MB | ~550 MB | Holds at v0.2.1 level |
 | iPhone 16 Pro tokens/sec | — | ≥15 tok/s | First iOS target |
 | Context window | 2048 tokens | 8192 tokens | Requires sliding-window or RoPE extension |

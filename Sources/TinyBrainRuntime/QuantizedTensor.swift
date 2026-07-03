@@ -120,7 +120,7 @@ public struct QuantizedTensor {
     /// **Per-tensor:** scales.count == 1 (single scale)
     public let scales: [Float]
 
-    /// Group size for per-group quantization (INT4 uses 128 by default)
+    /// Group size for per-group quantization (INT4 uses 32 by default)
     ///
     /// **Why groups?** INT4 has only 16 levels (-7 to 7), so per-tensor
     /// quantization loses too much precision. Grouping 128 consecutive

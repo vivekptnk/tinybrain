@@ -33,7 +33,9 @@ The feature no other LLM runtime has: **live visualization of what's happening i
 | **KV Cache** | Memory page usage — see the cache fill up in real-time |
 | **Entropy Meter** | How confident or uncertain the model is, in plain English |
 
-Toggle it on with one button. Zero performance impact when off.
+Toggle it on with one button. Zero performance impact when off. Known issue:
+toggling X-Ray while a response is streaming can crash because the observer
+swap is unsynchronized; toggle between generations until the v0.2.x fix lands.
 
 <p align="center">
   <img src="docs/images/xray-demo.gif" alt="X-Ray Mode Demo" width="700" />
@@ -135,7 +137,7 @@ pip install torch safetensors
 huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir Models/tinyllama-raw
 
 # Convert to TinyBrain format (~30 seconds)
-python Scripts/convert_model.py \
+python3 Scripts/convert_model.py \
   --input Models/tinyllama-raw/model.safetensors \
   --output Models/tinyllama-1.1b-int8.tbf \
   --auto-config
@@ -312,7 +314,7 @@ Measured on MacBook Pro M4 Max:
 
 | What | How Fast |
 |------|----------|
-| Matrix multiply (1536x1536, Metal) | 4.73ms (historical v0.1.0 measurement — see docs/BENCHMARKS.md) |
+| Matrix multiply (1536x1536, Metal) | 4.73ms (historical v0.1.0 measurement — see docs/adr/002-gpu-resident-tensors-amx-reality.md) |
 | GPU buffer allocation (pooled) | 0.001ms (450x faster than raw) |
 | KV cache append per token | 0.41ms |
 | Maximum context length | 2048 tokens |
@@ -329,9 +331,9 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full versioned milestone plan. 
 
 | Version | Status | Highlights |
 |---------|--------|-----------|
-| **v0.2.0** | In progress | INT4 quantization (group=32), Flash Attention, speculative decoding, Gemma/Phi-2 coverage, ProximaKit + Cartographer bridges |
+| **v0.2.0** | In progress | INT4 quantization (group=32), FlashAttention kernel parity tests, speculative decoding, Gemma/Phi-2 coverage, ProximaKit + Cartographer bridges |
 | **v0.2.1** | Planned | GPTQ/AWQ for <=6% INT4 perplexity exit bar (<=1% stretch), binary SentencePiece tokenizer |
-| **v0.3.0** | Planned | iOS 17 deployment, Mistral/Llama-3 support, 8K context, TikToken adapter |
+| **v0.3.0** | Planned | iOS 17 deployment, Mistral/Llama-3 support, FlashAttention inference integration, 8K context, TikToken adapter |
 
 The [INT4 calibrated quantization targets](docs/ROADMAP.md#v021--int4-precision--tokenizer-completeness) (GPTQ/AWQ, with a <=6% exit bar and <=1% stretch target) are tracked for v0.2.1. v0.2.0 ships naive group=32 RTN INT4 with measured +8.7% Gemma 2B / +13.3% TinyLlama 1.1B perplexity vs INT8 on the 2026-07-03 M4 Max WikiText slice, using shipped converter artifacts with the output head kept INT8.
 
@@ -351,7 +353,7 @@ TinyBrain works with any HuggingFace model that has a `tokenizer.json`. Once con
 **Converting Gemma 2B (requires HuggingFace access grant):**
 ```bash
 huggingface-cli download google/gemma-2b --local-dir Models/gemma-2b-raw
-python Scripts/convert_model.py \
+python3 Scripts/convert_model.py \
   --input Models/gemma-2b-raw \
   --output Models/gemma-2b-int4.tbf \
   --quantize int4 --group-size 32 --auto-config
@@ -360,7 +362,7 @@ python Scripts/convert_model.py \
 **Converting Phi-2:**
 ```bash
 huggingface-cli download microsoft/phi-2 --local-dir Models/phi-2-raw
-python Scripts/convert_model.py \
+python3 Scripts/convert_model.py \
   --input Models/phi-2-raw \
   --output Models/phi-2-int4.tbf \
   --quantize int4 --group-size 32 --auto-config

@@ -58,52 +58,17 @@ Perplexity is measured on the pinned WikiText-2 slice `CHA-108-v1`:
 
 The slice is intentionally short: the scalar per-head attention loop in
 `ModelRunner.attention` is O(N) per token step, so throughput degrades
-sharply as the KV cache grows past ~100 positions. Flash attention (a
-future CHA) will lift this ceiling.
+sharply as the KV cache grows past ~100 positions. A FlashAttention Metal
+kernel is implemented and covered by the GPU parity suite, but integration
+into the inference attention path is tracked for v0.3.0.
 
-### 3.2 v0.2.0 Results (M4 Max, 2026-04-24)
+### 3.2 Superseded Measurement (Methodology Note)
 
-| Quantization | Group size | PPL | Δ vs INT8 | Predictions | Wall time | Within v0.2.0 tripwire |
-|---|---|---|---|---|---|---|
-| INT8 (baseline) | — | 276.57 | — | 64 | 38.4 s | ✅ |
-| **INT4 RTN** | **32** | **262.05** | **−5.25 %** | **64** | **42.2 s** | **✅ ≤ 17 % TinyLlama tripwire** |
-| INT4 RTN | 128 | 346.22 | +25.18 % | 64 | 39.5 s | ❌ > 17 % TinyLlama tripwire |
-
-Raw JSON (group=32, canonical run):
-
-```json
-{
-  "deltaRelative": 0.052492447,
-  "groupSize": 32,
-  "int4Perplexity": 262.0519,
-  "int4Seconds": 42.239017963409424,
-  "int8Perplexity": 276.56973,
-  "int8Seconds": 38.4461909532547,
-  "model": "Models/tinyllama-1.1b-int8.tbf",
-  "numPredictions": 64,
-  "seed": "CHA-108-v1",
-  "thresholdRelative": 0.17,
-  "withinThreshold": true
-}
-```
-
-### 3.3 Interpretation
-
-**INT4 ppl (262) < INT8 ppl (277) at group=32.** Negative delta (−5.25 %) is
-expected and acceptable. RTN INT4 at tight group size can act as a mild
-regularizer on short, low-context sequences; the absolute delta is well within
-the current TinyLlama v0.2.0 regression tripwire. The `≤ 6 %` threshold is the
-v0.2.1 calibrated-quantization target for GPTQ/AWQ, not the v0.2.0 enforced
-bound.
-
-**group=128 exceeds budget (+25 %).** Coarse groups allow large outlier weights
-to dominate each scale, inflating quantization error for the 2048→4 bpw
-compression. Tighter group=32 is the v0.2.0 default (see CHA-104, CHA-155).
-
-**Wall time is CPU-bound.** Both runs run through the scalar CPU attention
-loop — Metal is initialized but the attention path hasn't moved to GPU yet.
-The ~42 s for 64 tokens (≈ 1.5 tok/s) is therefore a lower bound on future
-performance once the Metal attention kernel ships.
+A 2026-04-24 proxy run previously appeared here as a current TinyLlama INT4
+result. That run used an in-process double-quantization path
+(`FP16 -> INT8 -> INT4`) at a different absolute-perplexity scale, so it was
+retired on 2026-07-03. The shipped-artifact measurements in §3.4 are the
+authoritative v0.2.0 regression tripwires.
 
 ### 3.4 v0.2.0 Tripwires and v0.2.1 Target
 
@@ -155,5 +120,5 @@ python3 Scripts/pretokenize_wikitext.py
 |---|---|---|
 | v0.2.0 | Shipped-artifact RTN tripwires: Gemma 2B ≤ 11 %, TinyLlama ≤ 17 % at group=32 | CHA-108 ✅ |
 | v0.2.1 | `\|Δppl\|/ppl_INT8 ≤ 6 %` target (GPTQ/AWQ calibration); 1 % stretch | CHA-156 |
-| Future | Flash attention — lift the 100-token throughput cliff | TBD |
+| v0.3.0 | FlashAttention Metal kernel integration into the inference attention path; kernel is implemented and GPU parity tested | TBD |
 | Future | Extend slice to 512+ tokens once attention is on GPU | TBD |

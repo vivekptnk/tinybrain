@@ -15,7 +15,7 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 #### Quantization and Metal Kernels
 - INT4 per-group quantization with group size 32 and FP16 scales.
 - Fused Metal INT4 dequantization plus matrix multiplication kernel.
-- FlashAttention Metal kernel using tiled attention and online softmax.
+- FlashAttention Metal kernel using tiled attention and online softmax, implemented and tested in the GPU parity suite; integration into the inference attention path is tracked for v0.3.0.
 - TBF loader fix for INT4 packed tensors.
 
 #### Generation Runtime
@@ -38,10 +38,25 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 - HuggingFace tokenizer parity for `byte_fallback` and special-token pre-splitting.
 - Gemma coherence via exact-GELU gate behavior and INT8 output matching the HuggingFace reference.
 - INT4 converter transpose handling, RoPE rotate-half convention, and speculative-decoding exact-distribution correction.
+- Five Metal GPU-backend correctness defects: per-channel INT4 scale collapse, causal masking, INT4 buffer cache, threadgroup-memory guard, and masked-row NaN.
+- Asymmetric quantization Int8 zero-point overflow trap on one-sided tensors.
+
+### Performance
+
+- Streaming quantized matmul eliminated full FP32 weight re-materialization per token; scripted RAG question latency improved from >11min to ~1min.
+- BPE merge loop moved from O(n^2) to batched best-pair merges; tokenizer suite pathological case improved from ~20min to seconds.
+
+### Changed
+
+- BREAKING (924fcb7): `tinybrain-bench` now exits non-zero and writes stderr diagnostics for unknown or invalid arguments. Scenario runs no longer silently substitute the toy model when the requested model is missing; pass explicit `--allow-toy-fallback` to opt in. Scripts relying on the old silent behavior must update.
 
 ### Known limitations
 
 - INT4 quality measured honestly: 8.7% (Gemma) / 13.3% (TinyLlama) perplexity delta vs INT8 at group=32 RTN with INT8 output head — above the 6% target; GPTQ/AWQ tracked for 0.2.1. Real-model gates now run as green regression tripwires above these measured baselines; the <=6% bound returns as the v0.2.1 exit bar.
+
+### Known issues
+
+- known issue: toggling X-Ray while a response is streaming can crash because `ModelRunner.observer` swaps are unsynchronized; toggle between generations until the v0.2.x fix lands. Producer-side generation can also continue briefly after cancel before stopping.
 
 ## [0.1.0] — 2025-10-25
 

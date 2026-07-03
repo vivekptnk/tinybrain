@@ -203,7 +203,7 @@ pytest Tests/test_convert_model.py -v
 
 ### What's the test count?
 
-**Total:** 179 tests (as of TB-007)
+**Total:** 596 tests in the CI gate (as of 2026-07-03; 179 at TB-007)
 - TinyBrainRuntime: 80+ tests
 - TinyBrainMetal: 20+ tests
 - TinyBrainTokenizer: 20+ tests

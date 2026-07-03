@@ -84,7 +84,7 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 
 #### Runtime Layer
 - **ModelRunner**: Orchestrates the inference pipeline
-- **InferenceObserver**: Zero-cost observation hooks for X-Ray Mode
+- **InferenceObserver**: Zero-cost observation hooks for X-Ray Mode (observer swaps are not yet thread-safe mid-generation; see Known issues)
 - **Tokenizer**: Text ↔ token ID conversion (BPE + HuggingFace adapter, including `byte_fallback`)
 - **Sampler**: Probabilistic next-token selection (temperature, top-K/P, repetition penalty)
 - **KV-Cache**: Paged attention key-value pairs (2048 tokens)
@@ -825,7 +825,7 @@ class ChatViewModel: ObservableObject {
 ### 12.1 Phase 2 Features
 
 - **INT4 Quality Hardening**: GPTQ/AWQ calibration and output-projection precision improvements
-- **FlashAttention**: Fused attention kernel
+- **FlashAttention**: Metal kernel implemented and GPU parity tested; inference-path integration tracked for v0.3.0
 - **ANE Integration**: Core ML hybrid mode
 - **Speculative Decoding**: Parallel token generation
 
