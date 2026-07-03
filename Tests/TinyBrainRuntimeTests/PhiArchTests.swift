@@ -180,6 +180,45 @@ final class PhiArchTests: XCTestCase {
 
     // MARK: - Partial RoPE
 
+    func testPartialRoPERotatesOnlyConfiguredPrefixWithRotateHalfReference() {
+        let runner = ModelRunner(config: ModelConfig(numLayers: 1,
+                                                     hiddenDim: 8,
+                                                     numHeads: 1,
+                                                     vocabSize: 16,
+                                                     architecture: "phi",
+                                                     partialRotaryFactor: 0.5))
+        let input: [Float] = [1, 2, 3, 4, 10, 11, 12, 13]
+
+        let result = runner.applyRoPE(input,
+                                      headDim: 8,
+                                      numHeads: 1,
+                                      position: 1,
+                                      rotaryDims: 4)
+
+        // rotate-half over dims 0..<4:
+        // dim 0 pairs with 2 at angle 1.0; dim 1 pairs with 3 at angle 0.01.
+        let expected: [Float] = [
+            -1.9841107,
+             1.9599007,
+             2.4623779,
+             4.0197997,
+            10.0,
+            11.0,
+            12.0,
+            13.0,
+        ]
+
+        for i in 0..<expected.count {
+            XCTAssertEqual(result[i], expected[i], accuracy: 1e-5,
+                           "Partial RoPE mismatch at index \(i)")
+        }
+
+        for i in 4..<8 {
+            XCTAssertEqual(result[i], input[i], accuracy: 0,
+                           "Partial RoPE must leave tail dim \(i) unrotated")
+        }
+    }
+
     func testPartialRoPEProducesDifferentLogitsThanFullRoPE() {
         // Use hiddenDim=64 so headDim=16 — more rotary pairs means the partial vs
         // full difference accumulates over more dimensions.  Step to position 30 so

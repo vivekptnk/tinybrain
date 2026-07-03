@@ -458,6 +458,9 @@ private extension ModelRunner {
         return residual1 + ffnOutput
     }
 
+}
+
+extension ModelRunner {
     /// Apply Rotary Position Embeddings (RoPE) to a vector of shape [numHeads * headDim].
     ///
     /// - Parameters:
@@ -467,32 +470,46 @@ private extension ModelRunner {
     ///   - position: Token position in the sequence.
     ///   - rotaryDims: How many dims per head to rotate (default = headDim for full RoPE).
     ///     Phi-2 uses `Int(headDim * 0.4)`; remaining dims are left unchanged.
+    ///     The rotary span uses HuggingFace's rotate-half convention, pairing
+    ///     dimension `d` with `d + rotaryDims / 2`.
     func applyRoPE(_ vec: [Float], headDim: Int, numHeads: Int, position: Int,
                    rotaryDims: Int? = nil) -> [Float] {
         var result = vec
-        let rDims = rotaryDims ?? headDim
+        let requestedRotaryDims = rotaryDims ?? headDim
+        precondition(requestedRotaryDims <= headDim, "rotaryDims must be <= headDim")
+
+        // rotate-half needs complete pairs. Real checkpoints use even rotary
+        // spans; tiny toy configs that request an odd span leave the unpaired
+        // final rotary dimension unchanged.
+        let rDims = requestedRotaryDims - (requestedRotaryDims % 2)
+        let halfRotaryDims = rDims / 2
+
         for head in 0..<numHeads {
             let offset = head * headDim
-            for i in stride(from: 0, to: rDims, by: 2) {
+            for d in 0..<halfRotaryDims {
                 // Frequencies computed over the rotary subspace (rDims), not full headDim.
-                let freqIdx = Float(i) / Float(rDims)
+                let freqIdx = Float(2 * d) / Float(rDims)
                 let theta = pow(10000.0, -freqIdx)
                 let angle = Float(position) * theta
 
                 let cosA = cos(angle)
                 let sinA = sin(angle)
 
-                let x0 = vec[offset + i]
-                let x1 = vec[offset + i + 1]
+                let firstIndex = offset + d
+                let secondIndex = offset + d + halfRotaryDims
+                let x0 = vec[firstIndex]
+                let x1 = vec[secondIndex]
 
-                result[offset + i]     = x0 * cosA - x1 * sinA
-                result[offset + i + 1] = x0 * sinA + x1 * cosA
+                result[firstIndex] = x0 * cosA - x1 * sinA
+                result[secondIndex] = x0 * sinA + x1 * cosA
             }
             // Dims rDims..<headDim remain unchanged in `result` (already copied from `vec`).
         }
         return result
     }
+}
 
+private extension ModelRunner {
     func attention(hiddenRow: Tensor<Float>,
                    layerWeights: AttentionProjectionWeights,
                    layerIndex: Int) -> Tensor<Float> {

@@ -70,22 +70,19 @@ final class GemmaArchTests: XCTestCase {
     }
 
     func testRmsNormWithOffsetMatchesManualFormula() {
-        // Arbitrary input + non-trivial weights: compare against the
-        // reference `(x / rms(x)) * (1 + w)` formula directly.
+        // Arbitrary input + non-trivial weights: compare against hand-computed
+        // reference values for `(x / rms(x)) * (1 + w)`.
         let x = Tensor<Float>(shape: TensorShape(1, 4), data: [2.0, -1.0, 3.0, 0.5])
         let w = Tensor<Float>(shape: TensorShape(4), data: [0.1, -0.2, 0.05, 0.3])
         let eps: Float = 1e-5
 
-        let meanSquare: Float = (4.0 + 1.0 + 9.0 + 0.25) / 4.0  // = 3.5625
-        let invRMS: Float = 1.0 / sqrt(meanSquare + eps)
-
         let result = x.rmsNormWithOffset(weight: w, epsilon: eps)
 
         let expected: [Float] = [
-             2.0  * invRMS * (1.0 + 0.1),
-            -1.0  * invRMS * (1.0 - 0.2),
-             3.0  * invRMS * (1.0 + 0.05),
-             0.5  * invRMS * (1.0 + 0.3),
+             1.1655868,
+            -0.42384976,
+             1.6689084,
+             0.34437793,
         ]
 
         for i in 0..<4 {
