@@ -340,6 +340,32 @@ public struct Tensor<Element: TensorElement> {
         set {
             ensureUniqueStorage()
             storage.cpuData = newValue
+            storage.location = .cpu
+        }
+        // **Perf (CHA-perf):** In-place mutation accessor.
+        //
+        // Without `_modify`, an element write such as `tensor.data[i] = x`
+        // desugars to get → mutate-temporary → set. The getter hands back the
+        // storage array (buffer shared with `storage.cpuData`), so mutating the
+        // temporary triggers a full copy-on-write of the *entire* array — every
+        // single element write became O(n), making element-by-element fills
+        // (KV-cache page writes, RMSNorm/SiLU/GELU loops, tensor subscript
+        // setter) O(n²).  Profiling `tinybrain-rag` showed `_platform_memmove`
+        // via `_ArrayBuffer._consumeAndCreateNew` dominating the run.
+        //
+        // `_modify` yields an inout reference straight to the backing store so
+        // the caller edits it in place with no copy. After `ensureUniqueStorage`
+        // the storage class is uniquely owned by this tensor, and its `cpuData`
+        // buffer is (or becomes, on first write) uniquely referenced, so writes
+        // stay in place across iterations. Values produced are bit-identical to
+        // the previous get/set path.
+        _modify {
+            ensureUniqueStorage()
+            if storage.cpuData == nil {
+                _ = storage.getCPUData()   // materialize CPU copy (GPU-resident case)
+            }
+            storage.location = .cpu        // mutating CPU data invalidates any GPU copy
+            yield &storage.cpuData!
         }
     }
 

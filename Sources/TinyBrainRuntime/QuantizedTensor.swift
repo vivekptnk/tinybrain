@@ -26,6 +26,38 @@
 /// Each channel uses its full Int8 range efficiently!
 
 import Foundation
+import Accelerate
+
+/// Test/telemetry hook for the quantized CPU matmul path.
+///
+/// Tracks how often `Tensor.matmul(_:)` had to fall back to full FP32 weight
+/// materialization (`QuantizedTensor.dequantize()`) instead of the streaming
+/// quantized CPU paths. Perf regression tests assert this stays at zero across
+/// generation, proving the linear path never re-materializes whole weight
+/// matrices to Float32.
+public enum QuantizedMatmulStats {
+    /// Number of quantized matmuls that materialized the full FP32 weight matrix.
+    public static var fullMatrixDequantizeCount = 0
+
+    /// Backward-compatible alias for older tests/logging.
+    public static var fullDequantFallbackCount: Int {
+        get { fullMatrixDequantizeCount }
+        set { fullMatrixDequantizeCount = newValue }
+    }
+
+    /// Number of times the streaming INT8 CPU path handled a matmul.
+    public static var streamingINT8Count = 0
+
+    /// Number of times the streaming INT4 CPU path handled a matmul.
+    public static var streamingINT4Count = 0
+
+    /// Reset counters (call before a measured window).
+    public static func reset() {
+        fullMatrixDequantizeCount = 0
+        streamingINT8Count = 0
+        streamingINT4Count = 0
+    }
+}
 
 /// Quantization mode
 public enum QuantizationMode {
@@ -107,9 +139,8 @@ public struct QuantizedTensor {
     /// Quantization mode used
     public let mode: QuantizationMode
 
-    /// **REVIEW HITLER FIX COMPLETE:** NO cache needed!
-    /// We have INT8/INT4 Metal kernels that compute directly from quantized data.
-    /// Memory: Just the quantized data - no Float32 materialization!
+    /// Runtime matmul paths compute directly from quantized data.
+    /// Memory: Just the quantized data - no Float32 materialization.
 
     /// Create quantized tensor
     public init(shape: TensorShape,
@@ -622,7 +653,7 @@ extension Tensor where Element == Float {
     }
     /// Matrix multiplication with quantized weights
     ///
-    /// **REVIEW HITLER FIX:** Now uses INT8 Metal kernel (no Float32 materialization!)
+    /// Uses quantized kernels/streaming CPU paths without Float32 materialization.
     ///
     /// Example:
     /// ```swift
@@ -631,8 +662,6 @@ extension Tensor where Element == Float {
     /// let output = input.matmul(weights)  // Computes directly from INT8!
     /// ```
     public func matmul(_ quantized: QuantizedTensor) -> Tensor<Float> {
-        // Diagnostic removed
-
         // Try Metal kernel first (supports both INT8 and INT4)
         if let metalBackend = TinyBrainBackend.metalBackend as? QuantizedMatMulBackend {
             do {
@@ -643,8 +672,209 @@ extension Tensor where Element == Float {
             }
         }
 
-        // Fallback: Dequantize then CPU matmul
+        // Fast CPU path: stream quantized weights directly, never materializing
+        // the full FP32 weight matrix. Generation is a matVEC (batch 1), so the
+        // whole matrix never needs to exist in Float32. This keeps memory
+        // traffic to the quantized payload and eliminates the per-call
+        // multi-MB Float32 allocation.
+        if let fast = streamingQuantizedMatmulCPU(quantized) {
+            return fast
+        }
+
+        // Fallback: dequantize then CPU matmul for unsupported layouts/modes.
+        QuantizedMatmulStats.fullMatrixDequantizeCount += 1
         let weights = quantized.dequantize()
         return self.matmulCPU(weights)
+    }
+
+    /// Streaming quantized matmul that avoids materializing the FP32 weight matrix.
+    private func streamingQuantizedMatmulCPU(_ q: QuantizedTensor) -> Tensor<Float>? {
+        switch q.precision {
+        case .int8:
+            guard let result = streamingINT8MatmulCPU(q) else { return nil }
+            QuantizedMatmulStats.streamingINT8Count += 1
+            return result
+        case .int4:
+            guard let result = streamingINT4MatmulCPU(q) else { return nil }
+            QuantizedMatmulStats.streamingINT4Count += 1
+            return result
+        }
+    }
+
+    /// Streaming INT8 matmul that avoids materializing the FP32 weight matrix.
+    ///
+    /// Handles the dominant inference case: a contiguous Float32 input `[M, K]`
+    /// multiplied by symmetric / per-channel INT8 weights `[K, N]` whose
+    /// zero-point is 0 (real per-channel model weights, and per-tensor
+    /// symmetric). Returns `nil` for anything it does not handle (INT4,
+    /// asymmetric zero-points, non-contiguous input, non-2D shapes) so the
+    /// caller can fall back to the reference dequantize path.
+    ///
+    /// For each output row we accumulate, over input features `r`,
+    /// `acc[c] += input[r] * Float(int8[r][c])` — reading each contiguous INT8
+    /// weight row once into a small reused scratch buffer via `vDSP_vflt8`, then
+    /// fusing the scaled add with `vDSP_vsma`. The per-output-channel scale is
+    /// applied once at the end (`vDSP_vmul`). This is mathematically the
+    /// dequantize+matmul result; float reassociation is well within the
+    /// quantization error and leaves greedy argmax unchanged.
+    private func streamingINT8MatmulCPU(_ q: QuantizedTensor) -> Tensor<Float>? {
+        guard q.precision == .int8,
+              q.shape.dimensions.count == 2,
+              self.shape.dimensions.count == 2,
+              self.isContiguous else {
+            return nil
+        }
+
+        let rows = q.shape.dimensions[0]   // in_features  (K)
+        let cols = q.shape.dimensions[1]   // out_features (N)
+        let m = self.shape.dimensions[0]
+        let k = self.shape.dimensions[1]
+        guard k == rows, cols > 0, rows > 0 else { return nil }
+
+        let perChannel: Bool
+        switch q.mode {
+        case .perChannel:
+            guard q.scales.count == cols else { return nil }
+            if let zeroPoints = q.zeroPoints, zeroPoints.contains(where: { $0 != 0 }) {
+                return nil
+            }
+            perChannel = true
+        case .symmetric:
+            guard q.scales.count == 1 else { return nil }
+            if let zeroPoints = q.zeroPoints, zeroPoints.first != 0 {
+                return nil
+            }
+            perChannel = false
+        default:
+            return nil                                // asymmetric / int4* → fallback
+        }
+
+        let input = self.data                          // contiguous [m*k]
+        let qData = q.data                             // [rows*cols] Int8, row-major
+        let scales = q.scales
+        var out = [Float](repeating: 0, count: m * cols)
+        var rowFloat = [Float](repeating: 0, count: cols)  // reused scratch
+        var acc = [Float](repeating: 0, count: cols)       // reused accumulator
+        let n = vDSP_Length(cols)
+
+        input.withUnsafeBufferPointer { inPtr in
+        qData.withUnsafeBufferPointer { qPtr in
+        scales.withUnsafeBufferPointer { sPtr in
+        out.withUnsafeMutableBufferPointer { outPtr in
+        rowFloat.withUnsafeMutableBufferPointer { rowPtr in
+        acc.withUnsafeMutableBufferPointer { accPtr in
+            let qBase = qPtr.baseAddress!
+            let rowBase = rowPtr.baseAddress!
+            let accBase = accPtr.baseAddress!
+            for mi in 0..<m {
+                vDSP_vclr(accBase, 1, n)                       // acc = 0
+                let inBase = inPtr.baseAddress! + mi * k
+                for r in 0..<rows {
+                    var x = inBase[r]
+                    // rowFloat = Float(int8 weight row r)
+                    vDSP_vflt8(qBase + r * cols, 1, rowBase, 1, n)
+                    // acc += x * rowFloat
+                    vDSP_vsma(rowBase, 1, &x, accBase, 1, accBase, 1, n)
+                }
+                let outBase = outPtr.baseAddress! + mi * cols
+                if perChannel {
+                    vDSP_vmul(accBase, 1, sPtr.baseAddress!, 1, outBase, 1, n)  // out = acc .* scales
+                } else {
+                    var s = scales[0]
+                    vDSP_vsmul(accBase, 1, &s, outBase, 1, n)                    // out = acc * scale
+                }
+            }
+        }}}}}}
+
+        return Tensor(shape: TensorShape(m, cols), data: out)
+    }
+
+    /// Streaming INT4 per-group matmul.
+    ///
+    /// INT4 scales are per flattened group, so the scale cannot be applied once
+    /// after accumulation the way INT8 per-channel can. Instead, each quantized
+    /// weight row is unpacked and dequantized into a reused row scratch buffer,
+    /// then fused into the dot product with one `vDSP_vsma` call per input row.
+    private func streamingINT4MatmulCPU(_ q: QuantizedTensor) -> Tensor<Float>? {
+        guard q.precision == .int4,
+              q.mode == .int4,
+              q.shape.dimensions.count == 2,
+              self.shape.dimensions.count == 2,
+              self.isContiguous else {
+            return nil
+        }
+
+        let rows = q.shape.dimensions[0]
+        let cols = q.shape.dimensions[1]
+        let m = self.shape.dimensions[0]
+        let k = self.shape.dimensions[1]
+        guard k == rows, cols > 0, rows > 0 else { return nil }
+
+        let groupSize = q.groupSize > 0 ? q.groupSize : q.shape.count
+        let groupCount = (q.shape.count + groupSize - 1) / groupSize
+        guard q.scales.count == groupCount else { return nil }
+        if let zeroPoints = q.zeroPoints {
+            guard zeroPoints.count == groupCount else { return nil }
+        }
+
+        let input = self.data
+        let qData = q.data
+        let scales = q.scales
+        let zeroPoints = q.zeroPoints
+        var out = [Float](repeating: 0, count: m * cols)
+        var rowFloat = [Float](repeating: 0, count: cols)
+        var acc = [Float](repeating: 0, count: cols)
+        let n = vDSP_Length(cols)
+
+        input.withUnsafeBufferPointer { inPtr in
+        qData.withUnsafeBufferPointer { qPtr in
+        scales.withUnsafeBufferPointer { sPtr in
+        out.withUnsafeMutableBufferPointer { outPtr in
+        rowFloat.withUnsafeMutableBufferPointer { rowPtr in
+        acc.withUnsafeMutableBufferPointer { accPtr in
+            let qBase = qPtr.baseAddress!
+            let rowBase = rowPtr.baseAddress!
+            let accBase = accPtr.baseAddress!
+
+            for mi in 0..<m {
+                vDSP_vclr(accBase, 1, n)
+                let inBase = inPtr.baseAddress! + mi * k
+
+                for r in 0..<rows {
+                    let rowStart = r * cols
+                    var col = 0
+                    while col < cols {
+                        let linearIndex = rowStart + col
+                        let groupIndex = linearIndex / groupSize
+                        let groupEnd = min((groupIndex + 1) * groupSize, rowStart + cols)
+                        let scale = sPtr.baseAddress![groupIndex]
+                        let zeroPoint = zeroPoints?[groupIndex] ?? 0
+
+                        for i in linearIndex..<groupEnd {
+                            let localCol = i - rowStart
+                            let byte = qBase[i / 2]
+                            let raw: Int8
+                            if i % 2 == 0 {
+                                raw = (byte >> 4) & 0x0F
+                            } else {
+                                raw = byte & 0x0F
+                            }
+                            let signed = raw > 7 ? raw - 16 : raw
+                            rowBase[localCol] = (Float(signed) - Float(zeroPoint)) * scale
+                        }
+
+                        col += groupEnd - linearIndex
+                    }
+
+                    var x = inBase[r]
+                    vDSP_vsma(rowBase, 1, &x, accBase, 1, accBase, 1, n)
+                }
+
+                let outBase = outPtr.baseAddress! + mi * cols
+                outBase.update(from: accBase, count: cols)
+            }
+        }}}}}}
+
+        return Tensor(shape: TensorShape(m, cols), data: out)
     }
 }
