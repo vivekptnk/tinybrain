@@ -43,18 +43,31 @@ public enum HuggingFaceAdapter {
         
         // Extract special tokens
         let specialTokens = extractSpecialTokens(from: json, vocab: vocab)
+
+        // Extract HF model behavior that affects parity with SentencePiece BPE.
+        let byteFallback = (model["byte_fallback"] as? Bool) ?? false
+        let preTokenizedTokens = extractPreTokenizedTokens(
+            from: json["added_tokens"] as? [[String: Any]],
+            vocab: vocab
+        )
+        let usesSentencePieceWhitespace = extractSentencePieceWhitespaceNormalizer(from: json)
         
         #if DEBUG
         print("📖 Loaded HuggingFace tokenizer:")
         print("   Vocabulary size: \(vocab.count)")
         print("   Merge rules: \(merges.count)")
         print("   Special tokens: BOS=\(specialTokens.bos_token ?? "none"), EOS=\(specialTokens.eos_token ?? "none")")
+        print("   Byte fallback: \(byteFallback)")
+        print("   Pre-tokenized added tokens: \(preTokenizedTokens.count)")
         #endif
         
         return BPETokenizer(
             vocab: vocab,
             merges: merges,
-            specialTokens: specialTokens
+            specialTokens: specialTokens,
+            byteFallback: byteFallback,
+            preTokenizedTokens: preTokenizedTokens,
+            usesSentencePieceWhitespace: usesSentencePieceWhitespace
         )
     }
     
@@ -268,5 +281,68 @@ public enum HuggingFaceAdapter {
             unk_token: unkToken,
             pad_token: padToken
         )
+    }
+
+    // MARK: - Added Tokens / Normalizer Extraction
+
+    /// Extract added tokens that HuggingFace matches before model tokenization.
+    ///
+    /// Added tokens are not merge candidates; they are split out first and mapped
+    /// directly to their declared IDs. This is what keeps `</s>` at id 2 instead
+    /// of letting the text `</s>` flow through BPE merges.
+    private static func extractPreTokenizedTokens(
+        from addedTokens: [[String: Any]]?,
+        vocab: [String: Int]
+    ) -> Set<String> {
+        guard let addedTokens else {
+            return []
+        }
+
+        var tokens: Set<String> = []
+        for tokenInfo in addedTokens {
+            guard let content = tokenInfo["content"] as? String,
+                  let id = tokenInfo["id"] as? Int,
+                  vocab[content] == id else {
+                continue
+            }
+
+            tokens.insert(content)
+        }
+
+        return tokens
+    }
+
+    /// Detect the common LLaMA/TinyLlama normalizer:
+    /// `Prepend("▁")` plus replacing spaces with `▁`.
+    ///
+    /// A nil return lets BPETokenizer fall back to vocabulary-based detection for
+    /// non-HF adapters and small TinyBrain fixtures.
+    private static func extractSentencePieceWhitespaceNormalizer(from json: [String: Any]) -> Bool? {
+        guard let normalizer = json["normalizer"] as? [String: Any] else {
+            return nil
+        }
+
+        return normalizerUsesSentencePieceWhitespace(normalizer)
+    }
+
+    private static func normalizerUsesSentencePieceWhitespace(_ normalizer: [String: Any]) -> Bool {
+        if let type = normalizer["type"] as? String {
+            if type == "Prepend", normalizer["prepend"] as? String == "\u{2581}" {
+                return true
+            }
+
+            if type == "Replace",
+               let pattern = normalizer["pattern"] as? [String: Any],
+               pattern["String"] as? String == " ",
+               normalizer["content"] as? String == "\u{2581}" {
+                return true
+            }
+        }
+
+        if let normalizers = normalizer["normalizers"] as? [[String: Any]] {
+            return normalizers.contains { normalizerUsesSentencePieceWhitespace($0) }
+        }
+
+        return false
     }
 }

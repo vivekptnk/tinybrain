@@ -112,6 +112,18 @@ public struct BPETokenizer: Tokenizer {
     /// Priority map for efficient merge lookups
     /// Maps (token1, token2) → merge priority (lower = higher priority)
     private let mergePriority: [String: [String: Int]]
+
+    /// Whether unknown BPE pieces should be decomposed into `<0xNN>` byte tokens.
+    private let byteFallbackEnabled: Bool
+
+    /// Tokens declared by the source tokenizer as added/special tokens.
+    ///
+    /// These are matched before BPE so literals such as `</s>` map to their
+    /// exact vocabulary IDs and never merge through normal text.
+    private let preTokenizedTokens: [String]
+
+    /// Whether text segments use SentencePiece/HF metaspace normalization.
+    private let usesSentencePieceWhitespace: Bool
     
     // MARK: - Initialization
     
@@ -124,9 +136,15 @@ public struct BPETokenizer: Tokenizer {
     ///   - vocab: Token string → ID mapping
     ///   - merges: BPE merge rules (ordered)
     ///   - specialTokens: Special token configuration
+    ///   - byteFallback: When true, unknown pieces encode as UTF-8 `<0xNN>` tokens.
+    ///   - preTokenizedTokens: Literal tokens to split out before BPE.
+    ///   - usesSentencePieceWhitespace: Overrides automatic `▁` whitespace detection.
     public init(vocab: [String: Int],
                 merges: [[String]],
-                specialTokens: BPEVocabulary.SpecialTokens) {
+                specialTokens: BPEVocabulary.SpecialTokens,
+                byteFallback: Bool = false,
+                preTokenizedTokens: Set<String> = [],
+                usesSentencePieceWhitespace: Bool? = nil) {
         // Build token maps
         self.tokenToId = vocab
         self.vocabularySize = vocab.count
@@ -157,6 +175,19 @@ public struct BPETokenizer: Tokenizer {
         
         self.mergeRules = rules
         self.mergePriority = priorityMap
+        self.byteFallbackEnabled = byteFallback
+        self.preTokenizedTokens = preTokenizedTokens
+            .filter { !$0.isEmpty && vocab[$0] != nil }
+            .sorted {
+                if $0.count == $1.count {
+                    return $0 < $1
+                }
+                return $0.count > $1.count
+            }
+
+        let spaceMarker = "\u{2581}"
+        self.usesSentencePieceWhitespace = usesSentencePieceWhitespace ??
+            (vocab[spaceMarker] != nil || vocab[spaceMarker + "a"] != nil)
         
         // Extract special tokens with smart fallback to actual vocab entries
         // Use first available valid token if special tokens not defined
@@ -220,36 +251,125 @@ public struct BPETokenizer: Tokenizer {
     /// - Parameter text: Input text to tokenize
     /// - Returns: Array of token IDs
     public func encode(_ text: String) -> [Int] {
-        // Step 1: Unicode normalization (NFC - canonical composition)
-        let normalized = text.precomposedStringWithCanonicalMapping
-
-        // Step 2: Handle empty string
-        if normalized.isEmpty {
+        // Step 1: Handle empty string
+        if text.isEmpty {
             return []
         }
 
-        // Step 3: SentencePiece-style preprocessing
-        // Replace spaces with ▁ (U+2581) and prepend ▁ at the start
-        // This is the standard convention for LLaMA/SentencePiece tokenizers
+        // Step 2: Split declared added/special tokens before BPE. HuggingFace
+        // tokenizers normalize each surrounding text span independently, which
+        // matters for SentencePiece-style leading metaspace after `</s>`.
+        if preTokenizedTokens.isEmpty {
+            return encodeTextSegment(text)
+        }
+
+        var encoded: [Int] = []
+        for segment in splitPreTokenizedSegments(text) {
+            switch segment {
+            case .text(let textSegment):
+                encoded.append(contentsOf: encodeTextSegment(textSegment))
+            case .preTokenized(let token):
+                encoded.append(tokenToId[token] ?? unkToken)
+            }
+        }
+
+        return encoded
+    }
+
+    private enum EncodingSegment {
+        case text(String)
+        case preTokenized(String)
+    }
+
+    /// Encode one ordinary text segment after any added/special tokens are removed.
+    private func encodeTextSegment(_ text: String) -> [Int] {
+        // Unicode normalization (NFC - canonical composition) applies to text,
+        // not to already-split special tokens whose HF config marks normalized=false.
+        let normalized = text.precomposedStringWithCanonicalMapping
+        guard !normalized.isEmpty else {
+            return []
+        }
+
+        // SentencePiece-style preprocessing:
+        // Replace spaces with ▁ (U+2581) and prepend ▁ at the start.
         let spaceMarker = "\u{2581}"  // ▁
         let processed: String
-        if tokenToId[spaceMarker] != nil || tokenToId[spaceMarker + "a"] != nil {
-            // SentencePiece vocab detected: use ▁ as space marker
+        if usesSentencePieceWhitespace {
             processed = spaceMarker + normalized.replacingOccurrences(of: " ", with: spaceMarker)
         } else {
             processed = normalized
         }
 
-        // Step 4: Split into characters (initial tokens)
+        // Split into characters (initial tokens)
         var tokens = processed.map { String($0) }
 
-        // Step 5: Apply BPE merges until no more merges possible
+        // Apply BPE merges until no more merges possible
         tokens = applyBPEMerges(tokens)
 
-        // Step 6: Convert tokens to IDs
-        return tokens.map { token in
-            tokenToId[token] ?? unkToken  // Unknown tokens → UNK
+        // Convert tokens to IDs, using byte fallback only when the source
+        // tokenizer explicitly declares model.byte_fallback.
+        var ids: [Int] = []
+        for token in tokens {
+            ids.append(contentsOf: tokenIds(for: token))
         }
+        return ids
+    }
+
+    /// Split text into normal spans and declared added/special token spans.
+    private func splitPreTokenizedSegments(_ text: String) -> [EncodingSegment] {
+        var segments: [EncodingSegment] = []
+        var textStart = text.startIndex
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            if let token = matchingPreTokenizedToken(in: text, at: index) {
+                if textStart < index {
+                    segments.append(.text(String(text[textStart..<index])))
+                }
+
+                segments.append(.preTokenized(token))
+                index = text.index(index, offsetBy: token.count)
+                textStart = index
+            } else {
+                index = text.index(after: index)
+            }
+        }
+
+        if textStart < text.endIndex {
+            segments.append(.text(String(text[textStart..<text.endIndex])))
+        }
+
+        return segments
+    }
+
+    /// Return the longest declared added/special token that starts at `index`.
+    private func matchingPreTokenizedToken(in text: String, at index: String.Index) -> String? {
+        let suffix = text[index...]
+        return preTokenizedTokens.first { suffix.hasPrefix($0) }
+    }
+
+    /// Convert one BPE piece to ids, applying SentencePiece byte fallback if enabled.
+    private func tokenIds(for token: String) -> [Int] {
+        if let id = tokenToId[token] {
+            return [id]
+        }
+
+        guard byteFallbackEnabled else {
+            return [unkToken]
+        }
+
+        var byteIds: [Int] = []
+        byteIds.reserveCapacity(token.utf8.count)
+
+        for byte in token.utf8 {
+            let byteToken = String(format: "<0x%02X>", byte)
+            guard let id = tokenToId[byteToken] else {
+                return [unkToken]
+            }
+            byteIds.append(id)
+        }
+
+        return byteIds.isEmpty ? [unkToken] : byteIds
     }
     
     /// Apply BPE merge rules to token sequence
@@ -357,7 +477,7 @@ public struct BPETokenizer: Tokenizer {
 
         // Convert bytes to string and strip leading space (SentencePiece artifact)
         var result = String(decoding: bytes, as: UTF8.self)
-        if result.hasPrefix(" ") {
+        if usesSentencePieceWhitespace && result.hasPrefix(" ") {
             result = String(result.dropFirst())
         }
         return result
