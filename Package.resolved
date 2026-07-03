@@ -1,13 +1,12 @@
 {
-  "originHash" : "b59b2934d40a22ff94c05a3e3cca9e9418c49f16e239c45fcc53fed4ef94949c",
+  "originHash" : "2351427180b55862eb85189c570f7edb3999556b141d404cec435e4629e229d6",
   "pins" : [
     {
       "identity" : "cartographer",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vivekptnk/cartographer.git",
       "state" : {
-        "branch" : "81a3047",
-        "revision" : "81a30472530c824bba640df9718144dee824c3b5"
+        "revision" : "1b150485860679e227bd37799e5f3357dcc3a7fe"
       }
     },
     {

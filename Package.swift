@@ -74,14 +74,12 @@ let package = Package(
         // ProximaKit pinned by revision to the commit that became the v1.6.0 tag; re-pin with from: "1.6.0" in a future bump.
         .package(url: "https://github.com/vivekptnk/ProximaKit.git", revision: "dcc55ca6b44d50707421b1da404c2e49117596e9"),
         // Cartographer — map annotation engine (used by TinyBrainCartographerBridge).
-        // Pinned by revision (SHA) on feat/cg-003-demo-app-wiring: that's
-        // the only branch carrying SmartAnnotationService. Pinning by
-        // revision (not branch:) keeps resolution stable if the branch is
-        // ever force-pushed. Re-pin to a tag/main once the work lands
-        // upstream (CHA-175 follow-up for cto-cartographer).
+        // Pinned to 1b15048 (fix(concurrency): constrain retryOnTransient to Sendable for Swift 6 — required for the CI runner's toolchain; the previous pin 81a3047 failed to compile on GitHub's macos-15 Swift with a non-sendable-result error in SyncEngine).
+        // Pinning by revision (not branch:) keeps resolution stable if the branch is
+        // ever force-pushed. Re-pin to a tag once the branch lands upstream.
         .package(
             url: "https://github.com/vivekptnk/cartographer.git",
-            revision: "81a3047"
+            revision: "1b150485860679e227bd37799e5f3357dcc3a7fe"
         )
     ],
     targets: [
