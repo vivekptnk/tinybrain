@@ -27,8 +27,8 @@ public struct Message: Identifiable {
     public let timestamp: Date
     
     /// Initialize a new message
-    public init(role: MessageRole, content: String, timestamp: Date = Date()) {
-        self.id = UUID()
+    public init(id: UUID = UUID(), role: MessageRole, content: String, timestamp: Date = Date()) {
+        self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
@@ -73,4 +73,3 @@ extension Message: Equatable {
         lhs.timestamp == rhs.timestamp
     }
 }
-

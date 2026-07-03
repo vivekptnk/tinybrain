@@ -10,44 +10,43 @@ import SwiftUI
 struct TokenProbabilityBar: View {
     let candidates: [TokenCandidate]
     let tokenDecoder: ((Int) -> String)?
+    private let theme = TinyBrainTheme.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             sectionHeader("Top Candidates")
 
             if candidates.isEmpty {
-                Text("Waiting for generation...")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Waiting for generation…")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
             } else {
-                ForEach(candidates.prefix(8)) { candidate in
-                    candidateRow(candidate)
+                ForEach(Array(candidates.prefix(8).enumerated()), id: \.element.id) { index, candidate in
+                    candidateRow(candidate, isTopCandidate: index == 0)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func candidateRow(_ candidate: TokenCandidate) -> some View {
+    private func candidateRow(_ candidate: TokenCandidate, isTopCandidate: Bool) -> some View {
         HStack(spacing: 6) {
-            // Token text
             Text(tokenLabel(candidate.tokenId))
-                .font(.system(.caption, design: .monospaced))
+                .font(theme.typography.monoSM)
+                .foregroundStyle(theme.colors.textPrimary)
                 .frame(width: 70, alignment: .trailing)
                 .lineLimit(1)
 
-            // Probability bar
             GeometryReader { geo in
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(barColor(for: candidate.probability))
+                    .fill(barColor(for: candidate.probability, isTopCandidate: isTopCandidate))
                     .frame(width: max(2, geo.size.width * CGFloat(candidate.probability)))
             }
             .frame(height: 14)
 
-            // Probability value
             Text(String(format: "%.1f%%", candidate.probability * 100))
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(theme.typography.monoSM)
+                .foregroundStyle(theme.colors.textSecondary)
                 .frame(width: 42, alignment: .trailing)
         }
         .frame(height: 18)
@@ -64,24 +63,21 @@ struct TokenProbabilityBar: View {
         return "[\(tokenId)]"
     }
 
-    private func barColor(for probability: Float) -> Color {
-        if probability > 0.5 {
-            return .green.opacity(0.8)
-        } else if probability > 0.2 {
-            return .blue.opacity(0.7)
-        } else if probability > 0.05 {
-            return .orange.opacity(0.6)
-        } else {
-            return .gray.opacity(0.4)
+    private func barColor(for probability: Float, isTopCandidate: Bool) -> Color {
+        if isTopCandidate {
+            return theme.colors.accent
         }
+        let p = min(max(Double(probability), 0), 1)
+        return theme.colors.accent.opacity(0.24 + p * 0.56)
     }
 }
 
 // MARK: - Shared Section Header
 
 func sectionHeader(_ title: String) -> some View {
-    Text(title.uppercased())
-        .font(.system(.caption2, design: .rounded, weight: .semibold))
-        .foregroundStyle(.secondary)
-        .tracking(0.5)
+    let theme = TinyBrainTheme.shared
+    return Text(title.uppercased())
+        .font(theme.typography.overline)
+        .foregroundStyle(theme.colors.textSecondary)
+        .tracking(0.6)
 }

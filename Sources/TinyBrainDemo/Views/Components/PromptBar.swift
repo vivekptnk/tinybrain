@@ -21,7 +21,7 @@ struct NativeTextField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> FocusableTextField {
         let textField = FocusableTextField()
-        textField.placeholderString = "Message TinyBrain..."
+        textField.placeholderString = "Message TinyBrain…"
         textField.delegate = context.coordinator
         textField.isEditable = true
         textField.isSelectable = true
@@ -31,7 +31,7 @@ struct NativeTextField: NSViewRepresentable {
         textField.font = .systemFont(ofSize: 14)
         textField.textColor = .labelColor
         textField.placeholderAttributedString = NSAttributedString(
-            string: "Message TinyBrain...",
+            string: "Message TinyBrain…",
             attributes: [
                 .foregroundColor: NSColor.tertiaryLabelColor,
                 .font: NSFont.systemFont(ofSize: 14)

@@ -4,6 +4,7 @@
 /// Used by the model picker to display available models.
 
 import Foundation
+import TinyBrainRuntime
 
 /// Describes a `.tbf` model file available for loading
 public struct ModelInfo: Identifiable, Equatable {
@@ -91,6 +92,62 @@ public enum QuantizationHint: String, Equatable {
         case .fp32:    return "red"
         case .unknown: return "gray"
         }
+    }
+}
+
+// MARK: - QuantBadge
+
+/// Honest precision badge shown in the demo UI.
+public enum QuantBadge: String, CaseIterable, Equatable {
+    case fp32 = "FP32"
+    case fp16 = "FP16"
+    case int8 = "INT8"
+    case int4 = "INT4"
+    case toy = "TOY"
+    case unknown = "?"
+
+    public init(hint: QuantizationHint) {
+        switch hint {
+        case .fp32:
+            self = .fp32
+        case .fp16:
+            self = .fp16
+        case .int8:
+            self = .int8
+        case .int4:
+            self = .int4
+        case .unknown:
+            self = .unknown
+        }
+    }
+
+    /// Derive the badge from loaded model weights, not the filename.
+    ///
+    /// TBF weights currently expose INT8/INT4 precision metadata on each
+    /// quantized linear layer. INT4 conversion can leave the output projection
+    /// in INT8, so transformer layers are the source of truth for the badge.
+    public static func derived(from weights: ModelWeights, fallback: QuantBadge = .unknown) -> QuantBadge {
+        var transformerPrecisions: [QuantizationPrecision] = []
+        for layer in weights.layers {
+            transformerPrecisions.append(layer.attention.query.weights.precision)
+            transformerPrecisions.append(layer.attention.key.weights.precision)
+            transformerPrecisions.append(layer.attention.value.weights.precision)
+            transformerPrecisions.append(layer.attention.output.weights.precision)
+            if let gate = layer.feedForward.gate {
+                transformerPrecisions.append(gate.weights.precision)
+            }
+            transformerPrecisions.append(layer.feedForward.up.weights.precision)
+            transformerPrecisions.append(layer.feedForward.down.weights.precision)
+        }
+
+        let precisions = transformerPrecisions.isEmpty ? [weights.output.weights.precision] : transformerPrecisions
+        if precisions.contains(.int4) {
+            return .int4
+        }
+        if precisions.contains(.int8) {
+            return .int8
+        }
+        return fallback
     }
 }
 

@@ -1,129 +1,196 @@
 /// Model Picker View
 ///
-/// A dropdown menu that lists available `.tbf` models found in the `Models/`
-/// directory. Placed in the ChatView header so users can switch models
-/// without restarting the app.
-///
-/// When the user selects a model:
-/// 1. The picker calls back to the ChatViewModel's `switchModel(_:)` method
-/// 2. ChatViewModel loads the new weights + tokenizer and resets the runner
-///
-/// If the `Models/` directory is empty or unavailable, the picker shows
-/// "Toy Model" and is non-interactive (greyed out).
+/// Native popover for switching between the built-in toy model and discovered
+/// `.tbf` files. The header chip is driven by the active runner identity, not
+/// by a default picker selection.
 
 import SwiftUI
 
 // MARK: - ModelPickerView
 
-/// Header picker component for switching between available models
+/// Header picker component for switching between available models.
 public struct ModelPickerView: View {
-
-    // MARK: - Properties
-
     @ObservedObject var pickerVM: ModelPickerViewModel
 
-    /// Called when the user confirms a model selection
+    let activeModelName: String
+    let activeQuant: QuantBadge
+    let activeModelPath: String?
+    let switchingModelPath: String?
+    let isSwitching: Bool
+
+    /// Called when the user confirms a model selection.
     var onSelect: (ModelInfo?) -> Void
 
-    // MARK: - Private State
-
-    @State private var isExpanded = false
-
-    // MARK: - Body
+    @State private var isPresented = false
+    private let theme = TinyBrainTheme.shared
 
     public var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "cube.box")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-
-            Menu {
-                // Toy model option
-                Button {
-                    onSelect(nil)
-                } label: {
-                    Label("Toy Model", systemImage: "testtube.2")
-                }
-
-                if !pickerVM.availableModels.isEmpty {
-                    Divider()
-
-                    ForEach(pickerVM.availableModels) { model in
-                        Button {
-                            onSelect(model)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(model.displayName)
-                                Text("\(model.quantization.rawValue) · \(model.formattedSize)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-
-                    Divider()
-                }
-
-                Button {
-                    pickerVM.refresh()
-                } label: {
-                    Label("Refresh Model List", systemImage: "arrow.clockwise")
-                }
-            } label: {
-                modelLabel
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-
-            if pickerVM.isSwitching {
-                ProgressView()
-                    .scaleEffect(0.6)
-                    .frame(width: 12, height: 12)
-            }
+        Button {
+            pickerVM.refresh()
+            isPresented.toggle()
+        } label: {
+            chipLabel
+        }
+        .buttonStyle(.plain)
+        .disabled(isSwitching)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            popoverContent
         }
         .onAppear {
             pickerVM.refresh()
         }
     }
 
-    // MARK: - Subviews
+    // MARK: - Chip
 
-    private var modelLabel: some View {
-        HStack(spacing: 4) {
-            Text(pickerVM.selectedDisplayName)
+    private var chipLabel: some View {
+        HStack(spacing: theme.spacing.eight) {
+            Image(systemName: "cpu")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary)
+                .foregroundStyle(theme.colors.textSecondary)
+
+            Text(activeModelName)
+                .font(theme.typography.label)
+                .foregroundStyle(theme.colors.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            if let model = pickerVM.selectedModel {
-                Text(model.quantization.rawValue)
-                    .font(.system(size: 9, weight: .semibold))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(quantizationColor(model.quantization).opacity(0.15))
-                    .foregroundStyle(quantizationColor(model.quantization))
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-            }
+            quantBadge(activeQuant)
 
-            Image(systemName: "chevron.up.chevron.down")
+            Image(systemName: "chevron.down")
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.colors.textSecondary)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .padding(.vertical, 5)
+        .frame(minHeight: 26)
+        .background(theme.colors.fillQuaternary)
+        .clipShape(RoundedRectangle(cornerRadius: theme.corners.small, style: .continuous))
     }
 
-    private func quantizationColor(_ q: QuantizationHint) -> Color {
-        switch q {
-        case .int4:    return .green
-        case .int8:    return .blue
-        case .fp16:    return .orange
-        case .fp32:    return .red
-        case .unknown: return .secondary
+    // MARK: - Popover
+
+    private var popoverContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Models")
+                    .font(theme.typography.title2)
+                    .foregroundStyle(theme.colors.textPrimary)
+
+                Spacer()
+
+                Button {
+                    pickerVM.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.colors.textSecondary)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh models")
+            }
+
+            VStack(spacing: 4) {
+                modelRow(
+                    title: "Toy Model",
+                    subtitle: "Built-in · untrained",
+                    badge: .toy,
+                    isActive: activeModelPath == nil,
+                    isLoading: isSwitching && switchingModelPath == nil
+                ) {
+                    choose(nil)
+                }
+
+                if pickerVM.availableModels.isEmpty {
+                    Text("No `.tbf` models in `Models/`. Add one and Refresh.")
+                        .font(theme.typography.caption)
+                        .foregroundStyle(theme.colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(pickerVM.availableModels) { model in
+                        let badge = QuantBadge(hint: model.quantization)
+                        modelRow(
+                            title: model.displayName,
+                            subtitle: "\(badge.rawValue) · \(model.formattedSize)",
+                            badge: badge,
+                            isActive: activeModelPath == model.path,
+                            isLoading: isSwitching && switchingModelPath == model.path
+                        ) {
+                            choose(model)
+                        }
+                    }
+                }
+            }
         }
+        .padding(12)
+        .frame(width: 300)
+        .background(.regularMaterial)
+    }
+
+    @ViewBuilder
+    private func modelRow(
+        title: String,
+        subtitle: String,
+        badge: QuantBadge,
+        isActive: Bool,
+        isLoading: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                quantBadge(badge)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(theme.typography.label)
+                        .foregroundStyle(theme.colors.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Text(subtitle)
+                        .font(theme.typography.caption)
+                        .foregroundStyle(theme.colors.textSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                if isLoading {
+                    ProgressView()
+                        .scaleEffect(0.62)
+                        .frame(width: 16, height: 16)
+                } else if isActive {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.colors.accent)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .background(isActive ? theme.colors.accentQuiet : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: theme.corners.small, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isSwitching)
+    }
+
+    private func choose(_ model: ModelInfo?) {
+        isPresented = false
+        onSelect(model)
+    }
+
+    private func quantBadge(_ badge: QuantBadge) -> some View {
+        let tint = theme.colors.badgeTint(badge)
+        return Text(badge.rawValue)
+            .font(theme.typography.monoSM)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.14))
+            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
     }
 }
 
@@ -133,8 +200,15 @@ public struct ModelPickerView: View {
 struct ModelPickerView_Previews: PreviewProvider {
     static var previews: some View {
         let vm = ModelPickerViewModel()
-        ModelPickerView(pickerVM: vm) { _ in }
-            .padding()
+        ModelPickerView(
+            pickerVM: vm,
+            activeModelName: "Toy Model",
+            activeQuant: .toy,
+            activeModelPath: nil,
+            switchingModelPath: nil,
+            isSwitching: false
+        ) { _ in }
+        .padding()
     }
 }
 #endif

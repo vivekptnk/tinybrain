@@ -110,6 +110,26 @@ public final class TelemetryViewModel: ObservableObject {
         kvCacheUsagePercent = 0.0
         averageProbability = 0.0
     }
+
+    /// Seed stable live-looking values for screenshot automation.
+    public func seedDemoValues(
+        tokensPerSecond: Double,
+        millisecondsPerToken: Double,
+        energyEstimate: Double,
+        kvCacheUsagePercent: Double
+    ) {
+        self.tokensPerSecond = tokensPerSecond
+        self.millisecondsPerToken = millisecondsPerToken
+        self.energyEstimate = energyEstimate
+        self.kvCacheUsagePercent = kvCacheUsagePercent
+        self.averageProbability = 0.72
+        self.tokenHistory = [
+            TokenHistoryEntry(tokenId: 318, probability: 0.62, timestamp: Date().addingTimeInterval(-0.6)),
+            TokenHistoryEntry(tokenId: 262, probability: 0.74, timestamp: Date().addingTimeInterval(-0.4)),
+            TokenHistoryEntry(tokenId: 1402, probability: 0.58, timestamp: Date().addingTimeInterval(-0.2)),
+            TokenHistoryEntry(tokenId: 29889, probability: 0.81, timestamp: Date())
+        ]
+    }
     
     // MARK: - Private Calculations
     
@@ -193,4 +213,3 @@ public struct TokenHistoryEntry: Identifiable {
         self.timestamp = timestamp
     }
 }
-

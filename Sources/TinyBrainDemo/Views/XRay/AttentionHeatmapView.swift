@@ -17,6 +17,7 @@ struct AttentionHeatmapView: View {
     let numLayers: Int
     let onLayerChange: (Int) -> Void
 
+    private let theme = TinyBrainTheme.shared
     private let cellSize: CGFloat = 12
     private let maxVisiblePositions: Int = 40
 
@@ -30,13 +31,13 @@ struct AttentionHeatmapView: View {
             }
 
             if snapshots.isEmpty {
-                Text("Waiting for generation...")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Waiting for generation…")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
             } else {
                 heatmapCanvas
                     .frame(height: heatmapHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .clipShape(RoundedRectangle(cornerRadius: theme.corners.small, style: .continuous))
 
                 legendBar
             }
@@ -48,8 +49,8 @@ struct AttentionHeatmapView: View {
     private var layerPicker: some View {
         HStack(spacing: 4) {
             Text("Layer")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textSecondary)
             Picker("", selection: Binding(
                 get: { selectedLayer },
                 set: { onLayerChange($0) }
@@ -105,27 +106,14 @@ struct AttentionHeatmapView: View {
                 }
             }
         }
-        .background(Color.black.opacity(0.05))
+        .background(theme.colors.fillQuaternary)
     }
 
     // MARK: - Color Mapping
 
     private func heatColor(_ weight: Float) -> Color {
-        // Blue (low) → Cyan → Yellow → Red (high)
         let w = min(max(weight, 0), 1)
-        if w < 0.25 {
-            let t = Double(w / 0.25)
-            return Color(red: 0.1, green: 0.1 + 0.4 * t, blue: 0.3 + 0.4 * t).opacity(0.3 + 0.7 * t)
-        } else if w < 0.5 {
-            let t = Double((w - 0.25) / 0.25)
-            return Color(red: 0.2 * t, green: 0.5 + 0.3 * t, blue: 0.7 - 0.3 * t)
-        } else if w < 0.75 {
-            let t = Double((w - 0.5) / 0.25)
-            return Color(red: 0.2 + 0.6 * t, green: 0.8, blue: 0.4 - 0.3 * t)
-        } else {
-            let t = Double((w - 0.75) / 0.25)
-            return Color(red: 0.8 + 0.2 * t, green: 0.8 - 0.5 * t, blue: 0.1)
-        }
+        return theme.colors.accent.opacity(0.12 + Double(w) * 0.88)
     }
 
     // MARK: - Legend
@@ -133,8 +121,8 @@ struct AttentionHeatmapView: View {
     private var legendBar: some View {
         HStack(spacing: 2) {
             Text("Low")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textSecondary)
             ForEach(0..<10, id: \.self) { i in
                 Rectangle()
                     .fill(heatColor(Float(i) / 9.0))
@@ -142,12 +130,12 @@ struct AttentionHeatmapView: View {
                     .cornerRadius(1)
             }
             Text("High")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textSecondary)
             Spacer()
             Text("Attention Weight")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textTertiary)
         }
     }
 }

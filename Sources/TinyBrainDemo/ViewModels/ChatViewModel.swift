@@ -43,11 +43,26 @@ public final class ChatViewModel: ObservableObject {
     @Published public var topP: Float = 0.9
     @Published public var useTopK: Bool = true
 
-    /// Quantization mode (for UI display)
-    @Published public var quantizationMode: QuantizationMode = .int8
+    /// Display name for the model that is actually backing the runner.
+    @Published public private(set) var activeModelName: String
+
+    /// Honest precision badge for the active model.
+    @Published public private(set) var activeQuant: QuantBadge
+
+    /// Active file-backed model path, or nil when the built-in toy model runs.
+    @Published public private(set) var activeModelPath: String?
 
     /// Whether a model switch is in progress
     @Published public private(set) var isSwitchingModel: Bool = false
+
+    /// Path currently being loaded, used by the picker for inline progress.
+    @Published public private(set) var pendingModelPath: String?
+
+    /// Model target from the last failed switch, used by the banner Retry action.
+    @Published public private(set) var failedModelSwitchTarget: ModelInfo?
+
+    /// Assistant messages whose generation failed mid-stream.
+    @Published public private(set) var failedMessageIDs: Set<UUID> = []
 
     /// Telemetry view model
     @Published public private(set) var telemetry: TelemetryViewModel
@@ -69,6 +84,9 @@ public final class ChatViewModel: ObservableObject {
     /// Current generation task
     private var generationTask: Task<Void, Never>?
 
+    /// Assistant message currently receiving streamed tokens.
+    private var currentStreamingMessageID: UUID?
+
     /// Decode a single token ID to text (for X-Ray display)
     public func decodeToken(_ tokenId: Int) -> String {
         tokenizer?.decode([tokenId]) ?? "[\(tokenId)]"
@@ -76,13 +94,31 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Initialize with pre-configured model runner and optional tokenizer
-    public init(runner: ModelRunner, tokenizer: (any Tokenizer)? = nil) {
+    /// Initialize with pre-configured model runner and optional tokenizer.
+    ///
+    /// - Parameters:
+    ///   - runner: Model runner already configured with loaded weights.
+    ///   - tokenizer: Optional tokenizer for prompt encoding/decoding.
+    ///   - activeModelName: Display name for the weights backing `runner`.
+    ///   - activeQuant: Badge derived by the caller from loaded weights, or `.toy` for fallback.
+    ///   - activeModelPath: Absolute path for a real `.tbf` model, or nil for toy.
+    public init(
+        runner: ModelRunner,
+        tokenizer: (any Tokenizer)? = nil,
+        activeModelName: String = "Toy Model",
+        activeQuant: QuantBadge = .toy,
+        activeModelPath: String? = nil
+    ) {
         self.runner = runner
         self.tokenizer = tokenizer
+        self.activeModelName = activeModelName
+        self.activeQuant = activeQuant
+        self.activeModelPath = activeModelPath
         self.telemetry = TelemetryViewModel()
         self.xRay = XRayViewModel(numLayers: runner.config.numLayers)
         self.modelPicker = ModelPickerViewModel()
+        self.modelPicker.refresh()
+        self.modelPicker.select(path: activeModelPath)
     }
 
     // MARK: - Model Switching
@@ -97,6 +133,8 @@ public final class ChatViewModel: ObservableObject {
         guard !isGenerating else { return }
 
         isSwitchingModel = true
+        pendingModelPath = model?.path
+        failedModelSwitchTarget = nil
         clearConversation()
 
         modelPicker.select(path: model?.path)
@@ -110,10 +148,29 @@ public final class ChatViewModel: ObservableObject {
         xRay = XRayViewModel(numLayers: runner.config.numLayers)
 
         isSwitchingModel = false
+        pendingModelPath = nil
 
         if let err = modelPicker.switchError {
+            activeModelName = "Toy Model"
+            activeQuant = .toy
+            activeModelPath = nil
+            failedModelSwitchTarget = model
             handleError(message: err)
+        } else if let model {
+            activeModelName = model.displayName
+            activeQuant = QuantBadge.derived(from: weights, fallback: QuantBadge(hint: model.quantization))
+            activeModelPath = model.path
+        } else {
+            activeModelName = "Toy Model"
+            activeQuant = .toy
+            activeModelPath = nil
         }
+    }
+
+    /// Retry the last failed model switch, if one is available.
+    public func retryLastModelSwitch() async {
+        guard let failedModelSwitchTarget else { return }
+        await switchModel(failedModelSwitchTarget)
     }
     
     // MARK: - Message Management
@@ -140,6 +197,8 @@ public final class ChatViewModel: ObservableObject {
         isGenerating = false
         generationTask?.cancel()
         generationTask = nil
+        currentStreamingMessageID = nil
+        failedMessageIDs.removeAll()
         telemetry.reset()
         xRay.reset()
         runner.reset()
@@ -167,16 +226,31 @@ public final class ChatViewModel: ObservableObject {
         telemetry.reset()
         clearError()
         
-        generationTask = Task {
+        let task = Task {
             do {
                 try await performGeneration()
+            } catch is CancellationError {
+                // Stop is a cancellation path, not an error state.
             } catch {
+                if let currentStreamingMessageID {
+                    failedMessageIDs.insert(currentStreamingMessageID)
+                }
                 handleError(message: "Generation failed: \(error.localizedDescription)")
             }
             setGenerating(false)
+            currentStreamingMessageID = nil
         }
-        
-        await generationTask?.value
+
+        generationTask = task
+        await task.value
+    }
+
+    /// Cancel the active generation without clearing the conversation.
+    public func stopGeneration() {
+        guard isGenerating else { return }
+        generationTask?.cancel()
+        generationTask = nil
+        setGenerating(false)
     }
     
     /// Format conversation history using TinyLlama/Zephyr chat template
@@ -232,6 +306,8 @@ public final class ChatViewModel: ObservableObject {
         var responseContent = ""
         addAssistantMessage(content: responseContent)
         let assistantIndex = messages.count - 1
+        let assistantID = messages[assistantIndex].id
+        currentStreamingMessageID = assistantID
         
         // Stream generation
         for try await output in runner.generateStream(prompt: promptTokens, config: generationConfig) {
@@ -253,6 +329,7 @@ public final class ChatViewModel: ObservableObject {
             // Update message
             if assistantIndex < messages.count {
                 messages[assistantIndex] = Message(
+                    id: assistantID,
                     role: .assistant,
                     content: responseContent,
                     timestamp: messages[assistantIndex].timestamp
@@ -327,6 +404,62 @@ public final class ChatViewModel: ObservableObject {
     public func clearError() {
         hasError = false
         errorMessage = ""
+        failedModelSwitchTarget = nil
+    }
+
+    // MARK: - Screenshot Automation
+
+    /// Seed a deterministic transcript and live telemetry for screenshot verification.
+    public func seedDemoTranscriptForScreenshots() {
+        let now = Date()
+        messages = [
+            Message(role: .user, content: "Explain what TinyBrain is doing on-device.", timestamp: now.addingTimeInterval(-150)),
+            Message(role: .assistant, content: "TinyBrain is running a compact transformer locally, keeping prompts and weights on this Mac while streaming each decoded token.", timestamp: now.addingTimeInterval(-132)),
+            Message(role: .user, content: "Show me the live signals.", timestamp: now.addingTimeInterval(-34)),
+            Message(role: .assistant, content: "The X-Ray panel is tracking attention, layer norms, candidate tokens, and KV cache pages as the next token forms", timestamp: now.addingTimeInterval(-8))
+        ]
+        failedMessageIDs.removeAll()
+        telemetry.seedDemoValues(
+            tokensPerSecond: 31.8,
+            millisecondsPerToken: 42,
+            energyEstimate: 1.72,
+            kvCacheUsagePercent: 38
+        )
+        isGenerating = true
+        seedDemoXRaySnapshot()
+    }
+
+    /// Surface a deterministic sample error for screenshot verification.
+    public func seedDemoErrorForScreenshots() {
+        handleError(message: "Sample model switch failed: incompatible tensor metadata.")
+    }
+
+    private func seedDemoXRaySnapshot() {
+        let layerCount = max(runner.config.numLayers, 2)
+        let snapshots = (0..<8).map { position in
+            XRaySnapshot(
+                position: position,
+                timestamp: Date().addingTimeInterval(Double(position - 8)),
+                attentionWeights: (0..<layerCount).map { layer in
+                    (0...position).map { column in
+                        let distance = abs(position - column)
+                        let base = max(0.05, 1.0 - Float(distance) * 0.14)
+                        return min(1.0, base * (0.75 + Float(layer % 3) * 0.08))
+                    }
+                },
+                layerNorms: (0..<layerCount).map { Float($0 + 1) / Float(layerCount) * 2.2 },
+                topCandidates: [
+                    TokenCandidate(tokenId: 318, probability: 0.42),
+                    TokenCandidate(tokenId: 262, probability: 0.21),
+                    TokenCandidate(tokenId: 1402, probability: 0.12),
+                    TokenCandidate(tokenId: 29889, probability: 0.08)
+                ],
+                entropy: 2.4
+            )
+        }
+        xRay.snapshotHistory = snapshots
+        xRay.latestSnapshot = snapshots.last
+        xRay.kvCachePages = (0..<64).map { $0 < 24 }
     }
 }
 
@@ -339,24 +472,8 @@ public enum SamplerPreset {
     case precise
 }
 
-/// Quantization modes (for UI display)
-public enum QuantizationMode: String, CaseIterable {
-    case fp16 = "FP16"
-    case int8 = "INT8"
-    case int4 = "INT4"
-    
-    public var memoryMultiplier: Double {
-        switch self {
-        case .fp16: return 1.0
-        case .int8: return 0.5
-        case .int4: return 0.25
-        }
-    }
-}
-
 /// Chat-specific errors
 enum ChatError: Error {
     case noUserMessage
     case generationCancelled
 }
-

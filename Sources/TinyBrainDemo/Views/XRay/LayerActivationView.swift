@@ -9,15 +9,16 @@ import SwiftUI
 
 struct LayerActivationView: View {
     let layerNorms: [Float]
+    private let theme = TinyBrainTheme.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             sectionHeader("Layer Activations")
 
             if layerNorms.isEmpty {
-                Text("Waiting for generation...")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Waiting for generation…")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
             } else {
                 HStack(alignment: .bottom, spacing: 3) {
                     ForEach(Array(layerNorms.enumerated()), id: \.offset) { index, norm in
@@ -40,8 +41,8 @@ struct LayerActivationView: View {
                 .frame(width: barWidth, height: max(4, 40 * normalized))
 
             Text("L\(index)")
-                .font(.system(size: 8, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(theme.typography.monoSM)
+                .foregroundStyle(theme.colors.textSecondary)
         }
     }
 
@@ -50,11 +51,6 @@ struct LayerActivationView: View {
     }
 
     private func barGradient(_ normalized: CGFloat) -> Color {
-        // Blue (low magnitude) → Orange (high magnitude)
-        Color(
-            red: min(1.0, 0.2 + normalized * 0.8),
-            green: min(1.0, 0.4 + normalized * 0.3),
-            blue: max(0.0, 0.8 - normalized * 0.6)
-        )
+        theme.colors.accent.opacity(0.24 + Double(normalized) * 0.76)
     }
 }

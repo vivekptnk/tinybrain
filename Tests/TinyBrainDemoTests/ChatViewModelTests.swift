@@ -48,6 +48,30 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.promptText, "", "Prompt should be empty")
         XCTAssertFalse(viewModel.isGenerating, "Should not be generating initially")
         XCTAssertNotNil(viewModel.telemetry, "Telemetry should be initialized")
+        XCTAssertEqual(viewModel.activeModelName, "Toy Model", "Default runner identity should be toy")
+        XCTAssertEqual(viewModel.activeQuant, .toy, "Toy runner should not be labeled INT8")
+    }
+
+    func testActiveModelIdentityCanBeSeededFromLoadedWeights() {
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        let weights = ModelWeights.makeToyModel(config: config, seed: 7)
+        let runner = ModelRunner(weights: weights)
+        let seeded = ChatViewModel(
+            runner: runner,
+            activeModelName: "tinyllama-1.1b-int8",
+            activeQuant: QuantBadge.derived(from: weights),
+            activeModelPath: "/tmp/tinyllama-1.1b-int8.tbf"
+        )
+
+        XCTAssertEqual(seeded.activeModelName, "tinyllama-1.1b-int8")
+        XCTAssertEqual(seeded.activeQuant, .int8)
+        XCTAssertEqual(seeded.activeModelPath, "/tmp/tinyllama-1.1b-int8.tbf")
     }
     
     // MARK: - Message History Tests
@@ -200,4 +224,3 @@ final class ChatViewModelTests: XCTestCase {
                       "Telemetry should reset with conversation")
     }
 }
-

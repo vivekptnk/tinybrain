@@ -35,6 +35,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 #endif
 
+/// Screenshot automation launch arguments:
+/// `--ui-demo-transcript` seeds a four-message live transcript and telemetry.
+/// `--ui-xray` opens the X-Ray panel at launch.
+/// `--ui-error` surfaces a sample dismissible error banner.
 @main
 struct ChatDemoApp: App {
     #if os(macOS)
@@ -42,8 +46,12 @@ struct ChatDemoApp: App {
     #endif
 
     @StateObject private var viewModel: ChatViewModel
+    private let initialShowXRay: Bool
 
     init() {
+        let launchArguments = Set(CommandLine.arguments.dropFirst())
+        initialShowXRay = launchArguments.contains("--ui-xray")
+
         // Initialize Metal backend
         if MetalBackend.isAvailable {
             do {
@@ -55,17 +63,34 @@ struct ChatDemoApp: App {
         }
 
         // Load model (falls back to toy model if no real model found)
-        let weights = ModelLoader.loadWithFallback(
-            from: "Models/tinyllama-1.1b-int8.tbf"
-        )
+        let loadedModel = Self.loadInitialModel()
+        let weights = loadedModel.weights
         let runner = ModelRunner(weights: weights)
 
         // Load tokenizer (auto-detects format)
         let tokenizer = TokenizerLoader.loadBestAvailable()
 
-
         // Create view model
-        let vm = ChatViewModel(runner: runner, tokenizer: tokenizer)
+        let activeModelName = loadedModel.info?.displayName ?? "Toy Model"
+        let activeQuant: QuantBadge = loadedModel.info.map {
+            QuantBadge.derived(from: weights, fallback: QuantBadge(hint: $0.quantization))
+        } ?? .toy
+
+        let vm = ChatViewModel(
+            runner: runner,
+            tokenizer: tokenizer,
+            activeModelName: activeModelName,
+            activeQuant: activeQuant,
+            activeModelPath: loadedModel.info?.path
+        )
+
+        if launchArguments.contains("--ui-demo-transcript") {
+            vm.seedDemoTranscriptForScreenshots()
+        }
+        if launchArguments.contains("--ui-error") {
+            vm.seedDemoErrorForScreenshots()
+        }
+
         _viewModel = StateObject(wrappedValue: vm)
 
         print("✅ App initialized. Config:")
@@ -76,7 +101,7 @@ struct ChatDemoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ChatView(viewModel: viewModel)
+            ChatView(viewModel: viewModel, initialShowXRay: initialShowXRay)
         }
         #if os(macOS)
         .defaultSize(width: 900, height: 600)
@@ -99,5 +124,47 @@ struct ChatDemoApp: App {
             }
         }
         #endif
+    }
+
+    private static func loadInitialModel() -> (weights: ModelWeights, info: ModelInfo?) {
+        let requestedPath = "Models/tinyllama-1.1b-int8.tbf"
+        let resolvedPath = resolveProjectPath(requestedPath)
+
+        if FileManager.default.fileExists(atPath: resolvedPath) {
+            do {
+                let weights = try ModelLoader.load(from: resolvedPath)
+                return (weights, ModelInfo(path: resolvedPath))
+            } catch {
+                print("⚠️ Failed to load \(resolvedPath): \(error). Falling back to toy model.")
+            }
+        }
+
+        let fallbackWeights = ModelLoader.loadWithFallback(from: requestedPath)
+        return (fallbackWeights, nil)
+    }
+
+    private static func resolveProjectPath(_ path: String) -> String {
+        if path.hasPrefix("/") {
+            return path
+        }
+
+        if FileManager.default.fileExists(atPath: path) {
+            return FileManager.default.currentDirectoryPath + "/" + path
+        }
+
+        var current = FileManager.default.currentDirectoryPath
+        for _ in 0..<10 {
+            let packagePath = (current as NSString).appendingPathComponent("Package.swift")
+            if FileManager.default.fileExists(atPath: packagePath) {
+                return (current as NSString).appendingPathComponent(path)
+            }
+            let parent = (current as NSString).deletingLastPathComponent
+            if parent == current || parent == "/" {
+                break
+            }
+            current = parent
+        }
+
+        return path
     }
 }

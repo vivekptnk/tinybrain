@@ -10,6 +10,7 @@ import SwiftUI
 
 struct KVCacheGridView: View {
     let pages: [Bool]
+    private let theme = TinyBrainTheme.shared
 
     private let columns = Array(repeating: GridItem(.fixed(10), spacing: 2), count: 16)
 
@@ -19,19 +20,19 @@ struct KVCacheGridView: View {
                 sectionHeader("KV Cache Pages")
                 Spacer()
                 Text(utilizationText)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(theme.typography.monoSM)
+                    .foregroundStyle(theme.colors.textSecondary)
             }
 
             if pages.isEmpty {
                 Text("Cache empty")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
             } else {
                 LazyVGrid(columns: columns, spacing: 2) {
                     ForEach(Array(pages.enumerated()), id: \.offset) { _, allocated in
                         RoundedRectangle(cornerRadius: 1)
-                            .fill(allocated ? Color.blue.opacity(0.7) : Color.gray.opacity(0.15))
+                            .fill(allocated ? theme.colors.accent : theme.colors.hairline)
                             .frame(width: 10, height: 10)
                     }
                 }

@@ -10,17 +10,17 @@ import TinyBrainRuntime
 
 public struct XRayPanel: View {
     @ObservedObject var xRay: XRayViewModel
+    let isGenerating: Bool
     let tokenDecoder: ((Int) -> String)?
+    private let theme = TinyBrainTheme.shared
 
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Header
                 panelHeader
 
-                Divider()
+                separator
 
-                // 1. Attention Heatmap (hero visualization)
                 vizSection(
                     title: nil,
                     tip: "Each row is a generated token. Color intensity shows how much attention the model pays to each past position."
@@ -33,9 +33,8 @@ public struct XRayPanel: View {
                     )
                 }
 
-                Divider()
+                separator
 
-                // 2. Token Probability Bar Chart
                 vizSection(
                     title: nil,
                     tip: "The model's top predictions for the next token. Longer bars = higher probability."
@@ -47,9 +46,8 @@ public struct XRayPanel: View {
                     .animation(.easeInOut(duration: 0.2), value: xRay.latestSnapshot?.position)
                 }
 
-                Divider()
+                separator
 
-                // 3. Layer Activation Bars
                 vizSection(
                     title: nil,
                     tip: "L2 norm of hidden state at each layer. Shows how signal magnitude evolves through the network."
@@ -60,9 +58,8 @@ public struct XRayPanel: View {
                     .animation(.easeInOut(duration: 0.15), value: xRay.latestSnapshot?.position)
                 }
 
-                Divider()
+                separator
 
-                // 4. KV Cache Page Grid
                 vizSection(
                     title: nil,
                     tip: "Memory pages storing past keys and values. Filled = cached data enabling O(n) inference."
@@ -70,9 +67,8 @@ public struct XRayPanel: View {
                     KVCacheGridView(pages: xRay.kvCachePages)
                 }
 
-                // Entropy indicator
                 if let snapshot = xRay.latestSnapshot {
-                    Divider()
+                    separator
                     entropyIndicator(snapshot.entropy)
                 }
 
@@ -81,28 +77,52 @@ public struct XRayPanel: View {
             .padding(12)
         }
         .frame(width: 320)
-        #if os(macOS)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-        #else
-        .background(Color(uiColor: .secondarySystemBackground).opacity(0.5))
-        #endif
+        .background(.bar)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(theme.colors.hairline)
+                .frame(width: 0.5)
+        }
     }
 
     // MARK: - Panel Header
 
     private var panelHeader: some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(systemName: "eye.fill")
-                .foregroundStyle(.blue)
-            Text("X-Ray Mode")
-                .font(.system(.headline, design: .rounded))
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(theme.colors.accent)
+            Text("X-Ray")
+                .font(theme.typography.title2)
+                .foregroundStyle(theme.colors.textPrimary)
             Spacer()
             if let snapshot = xRay.latestSnapshot {
                 Text("pos \(snapshot.position)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(theme.typography.monoSM)
+                    .foregroundStyle(theme.colors.textSecondary)
+            }
+            if isGenerating {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(theme.colors.accent)
+                        .frame(width: 5, height: 5)
+                        .pulsing(minOpacity: 0.35, maxOpacity: 1.0, duration: 0.8)
+                    Text("LIVE")
+                        .font(theme.typography.monoSM)
+                        .foregroundStyle(theme.colors.accent)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(theme.colors.fillQuaternary)
+                .clipShape(Capsule())
             }
         }
+    }
+
+    private var separator: some View {
+        Rectangle()
+            .fill(theme.colors.hairline)
+            .frame(height: 0.5)
     }
 
     // MARK: - Entropy Indicator
@@ -112,11 +132,10 @@ public struct XRayPanel: View {
         VStack(alignment: .leading, spacing: 4) {
             sectionHeader("Output Uncertainty")
             HStack(spacing: 8) {
-                // Entropy bar
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.gray.opacity(0.15))
+                            .fill(theme.colors.hairline)
                         RoundedRectangle(cornerRadius: 3)
                             .fill(entropyColor(entropy))
                             .frame(width: geo.size.width * CGFloat(min(entropy / 10.0, 1.0)))
@@ -125,20 +144,20 @@ public struct XRayPanel: View {
                 .frame(height: 12)
 
                 Text(String(format: "%.2f nats", entropy))
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(theme.typography.monoSM)
+                    .foregroundStyle(theme.colors.textSecondary)
                     .frame(width: 70, alignment: .trailing)
             }
             Text(entropyLabel(entropy))
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textTertiary)
         }
     }
 
     private func entropyColor(_ entropy: Float) -> Color {
-        if entropy < 2 { return .green.opacity(0.7) }
-        if entropy < 5 { return .orange.opacity(0.7) }
-        return .red.opacity(0.7)
+        if entropy < 2 { return theme.colors.positive }
+        if entropy < 5 { return theme.colors.warning }
+        return theme.colors.critical
     }
 
     private func entropyLabel(_ entropy: Float) -> String {
@@ -162,8 +181,8 @@ public struct XRayPanel: View {
             }
             content()
             Text(tip)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
