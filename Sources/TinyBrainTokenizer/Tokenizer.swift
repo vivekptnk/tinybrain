@@ -521,13 +521,14 @@ public struct BPETokenizer: Tokenizer {
 
 // MARK: - Errors
 
-public enum TokenizerError: Error, CustomStringConvertible {
+public enum TokenizerError: Error, CustomStringConvertible, LocalizedError {
     case vocabularyNotFound(String)
     case invalidVocabularyFormat(String)
     case unsupportedFormat(String)
     case invalidJSON
     case missingRequiredField(String)
     case fileNotFound(String)
+    case matchingTokenizerNotFound(model: String, expectedPath: String)
     
     public var description: String {
         switch self {
@@ -543,6 +544,12 @@ public enum TokenizerError: Error, CustomStringConvertible {
             return "Missing required field: \(field)"
         case .fileNotFound(let path):
             return "File not found: \(path)"
+        case .matchingTokenizerNotFound(let model, let expectedPath):
+            return "No tokenizer found for \(model) — expected \(expectedPath). Decoding with a mismatched tokenizer would produce garbage."
         }
+    }
+
+    public var errorDescription: String? {
+        description
     }
 }

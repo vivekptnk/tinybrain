@@ -26,6 +26,12 @@ public struct ModelInfo: Identifiable, Equatable {
     /// Detected quantization type parsed from the filename
     public let quantization: QuantizationHint
 
+    /// Prompt formatting mode appropriate for this model family.
+    public let promptStyle: ModelPromptStyle
+
+    /// Subtle picker-row hint for models that are not chat-tuned.
+    public let interactionHint: String?
+
     // MARK: - Init
 
     public init(path: String) {
@@ -43,6 +49,11 @@ public struct ModelInfo: Identifiable, Equatable {
 
         // Detect quantization from filename
         self.quantization = QuantizationHint.detect(from: filename)
+
+        // Detect prompt behavior from model family. The Zephyr chat wrapper is
+        // only correct for the TinyLlama chat checkpoint in this demo.
+        self.promptStyle = ModelPromptStyle.detect(from: filename)
+        self.interactionHint = promptStyle.interactionHint
     }
 
     // MARK: - Formatted Helpers
@@ -55,6 +66,31 @@ public struct ModelInfo: Identifiable, Equatable {
             return String(format: "%.1f GB", mb / 1024.0)
         }
         return String(format: "%.0f MB", mb)
+    }
+}
+
+// MARK: - ModelPromptStyle
+
+/// Prompt formatting expected by a model family.
+public enum ModelPromptStyle: Equatable {
+    case zephyrChat
+    case rawCompletion
+
+    static func detect(from filename: String) -> ModelPromptStyle {
+        let lower = filename.lowercased()
+        if lower.contains("tinyllama") {
+            return .zephyrChat
+        }
+        return .rawCompletion
+    }
+
+    var interactionHint: String? {
+        switch self {
+        case .zephyrChat:
+            return nil
+        case .rawCompletion:
+            return "base model - free-form completion"
+        }
     }
 }
 

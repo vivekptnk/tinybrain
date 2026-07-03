@@ -126,6 +126,37 @@ public enum TokenizerLoader {
             return try loadTikToken(from: path)
         }
     }
+
+    /// Load the tokenizer that belongs to a specific `.tbf` model file.
+    ///
+    /// This intentionally fails instead of falling back to an arbitrary
+    /// tokenizer. A model/tokenizer mismatch can decode valid token IDs into
+    /// convincing garbage, so callers should surface the error to the user and
+    /// keep the previously active model.
+    public static func loadTokenizer(forModelAt path: String) throws -> any Tokenizer {
+        let resolvedPath = resolvePath(path) ?? path
+        return try loadTokenizer(forModelAt: URL(fileURLWithPath: resolvedPath))
+    }
+
+    /// Load the tokenizer that belongs to a specific `.tbf` model file.
+    public static func loadTokenizer(forModelAt modelURL: URL) throws -> any Tokenizer {
+        let candidates = tokenizerCandidateURLs(forModelAt: modelURL)
+
+        for candidate in candidates {
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try load(from: candidate.path)
+            }
+        }
+
+        let expectedPath = candidates.first?.path ?? modelURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("tokenizer.json")
+            .path
+        throw TokenizerError.matchingTokenizerNotFound(
+            model: modelURL.lastPathComponent,
+            expectedPath: expectedPath
+        )
+    }
     
     /// Load HuggingFace tokenizer.json format
     ///
@@ -296,5 +327,123 @@ public enum TokenizerLoader {
         }
         
         return nil
+    }
+
+    private static func tokenizerCandidateURLs(forModelAt modelURL: URL) -> [URL] {
+        let modelDirectory = modelURL.deletingLastPathComponent()
+        let stem = modelURL.deletingPathExtension().lastPathComponent
+
+        var roots: [URL] = [modelDirectory]
+        let parent = modelDirectory.deletingLastPathComponent()
+        if parent.path != modelDirectory.path {
+            roots.append(parent)
+        }
+
+        let rawDirectoryNames = rawDirectoryCandidates(forModelStem: stem)
+        var candidates: [URL] = []
+
+        for root in roots {
+            for rawDirectoryName in rawDirectoryNames {
+                candidates.append(
+                    root
+                        .appendingPathComponent(rawDirectoryName)
+                        .appendingPathComponent("tokenizer.json")
+                )
+            }
+        }
+
+        let colocatedNames = ["tokenizer.json", "spiece.model", "tokenizer.model"]
+        for name in colocatedNames {
+            candidates.append(modelDirectory.appendingPathComponent(name))
+        }
+
+        return uniqueURLs(candidates)
+    }
+
+    private static func rawDirectoryCandidates(forModelStem stem: String) -> [String] {
+        let normalizedStem = stem.lowercased()
+        let strippedQuantization = stripQuantizationSuffix(from: normalizedStem)
+
+        var candidates: [String] = []
+
+        candidates.append(contentsOf: fallbackRawDirectories(for: normalizedStem))
+
+        if !strippedQuantization.isEmpty {
+            candidates.append("\(strippedQuantization)-raw")
+        }
+
+        if let family = familyPrefixBeforeVersionOrQuantization(in: normalizedStem),
+           !family.isEmpty {
+            candidates.append("\(family)-raw")
+        }
+
+        return uniqueStrings(candidates)
+    }
+
+    private static func stripQuantizationSuffix(from stem: String) -> String {
+        let quantizationTokens = [
+            "int8", "int4", "fp16", "fp32", "q8", "q4", "f16", "f32"
+        ]
+
+        var parts = stem.split(separator: "-", omittingEmptySubsequences: true).map(String.init)
+        while let last = parts.last,
+              quantizationTokens.contains(last) || last == "quantized" {
+            parts.removeLast()
+        }
+
+        return parts.isEmpty ? stem : parts.joined(separator: "-")
+    }
+
+    private static func familyPrefixBeforeVersionOrQuantization(in stem: String) -> String? {
+        let quantizationTokens: Set<String> = [
+            "int8", "int4", "fp16", "fp32", "q8", "q4", "f16", "f32", "quantized"
+        ]
+        let separators = CharacterSet(charactersIn: "-_.")
+        let parts = stem
+            .components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+
+        var familyParts: [String] = []
+        for part in parts {
+            if quantizationTokens.contains(part) || part.first?.isNumber == true {
+                break
+            }
+            familyParts.append(part)
+        }
+
+        return familyParts.isEmpty ? nil : familyParts.joined(separator: "-")
+    }
+
+    private static func fallbackRawDirectories(for stem: String) -> [String] {
+        if stem.hasPrefix("tinyllama") {
+            return ["tinyllama-raw"]
+        }
+        if stem.hasPrefix("gemma") {
+            return ["gemma-2b-raw", "gemma-raw"]
+        }
+        if stem.hasPrefix("sarvam") {
+            return ["sarvam-1-raw", "sarvam-raw"]
+        }
+        return []
+    }
+
+    private static func uniqueURLs(_ urls: [URL]) -> [URL] {
+        var seen: Set<String> = []
+        var result: [URL] = []
+        for url in urls where !seen.contains(url.path) {
+            seen.insert(url.path)
+            result.append(url)
+        }
+        return result
+    }
+
+    private static func uniqueStrings(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for value in values where !seen.contains(value) {
+            seen.insert(value)
+            result.append(value)
+        }
+        return result
     }
 }

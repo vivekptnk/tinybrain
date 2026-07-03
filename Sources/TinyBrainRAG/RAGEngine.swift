@@ -48,30 +48,6 @@ public enum RAGEvent: Equatable, Sendable {
     case done([Citation])
 }
 
-private struct IncrementalDetokenizer {
-    private let tokenizer: any Tokenizer
-    private var tokenIDs: [Int] = []
-    private var emittedText = ""
-    private(set) var decodedText = ""
-
-    init(tokenizer: any Tokenizer) {
-        self.tokenizer = tokenizer
-    }
-
-    mutating func append(_ tokenID: Int) -> String? {
-        tokenIDs.append(tokenID)
-        decodedText = tokenizer.decode(tokenIDs)
-
-        guard decodedText.hasPrefix(emittedText) else {
-            return nil
-        }
-
-        let delta = String(decodedText.dropFirst(emittedText.count))
-        emittedText = decodedText
-        return delta.isEmpty ? nil : delta
-    }
-}
-
 /// Retrieval-augmented generation orchestrator.
 ///
 /// The engine owns the shared pipeline used by both answers and the

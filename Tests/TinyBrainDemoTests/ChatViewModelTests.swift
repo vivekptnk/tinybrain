@@ -13,6 +13,7 @@
 import XCTest
 @testable import TinyBrainDemo
 @testable import TinyBrainRuntime
+@testable import TinyBrainTokenizer
 
 // Note: These tests may fail to link on Xcode 26 beta due to a SwiftUICore.tbd
 // linker bug. Run with: swift test --skip TinyBrainDemoTests if affected.
@@ -179,6 +180,47 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.setGenerating(false)
         XCTAssertFalse(viewModel.isGenerating)
     }
+
+    func testGenerateStopsBeforeDisplayingEOSToken() async {
+        let eosToken = 2
+        let runner = ModelRunner(weights: makeArgmaxModel(argmaxToken: eosToken))
+        let tokenizer = makeBoundaryTokenizer()
+        viewModel = ChatViewModel(runner: runner, tokenizer: tokenizer)
+        viewModel.temperature = 0
+        viewModel.topK = 1
+        viewModel.promptText = "hello"
+
+        await viewModel.generate()
+
+        XCTAssertFalse(viewModel.isGenerating, "EOS should end generation cleanly")
+        XCTAssertEqual(viewModel.messages.count, 2)
+        XCTAssertEqual(viewModel.messages.last?.role, .assistant)
+        XCTAssertEqual(viewModel.messages.last?.content, "", "EOS must not leak into visible assistant text")
+    }
+
+    func testGenerateDetokenizesAccumulatedSentencePieceBoundaries() async {
+        let tokenizer = makeBoundaryTokenizer()
+        let runner = ModelRunner(
+            weights: makeTransitionModel(
+                defaultNextToken: 10,
+                transitions: [
+                    10: 11,
+                    11: 12,
+                    12: 2
+                ]
+            )
+        )
+        viewModel = ChatViewModel(runner: runner, tokenizer: tokenizer)
+        viewModel.temperature = 0
+        viewModel.topK = 1
+        viewModel.promptText = "hello"
+
+        await viewModel.generate()
+
+        XCTAssertEqual(viewModel.messages.last?.content, "Hello world.")
+        XCTAssertFalse(viewModel.messages.last?.content.contains("Helloworld") ?? true)
+        XCTAssertFalse(viewModel.isGenerating)
+    }
     
     // MARK: - Error Handling Tests
     
@@ -222,5 +264,175 @@ final class ChatViewModelTests: XCTestCase {
         // Telemetry should also be reset
         XCTAssertEqual(viewModel.telemetry.tokensPerSecond, 0, accuracy: 0.01, 
                       "Telemetry should reset with conversation")
+    }
+
+    func testSwitchModelRejectsTokenizerVocabMismatchAndKeepsPreviousModel() async throws {
+        viewModel.promptText = "keep this"
+        viewModel.addUserMessage()
+        let originalMessages = viewModel.messages
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBrainChatVocabMismatch-\(UUID().uuidString)")
+        let modelsDirectory = tempRoot.appendingPathComponent("Models")
+        let gemmaRawDirectory = modelsDirectory.appendingPathComponent("gemma-2b-raw")
+        try FileManager.default.createDirectory(at: gemmaRawDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let modelURL = modelsDirectory.appendingPathComponent("gemma-2b-int8.tbf")
+        try makeArgmaxModel(argmaxToken: 1, vocabSize: 8).save(to: modelURL.path)
+        try writeTokenizer(vocabSize: 4, to: gemmaRawDirectory.appendingPathComponent("tokenizer.json"))
+
+        await viewModel.switchModel(ModelInfo(path: modelURL.path))
+
+        XCTAssertEqual(viewModel.activeModelName, "Toy Model")
+        XCTAssertNil(viewModel.activeModelPath)
+        XCTAssertEqual(viewModel.messages, originalMessages, "A failed switch should not clear the active conversation")
+        XCTAssertTrue(viewModel.hasError)
+        XCTAssertTrue(viewModel.errorMessage.contains("Tokenizer vocabulary mismatch"))
+        XCTAssertTrue(viewModel.errorMessage.contains("Decoding with a mismatched tokenizer would produce garbage"))
+    }
+
+    func testSwitchModelRejectsMissingTokenizerAndKeepsPreviousModel() async throws {
+        viewModel.promptText = "still here"
+        viewModel.addUserMessage()
+        let originalMessages = viewModel.messages
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBrainChatMissingTokenizer-\(UUID().uuidString)")
+        let modelsDirectory = tempRoot.appendingPathComponent("Models")
+        try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let modelURL = modelsDirectory.appendingPathComponent("gemma-2b-int8.tbf")
+        try makeArgmaxModel(argmaxToken: 1, vocabSize: 8).save(to: modelURL.path)
+
+        await viewModel.switchModel(ModelInfo(path: modelURL.path))
+
+        XCTAssertEqual(viewModel.activeModelName, "Toy Model")
+        XCTAssertNil(viewModel.activeModelPath)
+        XCTAssertEqual(viewModel.messages, originalMessages)
+        XCTAssertTrue(viewModel.hasError)
+        XCTAssertTrue(viewModel.errorMessage.contains("No tokenizer found for gemma-2b-int8.tbf"))
+        XCTAssertTrue(viewModel.errorMessage.contains("gemma-2b-raw/tokenizer.json"))
+    }
+
+    // MARK: - Test Helpers
+
+    private func makeBoundaryTokenizer() -> BPETokenizer {
+        BPETokenizer(
+            vocab: [
+                "<BOS>": 1,
+                "<EOS>": 2,
+                "<UNK>": 3,
+                "<PAD>": 4,
+                "▁": 5,
+                "▁Hello": 10,
+                "▁world": 11,
+                ".": 12
+            ],
+            merges: [],
+            specialTokens: BPEVocabulary.SpecialTokens(
+                bos_token: "<BOS>",
+                eos_token: "<EOS>",
+                unk_token: "<UNK>",
+                pad_token: "<PAD>"
+            ),
+            usesSentencePieceWhitespace: true
+        )
+    }
+
+    private func makeArgmaxModel(argmaxToken: Int, vocabSize: Int = 16) -> ModelWeights {
+        let hiddenDim = 2
+        let config = ModelConfig(
+            numLayers: 0,
+            hiddenDim: hiddenDim,
+            numHeads: 1,
+            vocabSize: vocabSize,
+            maxSeqLen: 32
+        )
+        let tokenEmbeddings = Tensor<Float>(
+            shape: TensorShape(vocabSize, hiddenDim),
+            data: [Float](repeating: 0, count: vocabSize * hiddenDim)
+        )
+        let outputWeights = Tensor<Float>(
+            shape: TensorShape(hiddenDim, vocabSize),
+            data: [Float](repeating: 0, count: hiddenDim * vocabSize)
+        )
+        let outputBias = Tensor<Float>(
+            shape: TensorShape(vocabSize),
+            data: (0..<vocabSize).map { $0 == argmaxToken ? 20 : -20 }
+        )
+
+        return ModelWeights(
+            config: config,
+            tokenEmbeddings: tokenEmbeddings,
+            layers: [],
+            output: LinearLayerWeights(floatWeights: outputWeights, bias: outputBias)
+        )
+    }
+
+    private func makeTransitionModel(
+        defaultNextToken: Int,
+        transitions: [Int: Int],
+        vocabSize: Int = 16
+    ) -> ModelWeights {
+        let config = ModelConfig(
+            numLayers: 0,
+            hiddenDim: vocabSize,
+            numHeads: 1,
+            vocabSize: vocabSize,
+            maxSeqLen: 32
+        )
+
+        var embeddings = [Float](repeating: 0, count: vocabSize * vocabSize)
+        for token in 0..<vocabSize {
+            embeddings[token * vocabSize + token] = 1
+        }
+
+        var outputData = [Float](repeating: 0, count: vocabSize * vocabSize)
+        for token in 0..<vocabSize {
+            let next = transitions[token] ?? defaultNextToken
+            outputData[token * vocabSize + next] = 20
+        }
+
+        return ModelWeights(
+            config: config,
+            tokenEmbeddings: Tensor<Float>(shape: TensorShape(vocabSize, vocabSize), data: embeddings),
+            layers: [],
+            output: LinearLayerWeights(
+                floatWeights: Tensor<Float>(shape: TensorShape(vocabSize, vocabSize), data: outputData),
+                bias: Tensor<Float>.zeros(shape: TensorShape(vocabSize))
+            )
+        )
+    }
+
+    private func writeTokenizer(vocabSize: Int, to url: URL) throws {
+        var entries: [String] = [
+            "\"<BOS>\": 0",
+            "\"<EOS>\": 1",
+            "\"<UNK>\": 2",
+            "\"<PAD>\": 3"
+        ]
+        if vocabSize > 4 {
+            for id in 4..<vocabSize {
+                entries.append("\"\(id)\": \(id)")
+            }
+        }
+
+        let tokenizerJSON = """
+        {
+          "vocab": {
+            \(entries.joined(separator: ",\n            "))
+          },
+          "merges": [],
+          "special_tokens": {
+            "bos_token": "<BOS>",
+            "eos_token": "<EOS>",
+            "unk_token": "<UNK>",
+            "pad_token": "<PAD>"
+          }
+        }
+        """
+        try tokenizerJSON.write(to: url, atomically: true, encoding: .utf8)
     }
 }

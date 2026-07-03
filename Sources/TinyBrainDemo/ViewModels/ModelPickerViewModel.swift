@@ -70,11 +70,12 @@ public final class ModelPickerViewModel: ObservableObject {
 
     /// Load the currently selected model as a `ModelWeights` + matching tokenizer.
     ///
-    /// Returns `(weights, tokenizer)`. If no model is selected, returns toy weights
-    /// and a fallback tokenizer. On failure, clears the selection and surfaces an error.
+    /// If no model is selected, returns toy weights and a fallback tokenizer. For
+    /// real model files, tokenizer discovery is model-keyed and deliberately
+    /// throws instead of falling back to a mismatched tokenizer.
     ///
-    /// - Returns: Tuple of (ModelWeights, optional Tokenizer)
-    public func loadSelected() async -> (weights: ModelWeights, tokenizer: (any Tokenizer)?) {
+    /// - Returns: Tuple of (ModelWeights, Tokenizer)
+    public func loadSelected() async throws -> (weights: ModelWeights, tokenizer: any Tokenizer) {
         guard let path = selectedModelPath else {
             return (makeToyWeights(), TokenizerLoader.loadBestAvailable())
         }
@@ -87,16 +88,14 @@ public final class ModelPickerViewModel: ObservableObject {
                 try ModelLoader.load(from: path)
             }.value
 
-            // Try to load a matching tokenizer from the same directory,
-            // then fall back to the global best-available search
-            let dir = (path as NSString).deletingLastPathComponent
-            let tokenizer = loadTokenizerFromDirectory(dir) ?? TokenizerLoader.loadBestAvailable()
+            let tokenizer = try TokenizerLoader.loadTokenizer(forModelAt: path)
+            try validateTokenizer(tokenizer, weights: weights, modelPath: path)
 
             return (weights, tokenizer)
         } catch {
-            switchError = "Failed to load \(selectedDisplayName): \(error.localizedDescription)"
-            selectedModelPath = nil
-            return (makeToyWeights(), TokenizerLoader.loadBestAvailable())
+            let message = userFacingLoadError(error, modelPath: path)
+            switchError = message
+            throw ModelPickerLoadError(message)
         }
     }
 
@@ -113,36 +112,42 @@ public final class ModelPickerViewModel: ObservableObject {
         return ModelWeights.makeToyModel(config: config, seed: 42)
     }
 
-    /// Try to find a tokenizer file in the same directory as the model
-    private func loadTokenizerFromDirectory(_ dir: String) -> (any Tokenizer)? {
-        // Preference order: tokenizer.json, *.vocab, *.model, *.tiktoken
-        let candidates = [
-            "tokenizer.json",
-            "spiece.model",
-            "tokenizer.model",
-        ]
+    private func validateTokenizer(
+        _ tokenizer: any Tokenizer,
+        weights: ModelWeights,
+        modelPath: String
+    ) throws {
+        let tokenizerVocab = tokenizer.vocabularySize
+        let modelVocab = weights.config.vocabSize
+        guard tokenizerVocab == modelVocab else {
+            let modelName = URL(fileURLWithPath: modelPath).lastPathComponent
+            throw ModelPickerLoadError(
+                "Tokenizer vocabulary mismatch for \(modelName): tokenizer has \(tokenizerVocab) tokens, model expects \(modelVocab). Decoding with a mismatched tokenizer would produce garbage."
+            )
+        }
+    }
 
-        let fm = FileManager.default
-
-        // Named candidates first
-        for candidate in candidates {
-            let full = (dir as NSString).appendingPathComponent(candidate)
-            if fm.fileExists(atPath: full), let tok = try? TokenizerLoader.load(from: full) {
-                return tok
-            }
+    private func userFacingLoadError(_ error: Error, modelPath: String) -> String {
+        if let error = error as? ModelPickerLoadError {
+            return error.description
+        }
+        if let error = error as? TokenizerError {
+            return error.description
         }
 
-        // Scan for any supported file
-        let files = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
-        for ext in ["tiktoken", "vocab"] {
-            if let match = files.first(where: { $0.hasSuffix(".\(ext)") }) {
-                let full = (dir as NSString).appendingPathComponent(match)
-                if let tok = try? TokenizerLoader.load(from: full) {
-                    return tok
-                }
-            }
-        }
+        let modelName = URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent
+        return "Failed to load \(modelName): \(error.localizedDescription)"
+    }
+}
 
-        return nil
+private struct ModelPickerLoadError: Error, CustomStringConvertible, LocalizedError {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+
+    var errorDescription: String? {
+        description
     }
 }

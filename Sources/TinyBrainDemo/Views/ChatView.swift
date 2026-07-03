@@ -14,11 +14,13 @@ public struct ChatView: View {
     @State private var showTelemetry: Bool
     @State private var showXRay: Bool
     @State private var showErrorBanner = true
+    private let initialShowPicker: Bool
 
-    public init(viewModel: ChatViewModel, initialShowXRay: Bool = false) {
+    public init(viewModel: ChatViewModel, initialShowXRay: Bool = false, initialShowPicker: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel)
         _showXRay = State(initialValue: initialShowXRay)
         _showTelemetry = State(initialValue: !initialShowXRay)
+        self.initialShowPicker = initialShowPicker
     }
 
     public var body: some View {
@@ -83,7 +85,8 @@ public struct ChatView: View {
                 activeQuant: viewModel.activeQuant,
                 activeModelPath: viewModel.activeModelPath,
                 switchingModelPath: viewModel.pendingModelPath,
-                isSwitching: viewModel.isSwitchingModel
+                isSwitching: viewModel.isSwitchingModel,
+                initialShowPicker: initialShowPicker
             ) { model in
                 Task { await viewModel.switchModel(model) }
             }

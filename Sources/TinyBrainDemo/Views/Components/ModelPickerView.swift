@@ -24,6 +24,26 @@ public struct ModelPickerView: View {
     @State private var isPresented = false
     private let theme = TinyBrainTheme.shared
 
+    public init(
+        pickerVM: ModelPickerViewModel,
+        activeModelName: String,
+        activeQuant: QuantBadge,
+        activeModelPath: String?,
+        switchingModelPath: String?,
+        isSwitching: Bool,
+        initialShowPicker: Bool = false,
+        onSelect: @escaping (ModelInfo?) -> Void
+    ) {
+        self._pickerVM = ObservedObject(wrappedValue: pickerVM)
+        self.activeModelName = activeModelName
+        self.activeQuant = activeQuant
+        self.activeModelPath = activeModelPath
+        self.switchingModelPath = switchingModelPath
+        self.isSwitching = isSwitching
+        self.onSelect = onSelect
+        _isPresented = State(initialValue: initialShowPicker)
+    }
+
     public var body: some View {
         Button {
             pickerVM.refresh()
@@ -114,7 +134,7 @@ public struct ModelPickerView: View {
                         let badge = QuantBadge(hint: model.quantization)
                         modelRow(
                             title: model.displayName,
-                            subtitle: "\(badge.rawValue) · \(model.formattedSize)",
+                            subtitle: modelSubtitle(for: model, badge: badge),
                             badge: badge,
                             isActive: activeModelPath == model.path,
                             isLoading: isSwitching && switchingModelPath == model.path
@@ -182,6 +202,12 @@ public struct ModelPickerView: View {
         onSelect(model)
     }
 
+    private func modelSubtitle(for model: ModelInfo, badge: QuantBadge) -> String {
+        [badge.rawValue, model.formattedSize, model.interactionHint]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
     private func quantBadge(_ badge: QuantBadge) -> some View {
         let tint = theme.colors.badgeTint(badge)
         return Text(badge.rawValue)
@@ -206,7 +232,8 @@ struct ModelPickerView_Previews: PreviewProvider {
             activeQuant: .toy,
             activeModelPath: nil,
             switchingModelPath: nil,
-            isSwitching: false
+            isSwitching: false,
+            initialShowPicker: false
         ) { _ in }
         .padding()
     }

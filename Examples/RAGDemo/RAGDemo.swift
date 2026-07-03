@@ -72,7 +72,9 @@ struct RAGDemo: AsyncParsableCommand {
             return
         }
 
-        let tokenizer = TokenizerLoader.loadBestAvailable()
+        let tokenizer: any Tokenizer = noGenerate
+            ? TokenizerLoader.loadBestAvailable()
+            : try TokenizerLoader.loadTokenizer(forModelAt: resolvedModel)
         let (index, embedderSummary) = try makeIndex()
         let (generator, modelSummary, quantizationSummary) = try makeGenerator(modelPath: resolvedModel)
         printStartup(

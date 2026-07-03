@@ -66,6 +66,18 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(a, b, "Two ModelInfo objects with the same path should be equal")
     }
 
+    func testModelInfoSurfacesBaseModelHintForGemma() {
+        let info = ModelInfo(path: "/tmp/gemma-2b-int8.tbf")
+
+        XCTAssertEqual(info.interactionHint, "base model - free-form completion")
+    }
+
+    func testModelInfoDoesNotMarkTinyLlamaChatAsBaseModel() {
+        let info = ModelInfo(path: "/tmp/tinyllama-1.1b-int8.tbf")
+
+        XCTAssertNil(info.interactionHint)
+    }
+
     // MARK: - QuantizationHint Tests
 
     func testDetectInt4FromFilename() {

@@ -81,6 +81,9 @@ public final class ChatViewModel: ObservableObject {
     /// Optional tokenizer (real or mock, mutable for hot-swapping)
     private var tokenizer: (any Tokenizer)?
 
+    /// Prompt formatting mode for the active model family.
+    private var activePromptStyle: ModelPromptStyle
+
     /// Current generation task
     private var generationTask: Task<Void, Never>?
 
@@ -114,6 +117,7 @@ public final class ChatViewModel: ObservableObject {
         self.activeModelName = activeModelName
         self.activeQuant = activeQuant
         self.activeModelPath = activeModelPath
+        self.activePromptStyle = activeModelPath.map { ModelInfo(path: $0).promptStyle } ?? .rawCompletion
         self.telemetry = TelemetryViewModel()
         self.xRay = XRayViewModel(numLayers: runner.config.numLayers)
         self.modelPicker = ModelPickerViewModel()
@@ -135,36 +139,38 @@ public final class ChatViewModel: ObservableObject {
         isSwitchingModel = true
         pendingModelPath = model?.path
         failedModelSwitchTarget = nil
-        clearConversation()
-
+        let previousModelPath = activeModelPath
         modelPicker.select(path: model?.path)
-        let (weights, newTokenizer) = await modelPicker.loadSelected()
 
-        // Rebuild runner with new weights
-        runner = ModelRunner(weights: weights)
-        tokenizer = newTokenizer
+        do {
+            let (weights, newTokenizer) = try await modelPicker.loadSelected()
 
-        // Rebuild X-Ray for new layer count
-        xRay = XRayViewModel(numLayers: runner.config.numLayers)
+            // Rebuild runner with new weights and matching tokenizer atomically.
+            runner = ModelRunner(weights: weights)
+            tokenizer = newTokenizer
+            activePromptStyle = model?.promptStyle ?? .rawCompletion
+
+            // Rebuild X-Ray for new layer count.
+            xRay = XRayViewModel(numLayers: runner.config.numLayers)
+            clearConversation()
+
+            if let model {
+                activeModelName = model.displayName
+                activeQuant = QuantBadge.derived(from: weights, fallback: QuantBadge(hint: model.quantization))
+                activeModelPath = model.path
+            } else {
+                activeModelName = "Toy Model"
+                activeQuant = .toy
+                activeModelPath = nil
+            }
+        } catch {
+            modelPicker.select(path: previousModelPath)
+            failedModelSwitchTarget = model
+            handleError(message: modelPicker.switchError ?? error.localizedDescription)
+        }
 
         isSwitchingModel = false
         pendingModelPath = nil
-
-        if let err = modelPicker.switchError {
-            activeModelName = "Toy Model"
-            activeQuant = .toy
-            activeModelPath = nil
-            failedModelSwitchTarget = model
-            handleError(message: err)
-        } else if let model {
-            activeModelName = model.displayName
-            activeQuant = QuantBadge.derived(from: weights, fallback: QuantBadge(hint: model.quantization))
-            activeModelPath = model.path
-        } else {
-            activeModelName = "Toy Model"
-            activeQuant = .toy
-            activeModelPath = nil
-        }
     }
 
     /// Retry the last failed model switch, if one is available.
@@ -253,7 +259,7 @@ public final class ChatViewModel: ObservableObject {
         setGenerating(false)
     }
     
-    /// Format conversation history using TinyLlama/Zephyr chat template
+    /// Format conversation history using TinyLlama/Zephyr chat template.
     private func formatChatPrompt() -> String {
         var prompt = ""
         // System message
@@ -271,23 +277,52 @@ public final class ChatViewModel: ObservableObject {
         return prompt
     }
 
+    /// Format a raw completion prompt for base models.
+    private func formatRawPrompt() throws -> String {
+        guard let lastUserMessage = messages.last(where: { $0.isUser }) else {
+            throw ChatError.noUserMessage
+        }
+        return lastUserMessage.content
+    }
+
+    private func formattedPromptForActiveModel() throws -> String {
+        switch activePromptStyle {
+        case .zephyrChat:
+            return formatChatPrompt()
+        case .rawCompletion:
+            return try formatRawPrompt()
+        }
+    }
+
+    private var activeGenerationMaxTokens: Int {
+        switch activePromptStyle {
+        case .zephyrChat:
+            return 200
+        case .rawCompletion:
+            return 64
+        }
+    }
+
     private func performGeneration() async throws {
         // Get last user message
         guard messages.last(where: { $0.isUser }) != nil else {
             throw ChatError.noUserMessage
         }
 
-        // Build full chat prompt with template
-        let chatPrompt = formatChatPrompt()
+        // Build prompt with the active model family's expected formatting.
+        let prompt = try formattedPromptForActiveModel()
 
-        // Tokenize with BOS token
+        // Tokenize with the active tokenizer's BOS token when available.
         let promptTokens: [Int]
         if let tokenizer = tokenizer {
-            // BOS token (1) + encoded chat template
-            promptTokens = [1] + tokenizer.encode(chatPrompt)
+            var encoded = tokenizer.encode(prompt)
+            if let bpeTokenizer = tokenizer as? BPETokenizer {
+                encoded.insert(bpeTokenizer.bosToken, at: 0)
+            }
+            promptTokens = encoded
         } else {
             // Fallback: character-based
-            promptTokens = Array(chatPrompt.prefix(50)).map { char in
+            promptTokens = Array(prompt.prefix(50)).map { char in
                 Int(char.asciiValue ?? 0) % runner.config.vocabSize
             }
         }
@@ -295,11 +330,18 @@ public final class ChatViewModel: ObservableObject {
         // Reset runner for fresh generation (clear KV cache from previous turns)
         runner.reset()
 
+        let stopTokens: [Int]
+        if let bpeTokenizer = tokenizer as? BPETokenizer {
+            stopTokens = [bpeTokenizer.eosToken]
+        } else {
+            stopTokens = []
+        }
+
         // Configure generation
         let generationConfig = GenerationConfig(
-            maxTokens: 200,
+            maxTokens: activeGenerationMaxTokens,
             sampler: currentSamplerConfig,
-            stopTokens: [2]  // EOS token </s>
+            stopTokens: stopTokens
         )
         
         // Create assistant message to accumulate response
@@ -309,15 +351,27 @@ public final class ChatViewModel: ObservableObject {
         let assistantID = messages[assistantIndex].id
         currentStreamingMessageID = assistantID
         
+        var detokenizer: IncrementalDetokenizer?
+        if let tokenizer {
+            detokenizer = IncrementalDetokenizer(tokenizer: tokenizer)
+        }
+
         // Stream generation
         for try await output in runner.generateStream(prompt: promptTokens, config: generationConfig) {
             // Check cancellation
             if Task.isCancelled { break }
+
+            if stopTokens.contains(output.tokenId) {
+                break
+            }
             
             // Detokenize
             let text: String
-            if let tokenizer = tokenizer {
-                text = tokenizer.decode([output.tokenId])
+            if tokenizer != nil {
+                guard let delta = detokenizer?.append(output.tokenId) else {
+                    continue
+                }
+                text = delta
             } else {
                 // Fallback: character-based
                 let char = Character(UnicodeScalar(UInt8(output.tokenId % 94 + 33)))

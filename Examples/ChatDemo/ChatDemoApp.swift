@@ -38,6 +38,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 /// Screenshot automation launch arguments:
 /// `--ui-demo-transcript` seeds a four-message live transcript and telemetry.
 /// `--ui-xray` opens the X-Ray panel at launch.
+/// `--ui-picker` opens the model picker popover at launch.
 /// `--ui-error` surfaces a sample dismissible error banner.
 @main
 struct ChatDemoApp: App {
@@ -47,10 +48,12 @@ struct ChatDemoApp: App {
 
     @StateObject private var viewModel: ChatViewModel
     private let initialShowXRay: Bool
+    private let initialShowPicker: Bool
 
     init() {
         let launchArguments = Set(CommandLine.arguments.dropFirst())
         initialShowXRay = launchArguments.contains("--ui-xray")
+        initialShowPicker = launchArguments.contains("--ui-picker")
 
         // Initialize Metal backend
         if MetalBackend.isAvailable {
@@ -101,7 +104,7 @@ struct ChatDemoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ChatView(viewModel: viewModel, initialShowXRay: initialShowXRay)
+            ChatView(viewModel: viewModel, initialShowXRay: initialShowXRay, initialShowPicker: initialShowPicker)
         }
         #if os(macOS)
         .defaultSize(width: 900, height: 600)

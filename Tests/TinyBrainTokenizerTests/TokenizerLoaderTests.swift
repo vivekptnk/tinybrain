@@ -122,6 +122,76 @@ final class TokenizerLoaderTests: XCTestCase {
         XCTAssertGreaterThan(tokenizer.vocabularySize, 0)
         XCTAssertEqual(tokenizer.encode("Hi"), [6])
     }
+
+    func testLoadTokenizerForModelPrefersMatchingRawDirectory() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent("TinyBrainTokenizerPairing-\(UUID().uuidString)")
+        let modelsDirectory = tempRoot.appendingPathComponent("Models")
+        let tinyLlamaDirectory = modelsDirectory.appendingPathComponent("tinyllama-raw")
+        let gemmaDirectory = modelsDirectory.appendingPathComponent("gemma-2b-raw")
+        try fileManager.createDirectory(at: tinyLlamaDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: gemmaDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        try writeTinyBrainTokenizer(
+            to: tinyLlamaDirectory.appendingPathComponent("tokenizer.json"),
+            token: "T",
+            mergedToken: "Ti"
+        )
+        try writeTinyBrainTokenizer(
+            to: gemmaDirectory.appendingPathComponent("tokenizer.json"),
+            token: "G",
+            mergedToken: "Go"
+        )
+
+        let modelURL = modelsDirectory.appendingPathComponent("gemma-2b-int8.tbf")
+        fileManager.createFile(atPath: modelURL.path, contents: Data([0]))
+
+        let tokenizer = try TokenizerLoader.loadTokenizer(forModelAt: modelURL)
+
+        XCTAssertEqual(tokenizer.encode("Go"), [6])
+        XCTAssertNotEqual(tokenizer.encode("Ti"), [6], "Gemma model must not pick the TinyLlama tokenizer")
+    }
+
+    func testLoadTokenizerForModelFallsBackToKnownTinyLlamaRawName() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent("TinyBrainTokenizerTinyLlama-\(UUID().uuidString)")
+        let modelsDirectory = tempRoot.appendingPathComponent("Models")
+        let tinyLlamaDirectory = modelsDirectory.appendingPathComponent("tinyllama-raw")
+        try fileManager.createDirectory(at: tinyLlamaDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        try writeTinyBrainTokenizer(
+            to: tinyLlamaDirectory.appendingPathComponent("tokenizer.json"),
+            token: "H",
+            mergedToken: "Hi"
+        )
+
+        let modelURL = modelsDirectory.appendingPathComponent("tinyllama-1.1b-int8.tbf")
+        fileManager.createFile(atPath: modelURL.path, contents: Data([0]))
+
+        let tokenizer = try TokenizerLoader.loadTokenizer(forModelAt: modelURL)
+
+        XCTAssertEqual(tokenizer.encode("Hi"), [6])
+    }
+
+    func testLoadTokenizerForModelFailsLoudlyWhenMissing() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent("TinyBrainTokenizerMissing-\(UUID().uuidString)")
+        let modelsDirectory = tempRoot.appendingPathComponent("Models")
+        try fileManager.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let modelURL = modelsDirectory.appendingPathComponent("gemma-2b-int8.tbf")
+        fileManager.createFile(atPath: modelURL.path, contents: Data([0]))
+
+        XCTAssertThrowsError(try TokenizerLoader.loadTokenizer(forModelAt: modelURL)) { error in
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("No tokenizer found for gemma-2b-int8.tbf"))
+            XCTAssertTrue(message.contains("gemma-2b-raw/tokenizer.json"))
+            XCTAssertTrue(message.contains("Decoding with a mismatched tokenizer would produce garbage"))
+        }
+    }
     
     // MARK: - SentencePiece Format Detection
 
@@ -224,5 +294,31 @@ final class TokenizerLoaderTests: XCTestCase {
         XCTAssertThrowsError(try TokenizerLoader.load(from: tempURL.path))
 
         try? FileManager.default.removeItem(at: tempURL)
+    }
+
+    private func writeTinyBrainTokenizer(to url: URL, token: String, mergedToken: String) throws {
+        let first = String(mergedToken.prefix(1))
+        let rest = String(mergedToken.dropFirst())
+        let tokenizerJSON = """
+        {
+          "vocab": {
+            "<BOS>": 0,
+            "<EOS>": 1,
+            "<UNK>": 2,
+            "<PAD>": 3,
+            "\(token)": 4,
+            "\(rest)": 5,
+            "\(mergedToken)": 6
+          },
+          "merges": [["\(first)", "\(rest)"]],
+          "special_tokens": {
+            "bos_token": "<BOS>",
+            "eos_token": "<EOS>",
+            "unk_token": "<UNK>",
+            "pad_token": "<PAD>"
+          }
+        }
+        """
+        try tokenizerJSON.write(to: url, atomically: true, encoding: .utf8)
     }
 }
