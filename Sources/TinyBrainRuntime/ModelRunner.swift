@@ -442,11 +442,21 @@ private extension ModelRunner {
             normedForFFN = residual1
         }
 
-        // Gated FFN: down_proj(silu(gate_proj(x)) * up_proj(x))
-        // Falls back to GELU-based FFN if no gate projection (toy models)
+        // Gated FFN: down_proj(act(gate_proj(x)) * up_proj(x))
+        // LLaMA/TinyLlama use SwiGLU (SiLU gate); Gemma uses GeGLU. Gemma's
+        // config specifies hidden_act="gelu" — the *exact* erf variant. We must
+        // use the exact GELU here (not `Tensor.gelu()`, which is the tanh
+        // approximation): its cubic argument, `tanh(0.798·(x + 0.044715·x³))`,
+        // overflows to NaN on the GPU for Gemma's BOS "massive activations"
+        // (a gate outlier ≈14 pushes the argument past ~100, where Metal's tanh
+        // returns NaN). That single NaN poisons the layer-7 FFN, propagates into
+        // the KV cache, and collapses every prompt into degenerate output.
+        // `erf` saturates cleanly for large |x|, so exact GELU is both faithful
+        // to Gemma and numerically robust.
         let ffnOutput: Tensor<Float>
         if let gate = layerWeights.feedForward.gate {
-            let gateOut = gate.apply(toRow: normedForFFN).silu()
+            let gateProjected = gate.apply(toRow: normedForFFN)
+            let gateOut = config.isGemmaStyle ? Self.exactGELU(gateProjected) : gateProjected.silu()
             let upOut = layerWeights.feedForward.up.apply(toRow: normedForFFN)
             let gated = gateOut * upOut
             ffnOutput = layerWeights.feedForward.down.apply(toRow: gated)
@@ -456,6 +466,23 @@ private extension ModelRunner {
         }
 
         return residual1 + ffnOutput
+    }
+
+    /// Exact GELU: `0.5·x·(1 + erf(x/√2))`, computed on the CPU.
+    ///
+    /// Used for Gemma's GeGLU gate (its config declares `hidden_act="gelu"`,
+    /// the exact erf variant). Unlike the tanh approximation in
+    /// `Tensor.gelu()`, `erf` saturates to ±1 for large |x| without the cubic
+    /// blow-up that overflows the Metal `tanh` kernel to NaN on Gemma's BOS
+    /// massive activations.
+    static func exactGELU(_ t: Tensor<Float>) -> Tensor<Float> {
+        let invSqrt2 = 0.7071067811865476
+        var d = t.data
+        for i in 0..<d.count {
+            let x = Double(d[i])
+            d[i] = Float(0.5 * x * (1.0 + erf(x * invSqrt2)))
+        }
+        return Tensor<Float>(shape: t.shape, data: d)
     }
 
 }

@@ -108,9 +108,19 @@ final class GemmaSmokeTest: XCTestCase {
             XCTAssertGreaterThan(generated.count, 0,
                                  "Gemma should emit at least one continuation token")
 
-            let uniqueRatio = Float(Set(generated).count) / Float(max(generated.count, 1))
-            XCTAssertGreaterThan(uniqueRatio, 0.2,
-                                 "Token diversity too low (\(uniqueRatio)) — likely INT4 gibberish regression")
+            // Regression guards for the CHA-109 GELU/BOS-NaN collapse. Before the
+            // fix, the BOS token's massive activation overflowed the tanh-approx
+            // GELU to NaN in layer 7, poisoning the KV cache and collapsing every
+            // continuation into <bos> repetition or pure whitespace/newline spam.
+            // These assert the model emits real, non-special-token text.
+            let bosCount = generated.filter { $0 == bosTokenId }.count
+            XCTAssertEqual(bosCount, 0,
+                           "Continuation must not repeat <bos> (found \(bosCount)) — NaN-collapse regression")
+
+            let nonWhitespace = decoded.filter { !$0.isWhitespace }.count
+            let nonWhitespaceFraction = Float(nonWhitespace) / Float(max(decoded.count, 1))
+            XCTAssertGreaterThan(nonWhitespaceFraction, 0.3,
+                                 "Continuation is mostly whitespace (\(nonWhitespaceFraction)) — NaN-collapse regression")
         }
     }
 
