@@ -41,7 +41,7 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 
 ### Known limitations
 
-- INT4 quality measured honestly: 8.7% (Gemma) / 13.3% (TinyLlama) perplexity delta vs INT8 at group=32 RTN with INT8 output head — above the 6% target; GPTQ/AWQ tracked for 0.2.1. Real-model gate tests remain red locally by design.
+- INT4 quality measured honestly: 8.7% (Gemma) / 13.3% (TinyLlama) perplexity delta vs INT8 at group=32 RTN with INT8 output head — above the 6% target; GPTQ/AWQ tracked for 0.2.1. Real-model gates now run as green regression tripwires above these measured baselines; the <=6% bound returns as the v0.2.1 exit bar.
 
 ## [0.1.0] — 2025-10-25
 
