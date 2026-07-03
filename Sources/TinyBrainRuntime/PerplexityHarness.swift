@@ -49,19 +49,26 @@ public struct PerplexitySlice: Codable {
 /// Shared harness operations: INT4 re-quantization + slice-driven perplexity.
 public enum PerplexityHarness {
 
-    /// Re-quantize every linear layer of an INT8 `ModelWeights` to INT4
-    /// per-group.
+    /// Re-quantize transformer linear layers of an INT8 `ModelWeights` to
+    /// INT4 per-group.
     ///
     /// This does **not** touch the INT4 kernels or the saved TBF format — it
     /// just dequantizes each linear weight matrix to Float32 and calls the
     /// existing `quantize(mode: .int4, groupSize:)` converter. Embeddings,
-    /// RMSNorm weights, and biases stay in their original representation.
+    /// RMSNorm weights, biases, and the output/lm_head projection stay in
+    /// their original representation.
+    ///
+    /// This mirrors `Scripts/convert_model.py --quantize int4`: logits are
+    /// sensitive to output-head noise, so the converter keeps the head at the
+    /// source model's INT8 per-channel precision while quantizing the 2D layer
+    /// weights to INT4.
     ///
     /// - Parameters:
     ///   - weights: Source model (typically loaded from an INT8 `.tbf`).
     ///   - groupSize: INT4 group size (default 32 — CHA-104 v0.2.0 knee,
     ///     matches the converter default).
-    /// - Returns: New `ModelWeights` whose linear layers are INT4 per-group.
+    /// - Returns: New `ModelWeights` whose transformer linear layers are INT4
+    ///   per-group and whose output/lm_head projection is preserved as-is.
     public static func convertToINT4(
         _ weights: ModelWeights,
         groupSize: Int = 32,
@@ -113,14 +120,13 @@ public enum PerplexityHarness {
             return TransformerLayerWeights(attention: attention, feedForward: feedForward)
         }
 
-        progress?("[output projection] re-quantizing to INT4 …")
-        let outputINT4 = toINT4(weights.output, label: "output")
+        progress?("[output projection] preserving source INT8 per converter policy …")
 
         return ModelWeights(
             config: weights.config,
             tokenEmbeddings: weights.tokenEmbeddings,
             layers: newLayers,
-            output: outputINT4,
+            output: weights.output,
             finalNormWeights: weights.finalNormWeights
         )
     }

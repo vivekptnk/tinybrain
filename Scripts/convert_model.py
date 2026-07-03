@@ -482,7 +482,7 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
     # Prepare quantized tensors
     quantized_weights = {}
 
-    def prepare_tensor(name: str, tensor: np.ndarray):
+    def prepare_tensor(name: str, tensor: np.ndarray, quantize_as: Optional[str] = None):
         """Quantize tensor per output channel (dim 0), then transpose to [in, out] layout.
 
         Weights arrive as [out, in] from PyTorch. We:
@@ -490,7 +490,8 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
         2. Transpose quantized data to [in, out] for TinyBrain's matmul layout
         3. Store scales per output channel (applied per column in Swift dequantizer)
         """
-        if quantize_mode == 'int4' and len(tensor.shape) >= 1:
+        tensor_quantize_mode = quantize_as or quantize_mode
+        if tensor_quantize_mode == 'int4' and len(tensor.shape) >= 1:
             if tensor.ndim == 2:
                 # Swift and Metal unpack INT4 by row-major linear index over the
                 # stored [in, out] matrix: linearIdx = k * out + col, and
@@ -512,7 +513,7 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
                 'precision': 'int4',
                 'group_size': group_size,
             }
-        elif quantize_mode == 'int8' and tensor.ndim == 2:
+        elif tensor_quantize_mode == 'int8' and tensor.ndim == 2:
             # Quantize per output channel (dim 0 of [out, in])
             q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
             # Transpose quantized data: [out, in] -> [in, out]
@@ -525,7 +526,7 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
                 'quantized': True,
                 'precision': 'int8',
             }
-        elif quantize_mode == 'int8' and len(tensor.shape) >= 1:
+        elif tensor_quantize_mode == 'int8' and len(tensor.shape) >= 1:
             # 1D tensors (norms): no transpose needed
             q_tensor, scales, zero_points = quantize_int8_per_channel(tensor)
             quantized_weights[name] = {
@@ -610,8 +611,10 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
     if 'final_norm_bias' in weights:
         quantized_weights['final_norm_bias'] = float32_entry(weights['final_norm_bias'])
 
-    # Output projection (quantized) + optional bias
-    prepare_tensor('output', weights['lm_head'])
+    # Output projection (quantized) + optional bias. Keep the logits head at
+    # INT8 for INT4 model files; output logits are too sensitive to INT4 noise.
+    output_precision = 'int8' if quantize_mode == 'int4' else None
+    prepare_tensor('output', weights['lm_head'], quantize_as=output_precision)
     if 'lm_head_bias' in weights:
         quantized_weights['output_bias'] = float32_entry(weights['lm_head_bias'])
 

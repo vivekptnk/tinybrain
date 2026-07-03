@@ -600,6 +600,57 @@ class TestQuantization:
             os.unlink(int4_path)
             os.unlink(int8_path)
 
+    def test_int4_conversion_keeps_output_head_int8(self):
+        """INT4 model conversion must keep logits-sensitive output projection at INT8."""
+        hidden_dim = 6
+        kv_dim = 2
+        intermediate_dim = 8
+        config = ModelConfig(
+            num_layers=1,
+            hidden_dim=hidden_dim,
+            num_heads=3,
+            num_kv_heads=1,
+            vocab_size=5,
+            intermediate_dim=intermediate_dim,
+        )
+        weights = {
+            'embeddings': np.zeros((config.vocab_size, hidden_dim), dtype=np.float32),
+            'layers': [{
+                'q_proj': np.ones((hidden_dim, hidden_dim), dtype=np.float32),
+                'k_proj': np.ones((kv_dim, hidden_dim), dtype=np.float32),
+                'v_proj': np.ones((kv_dim, hidden_dim), dtype=np.float32),
+                'o_proj': np.ones((hidden_dim, hidden_dim), dtype=np.float32),
+                'gate_proj': np.ones((intermediate_dim, hidden_dim), dtype=np.float32),
+                'up_proj': np.ones((intermediate_dim, hidden_dim), dtype=np.float32),
+                'down_proj': np.ones((hidden_dim, intermediate_dim), dtype=np.float32),
+                'input_layernorm': np.ones((hidden_dim,), dtype=np.float32),
+                'post_attention_layernorm': np.ones((hidden_dim,), dtype=np.float32),
+            }],
+            'lm_head': np.arange(config.vocab_size * hidden_dim, dtype=np.float32)
+                .reshape(config.vocab_size, hidden_dim),
+        }
+
+        with tempfile.NamedTemporaryFile(suffix='.tbf', delete=False) as f:
+            output_path = f.name
+
+        try:
+            write_tbf_format(weights, config, output_path,
+                             quantize_mode='int4', group_size=2)
+
+            output_tensor = _read_tbf_quantized_tensor(output_path, 'output')
+            hidden_tensor = _read_tbf_quantized_tensor(output_path, 'layer_0_attn_q')
+
+            assert output_tensor['precision'] == 1
+            assert output_tensor['mode'] == 2
+            assert output_tensor['group_size'] == 0
+            assert output_tensor['shape'] == weights['lm_head'].T.shape
+
+            assert hidden_tensor['precision'] == 2
+            assert hidden_tensor['mode'] == 3
+            assert hidden_tensor['group_size'] == 2
+        finally:
+            os.unlink(output_path)
+
 
 class TestTBFFormat:
     """Test TBF format compliance with docs/tbf-format-spec.md"""

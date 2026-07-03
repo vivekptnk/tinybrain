@@ -44,6 +44,8 @@ final class PerplexityHarnessTests: XCTestCase {
     func testConvertToINT4PreservesStructureOnToyModel() {
         let config = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 4, vocabSize: 100, maxSeqLen: 64)
         let int8Weights = ModelWeights.makeToyModel(config: config, seed: 1)
+        XCTAssertEqual(int8Weights.output.weights.precision, .int8,
+                       "Toy source model should exercise the shipped INT8 lm_head policy")
 
         let int4Weights = PerplexityHarness.convertToINT4(int8Weights, groupSize: 32)
 
@@ -55,14 +57,22 @@ final class PerplexityHarnessTests: XCTestCase {
                        "Embeddings stay in their original FP32 form")
         XCTAssertEqual(int4Weights.output.weights.shape, int8Weights.output.weights.shape)
 
-        // Every linear weight should now be INT4.
-        XCTAssertEqual(int4Weights.output.weights.precision, .int4,
-                       "Output projection must be INT4 after conversion")
+        // Transformer layer weights should now be INT4, while the output head
+        // preserves the converter's shipped INT8 policy.
+        XCTAssertEqual(int4Weights.output.weights.precision, .int8,
+                       "Output projection/lm_head must remain INT8 after INT4 conversion")
+        XCTAssertEqual(int4Weights.output.weights.data, int8Weights.output.weights.data,
+                       "Output projection/lm_head payload must be preserved as-is")
+        XCTAssertEqual(int4Weights.output.weights.scales, int8Weights.output.weights.scales,
+                       "Output projection/lm_head scales must be preserved as-is")
         for (i, layer) in int4Weights.layers.enumerated() {
             XCTAssertEqual(layer.attention.query.weights.precision, .int4, "layer \(i) Q")
             XCTAssertEqual(layer.attention.key.weights.precision, .int4, "layer \(i) K")
             XCTAssertEqual(layer.attention.value.weights.precision, .int4, "layer \(i) V")
             XCTAssertEqual(layer.attention.output.weights.precision, .int4, "layer \(i) O")
+            if let gate = layer.feedForward.gate {
+                XCTAssertEqual(gate.weights.precision, .int4, "layer \(i) FFN gate")
+            }
             XCTAssertEqual(layer.feedForward.up.weights.precision, .int4, "layer \(i) FFN up")
             XCTAssertEqual(layer.feedForward.down.weights.precision, .int4, "layer \(i) FFN down")
         }
@@ -76,9 +86,9 @@ final class PerplexityHarnessTests: XCTestCase {
         let b = PerplexityHarness.convertToINT4(int8Weights, groupSize: 64)
 
         XCTAssertEqual(a.output.weights.data, b.output.weights.data,
-                       "Same input weights + group size must produce identical INT4 payloads")
+                       "Same input weights + group size must produce identical output payloads")
         XCTAssertEqual(a.output.weights.scales, b.output.weights.scales,
-                       "Per-group scales are deterministic too")
+                       "Output scales are deterministic too")
     }
 
     // MARK: - computePerplexity
