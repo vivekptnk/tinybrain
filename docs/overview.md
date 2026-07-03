@@ -638,9 +638,9 @@ Zero-points: INT4[num_groups]
 - Enables larger models on-device
 
 **Challenges**:
-- Higher perplexity delta (5-10%)
+- Higher perplexity delta: +8.7% (Gemma 2B) / +13.3% (TinyLlama 1.1B) vs INT8 at group=32 RTN with the output head kept INT8
 - More complex dequantization kernel
-- GPTQ/AWQ work for a <=1% perplexity target remains deferred to v0.2.1.
+- GPTQ/AWQ work for the <=6% exit bar and <=1% stretch target remains deferred to v0.2.1.
 
 ---
 

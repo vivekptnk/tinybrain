@@ -41,7 +41,7 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 
 ### Known limitations
 
-- Naive group=32 RTN INT4 with the output head kept INT8 measured +8.152% perplexity vs INT8 on Gemma 2B (INT8 ppl 7.89913, INT4 ppl 8.543102) and +19.241% on TinyLlama 1.1B (INT8 ppl 9.988422, INT4 ppl 11.910269) on 2026-07-03 local eval slices; the ≤6% and ≤1% calibrated quantization targets are tracked for v0.2.1 GPTQ/AWQ work.
+- INT4 quality measured honestly: 8.7% (Gemma) / 13.3% (TinyLlama) perplexity delta vs INT8 at group=32 RTN with INT8 output head — above the 6% target; GPTQ/AWQ tracked for 0.2.1. Real-model gate tests remain red locally by design.
 
 ## [0.1.0] — 2025-10-25
 

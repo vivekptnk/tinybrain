@@ -11,7 +11,7 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ### Quantization
 
-- **INT4 quantization (group=32)** — per-group RTN INT4 with FP16 scales and the output head kept INT8. Fresh 2026-07-03 local real-model evals measured Gemma 2B INT8 ppl 7.89913 vs INT4 ppl 8.543102 (Δ +8.152%) and TinyLlama 1.1B INT8 ppl 9.988422 vs INT4 ppl 11.910269 (Δ +19.241%). These are v0.2.0 regression tripwires, not proof of the earlier ≤6% DoD; calibrated GPTQ/AWQ targets move to v0.2.1.
+- **INT4 quantization (group=32)** — per-group RTN INT4 with FP16 scales and the output head kept INT8. The <=6% v0.2.0 DoD was accepted on measurements later shown vacuous in the 2026-07-03 audit. Corrected M4 Max WikiText-slice artifact measurements are +8.7% Gemma 2B and +13.3% TinyLlama 1.1B perplexity delta vs INT8. The <=6% exit bar now moves to v0.2.1 via GPTQ/AWQ; local real-model gate tests remain red by design and skip on CI.
 - **INT4 Metal kernel** — fused dequantize+matmul for INT4 weights directly on GPU, eliminating the CPU round-trip that existed in v0.1.0.
 
 ### Attention & Decoding
@@ -39,7 +39,7 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ### INT4 Precision (CHA-156)
 
-The v0.2.0 INT4 implementation is a naive group=32 RTN path with measured +8.152% Gemma 2B and +19.241% TinyLlama 1.1B perplexity deltas vs INT8 on 2026-07-03 local eval slices. v0.2.1 owns the calibrated INT4 targets: first meet the ≤6% product goal, then push toward ≤1% via calibrated quantization:
+The v0.2.0 INT4 implementation is a naive group=32 RTN path with the output head kept INT8. Corrected 2026-07-03 M4 Max WikiText-slice artifact measurements show +8.7% Gemma 2B and +13.3% TinyLlama 1.1B perplexity deltas vs INT8, above the original <=6% target. v0.2.1 owns that <=6% exit bar first, then pushes toward <=1% via calibrated quantization:
 
 - **GPTQ** — post-training weight correction using Hessian-based update. Layer-wise quantization with activation statistics from a calibration corpus.
 - **AWQ** — activation-aware weight quantization. Identifies and protects salient weight channels before quantization. Reduces outlier impact without full calibration.

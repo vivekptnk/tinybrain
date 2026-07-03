@@ -319,7 +319,7 @@ Measured on MacBook Pro M4 Max:
 | TinyLlama 1.1B memory (INT8) | 1.1 GB (75% less than FP32) |
 | Gemma 2B memory (INT4, group=32) | Not yet benchmarked — tracked for v0.2.1 |
 | Quantization accuracy loss (INT8) | Less than 1% |
-| Quantization accuracy loss (INT4) | INT4 (group=32, RTN, output head kept INT8): measured +8.2% (Gemma 2B) / +19.2% (TinyLlama 1.1B) perplexity vs INT8 on local eval slices; calibrated quantization (GPTQ/AWQ, ≤6% goal) tracked for v0.2.1 |
+| Quantization accuracy loss (INT4) | 8.7% (Gemma 2B) / 13.3% (TinyLlama) measured at group=32 RTN, output head INT8 — <=6% target moves to v0.2.1 (GPTQ/AWQ) |
 
 ---
 
@@ -330,10 +330,10 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full versioned milestone plan. 
 | Version | Status | Highlights |
 |---------|--------|-----------|
 | **v0.2.0** | In progress | INT4 quantization (group=32), Flash Attention, speculative decoding, Gemma/Phi-2 coverage, ProximaKit + Cartographer bridges |
-| **v0.2.1** | Planned | GPTQ/AWQ for ≤1% INT4 perplexity delta, binary SentencePiece tokenizer |
+| **v0.2.1** | Planned | GPTQ/AWQ for <=6% INT4 perplexity exit bar (<=1% stretch), binary SentencePiece tokenizer |
 | **v0.3.0** | Planned | iOS 17 deployment, Mistral/Llama-3 support, 8K context, TikToken adapter |
 
-The [INT4 calibrated quantization targets](docs/ROADMAP.md#v021--int4-precision--tokenizer-completeness) (GPTQ/AWQ, including the ≤6% goal and ≤1% stretch target) are tracked for v0.2.1. v0.2.0 ships naive group=32 RTN INT4 with measured +8.2% Gemma 2B / +19.2% TinyLlama 1.1B perplexity vs INT8 on local eval slices.
+The [INT4 calibrated quantization targets](docs/ROADMAP.md#v021--int4-precision--tokenizer-completeness) (GPTQ/AWQ, with a <=6% exit bar and <=1% stretch target) are tracked for v0.2.1. v0.2.0 ships naive group=32 RTN INT4 with measured +8.7% Gemma 2B / +13.3% TinyLlama 1.1B perplexity vs INT8 on the 2026-07-03 M4 Max WikiText slice, using shipped converter artifacts with the output head kept INT8.
 
 ---
 
