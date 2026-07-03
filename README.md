@@ -45,6 +45,55 @@ Toggle it on with one button. Zero performance impact when off.
 
 ---
 
+## On-Device RAG (New)
+
+TinyBrain now includes a private RAG pipeline for local notes: chunk documents, embed them with ProximaKit, retrieve with HNSW, build a cited prompt, and stream a TinyBrain answer. The CLI uses `NLEmbeddingProvider` by default and can run retrieval-only with `--no-generate` when you do not have a `.tbf` model available. Documents, prompts, retrieved passages, and generated answers stay on device. See [docs/rag.md](docs/rag.md) for the full architecture and design notes.
+
+```bash
+swift run tinybrain-rag --dir Notes -question "What do my notes say?" --embedder nl --k 4 --tokens 64
+swift run tinybrain-rag --no-generate -question "What do the sample notes say?"
+```
+
+Real captured session — TinyLlama 1.1B INT8, NLEmbedding retrieval, release build, Apple M4 Max (~52s including model load):
+
+```text
+
++--------------------------------------------------+
+| TinyBrain RAG                                    |
+| Private retrieval and generation over your notes. |
++--------------------------------------------------+
+
+Embedder: NLEmbeddingProvider (.english, 512d)
+Model: TinyBrain ModelRunner: tinyllama-1.1b-int8.tbf (22 layers, 2048d, context 2048)
+Quantization: INT8
+Prompt template: zephyr
+
+Indexed 15 chunks from 15 files.
+
+Question: How long should I steep cold brew coffee?
+
+Retrieved passages (lower distance = more relevant, 4.8 ms):
+  [1] 0.628  SampleNotes/cold-brew.md#0
+      Cold brew note: use 80 grams of coarse coffee per litre of water, steep for 16 hours in the fridge, then filter before diluting.
+  [2] 0.744  SampleNotes/garden-tomatoes.md#0
+      Garden note: tomato seedlings go outside after the last frost, and they need a week of hardening off before full sun.
+  [3] 0.752  SampleNotes/fiddle-leaf.md#0
+      Plant note: the fiddle leaf fig needs water only when the top five centimetres of soil are dry and dislikes being moved from bright light.
+  [4] 0.819  SampleNotes/home-heat.md#0
+      Home note: the thermostat is set to 20 degrees during the day and 17 degrees overnight; bleed radiators that stay cold upstairs.
+
+Answer: The steep time for cold brew coffee is usually 16 hours or longer. This time is often specified in the recipe or by the coffee brand. However, it is always recommended to follow the instructions carefully and steep the coffee for the recommended time.
+
+Sources:
+  No citations emitted.
+
+.build/release/tinybrain-rag --embedder nl --tokens 128 -question   51.10s user 0.80s system 99% cpu 52.198 total
+```
+
+*The `[n]` citation machinery is fully wired and tested; 1.1B-class models follow the cite-your-sources instruction inconsistently, so answers may ground correctly (as above) without emitting markers. Larger models cite more reliably — see docs/rag.md.*
+
+---
+
 ## Get Started (5 minutes)
 
 ### What You Need
@@ -251,6 +300,7 @@ All of this happens **on your device**, using Metal GPU acceleration. No interne
 | `TinyBrainRuntime` | The core engine: tensors, model runner, KV cache, quantization, sampling |
 | `TinyBrainMetal` | GPU acceleration via Metal shaders (with automatic CPU fallback) |
 | `TinyBrainTokenizer` | Converts text to/from token IDs (supports HuggingFace format) |
+| `TinyBrainRAG` | Local retrieval-augmented generation over ProximaKit indexes |
 | `TinyBrainDemo` | The SwiftUI chat app with X-Ray visualizations |
 | `TinyBrainBench` | Command-line benchmarking tool |
 
@@ -269,7 +319,7 @@ Measured on MacBook Pro M4 Max:
 | TinyLlama 1.1B memory (INT8) | 1.1 GB (75% less than FP32) |
 | Gemma 2B memory (INT4, group=32) | Not yet benchmarked — tracked for v0.2.1 |
 | Quantization accuracy loss (INT8) | Less than 1% |
-| Quantization accuracy loss (INT4) | ~6% at group=32 (GPTQ target deferred to v0.2.1) |
+| Quantization accuracy loss (INT4) | INT4 (group=32, RTN, output head kept INT8): measured +8.2% (Gemma 2B) / +19.2% (TinyLlama 1.1B) perplexity vs INT8 on local eval slices; calibrated quantization (GPTQ/AWQ, ≤6% goal) tracked for v0.2.1 |
 
 ---
 
@@ -283,7 +333,7 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full versioned milestone plan. 
 | **v0.2.1** | Planned | GPTQ/AWQ for ≤1% INT4 perplexity delta, binary SentencePiece tokenizer |
 | **v0.3.0** | Planned | iOS 17 deployment, Mistral/Llama-3 support, 8K context, TikToken adapter |
 
-The [INT4 1% precision target](docs/ROADMAP.md#v021--int4-precision--tokenizer-completeness) (GPTQ/AWQ) was deliberately deferred from v0.2.0 — the 6% baseline at group=32 ships first.
+The [INT4 calibrated quantization targets](docs/ROADMAP.md#v021--int4-precision--tokenizer-completeness) (GPTQ/AWQ, including the ≤6% goal and ≤1% stretch target) are tracked for v0.2.1. v0.2.0 ships naive group=32 RTN INT4 with measured +8.2% Gemma 2B / +19.2% TinyLlama 1.1B perplexity vs INT8 on local eval slices.
 
 ---
 
@@ -344,9 +394,11 @@ tinybrain/
 │   ├── TinyBrainRuntime/       # Core engine
 │   ├── TinyBrainMetal/         # GPU backend
 │   ├── TinyBrainTokenizer/     # Tokenization
+│   ├── TinyBrainRAG/           # On-device RAG pipeline
 │   ├── TinyBrainDemo/          # SwiftUI app + X-Ray views
 │   └── TinyBrainBench/         # Benchmarks
 ├── Examples/ChatDemo/          # App entry point
+├── Examples/RAGDemo/           # RAG CLI entry point
 ├── Tests/                      # 500+ tests
 ├── Scripts/                    # Model converter (Python)
 └── docs/                       # Architecture documentation

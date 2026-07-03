@@ -1,11 +1,11 @@
 # TinyBrain Architecture Overview
 
 **Version:** 3.0
-**Last Updated:** 2026-03-14 (TB-010 Complete — v0.1.0 Ready)
+**Last Updated:** 2026-07-03 (0.2.0-dev documentation sweep)
 **Status:** Living Document
 
-**Latest Milestone:** TB-010 Complete — X-Ray Mode (Live Transformer Visualization)
-**Test Status:** 195 tests passing | **Tasks:** 10/10 complete
+**Latest Milestone:** 0.2.0-dev — On-Device RAG, tokenizer parity, and model-accuracy fixes
+**Test Status:** 500+ tests passing | **Tasks:** v0.2.0-dev in progress
 
 ---
 
@@ -80,12 +80,12 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 - **SwiftUI Views**: User interface and interaction
 - **View Models**: State management via `@ObservableObject`
 - **Metrics Display**: Real-time performance visualization
-- **X-Ray Panel**: Live transformer visualization (TB-010)
+- **X-Ray Panel**: Live transformer visualization
 
 #### Runtime Layer
 - **ModelRunner**: Orchestrates the inference pipeline
-- **InferenceObserver**: Zero-cost observation hooks for X-Ray Mode (TB-010)
-- **Tokenizer**: Text ↔ token ID conversion (BPE + HuggingFace adapter)
+- **InferenceObserver**: Zero-cost observation hooks for X-Ray Mode
+- **Tokenizer**: Text ↔ token ID conversion (BPE + HuggingFace adapter, including `byte_fallback`)
 - **Sampler**: Probabilistic next-token selection (temperature, top-K/P, repetition penalty)
 - **KV-Cache**: Paged attention key-value pairs (2048 tokens)
 - **Model Loader**: Memory-mapped weight loading with fallback
@@ -623,12 +623,12 @@ float_value = quantized * scale
 - Dequantize on-the-fly in kernels
 - Fuse dequantization with compute
 
-### 6.2 INT4 Quantization (Phase 2)
+### 6.2 INT4 Quantization (v0.2.0-dev)
 
 **Per-Group Quantization**:
 
 ```
-Group size: 128 elements
+Group size: 32 elements
 Scales: FP16[num_groups]
 Zero-points: INT4[num_groups]
 ```
@@ -640,6 +640,7 @@ Zero-points: INT4[num_groups]
 **Challenges**:
 - Higher perplexity delta (5-10%)
 - More complex dequantization kernel
+- GPTQ/AWQ work for a <=1% perplexity target remains deferred to v0.2.1.
 
 ---
 
@@ -823,7 +824,7 @@ class ChatViewModel: ObservableObject {
 
 ### 12.1 Phase 2 Features
 
-- **INT4 Quantization**: 8× memory savings
+- **INT4 Quality Hardening**: GPTQ/AWQ calibration and output-projection precision improvements
 - **FlashAttention**: Fused attention kernel
 - **ANE Integration**: Core ML hybrid mode
 - **Speculative Decoding**: Parallel token generation

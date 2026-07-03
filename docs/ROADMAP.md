@@ -11,7 +11,7 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ### Quantization
 
-- **INT4 quantization (group=32)** — per-group INT4 with FP16 scales. Target: ≤6% perplexity delta vs FP16 baseline. Metal fused INT4 dequant+matmul kernel. DoD accepted at 6% (CHA-155); 1% target deferred to v0.2.1.
+- **INT4 quantization (group=32)** — per-group RTN INT4 with FP16 scales and the output head kept INT8. Fresh 2026-07-03 local real-model evals measured Gemma 2B INT8 ppl 7.89913 vs INT4 ppl 8.543102 (Δ +8.152%) and TinyLlama 1.1B INT8 ppl 9.988422 vs INT4 ppl 11.910269 (Δ +19.241%). These are v0.2.0 regression tripwires, not proof of the earlier ≤6% DoD; calibrated GPTQ/AWQ targets move to v0.2.1.
 - **INT4 Metal kernel** — fused dequantize+matmul for INT4 weights directly on GPU, eliminating the CPU round-trip that existed in v0.1.0.
 
 ### Attention & Decoding
@@ -39,7 +39,7 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ### INT4 Precision (CHA-156)
 
-The v0.2.0 INT4 implementation reaches ≤6% perplexity delta at group=32. v0.2.1 targets ≤1% via calibrated quantization:
+The v0.2.0 INT4 implementation is a naive group=32 RTN path with measured +8.152% Gemma 2B and +19.241% TinyLlama 1.1B perplexity deltas vs INT8 on 2026-07-03 local eval slices. v0.2.1 owns the calibrated INT4 targets: first meet the ≤6% product goal, then push toward ≤1% via calibrated quantization:
 
 - **GPTQ** — post-training weight correction using Hessian-based update. Layer-wise quantization with activation statistics from a calibration corpus.
 - **AWQ** — activation-aware weight quantization. Identifies and protects salient weight channels before quantization. Reduces outlier impact without full calibration.
@@ -81,6 +81,15 @@ The current `HuggingFaceAdapter` handles `tokenizer.json` (BPE text format). Bin
 ### Tokenizer
 
 - **TikToken adapter** — for OpenAI-style tokenizers (GPT-2, GPT-4 vocabulary). Enables running distilled GPT-family models.
+
+### Retrieval & Agents
+
+- **On-device RAG shipped early in 0.2.0-dev** — `TinyBrainRAG` and `tinybrain-rag` moved out of the v0.3.0 plan. See [`docs/rag.md`](rag.md).
+- **TB-011 private agent runtime** — design draft exists; next step is a local tool loop that can call the shipped `retrieve` tool.
+- **Context extension** — RoPE scaling or sliding-window support to move beyond the current 2048-token budget.
+- **Config-driven RoPE theta** — load model-specific rotary base values from config instead of relying on defaults.
+- **INT4 `lm_head` precision enhancement** — improve output projection quality without giving up the main INT4 memory win.
+- **Metal GELU kernel hardening** — close numerical edge cases surfaced by Gemma-style activations.
 
 ### Performance Milestones
 

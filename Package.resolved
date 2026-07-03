@@ -1,0 +1,41 @@
+{
+  "originHash" : "b59b2934d40a22ff94c05a3e3cca9e9418c49f16e239c45fcc53fed4ef94949c",
+  "pins" : [
+    {
+      "identity" : "cartographer",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/vivekptnk/cartographer.git",
+      "state" : {
+        "branch" : "81a3047",
+        "revision" : "81a30472530c824bba640df9718144dee824c3b5"
+      }
+    },
+    {
+      "identity" : "proximakit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/vivekptnk/ProximaKit.git",
+      "state" : {
+        "revision" : "dcc55ca6b44d50707421b1da404c2e49117596e9"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "cdd0ef3755280949551dc26dee5de9ddeda89f54",
+        "version" : "1.6.2"
+      }
+    },
+    {
+      "identity" : "yams",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpsim/Yams.git",
+      "state" : {
+        "revision" : "3d6871d5b4a5cd519adf233fbb576e0a2af71c17",
+        "version" : "5.4.0"
+      }
+    }
+  ],
+  "version" : 3
+}

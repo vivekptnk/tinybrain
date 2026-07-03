@@ -20,10 +20,10 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 
 #### Generation Runtime
 - Speculative decoding with draft and verify passes.
-- Tool calling and constrained JSON generation module.
+- Tool-calling primitives (constrained JSON generation: ConstrainedSampler, tool schemas; generation-loop wiring tracked for the agent milestone).
 - Gemma RMSNorm variant using `(1 + w) * x`.
 - Gemma 2B and Phi-2 architecture support.
-- On-device RAG module and `tinybrain-rag` demo (TB-010).
+- On-device RAG module and `tinybrain-rag` demo (TB-012) (commit messages predate the renumbering).
 
 #### Bridges and Demo App
 - TinyBrainProximaKit bridge with `TextEmbedder`.
@@ -38,6 +38,10 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 - HuggingFace tokenizer parity for `byte_fallback` and special-token pre-splitting.
 - Gemma coherence via exact-GELU gate behavior and INT8 output matching the HuggingFace reference.
 - INT4 converter transpose handling, RoPE rotate-half convention, and speculative-decoding exact-distribution correction.
+
+### Known limitations
+
+- Naive group=32 RTN INT4 with the output head kept INT8 measured +8.152% perplexity vs INT8 on Gemma 2B (INT8 ppl 7.89913, INT4 ppl 8.543102) and +19.241% on TinyLlama 1.1B (INT8 ppl 9.988422, INT4 ppl 11.910269) on 2026-07-03 local eval slices; the ≤6% and ≤1% calibrated quantization targets are tracked for v0.2.1 GPTQ/AWQ work.
 
 ## [0.1.0] — 2025-10-25
 
