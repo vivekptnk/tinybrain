@@ -177,7 +177,11 @@ swift test --filter testGemmaINT4VsINT8Perplexity
 ```
 
 **Expected output sizes:** INT8 ≈ 4.3 GB, INT4 ≈ 3.5 GB.  
-**Perplexity DoD:** `|Δppl|/ppl_INT8 ≤ 0.06` at group=32 (v0.2.0).
+**Perplexity quality:** v0.2.0 RTN shipped artifacts measured +8.7% for Gemma
+2B (INT8 ppl 7.89913, INT4 ppl 8.58678) and +13.3% for TinyLlama 1.1B
+(INT8 ppl 9.988422, INT4 ppl 11.313237) under the head-at-INT8 policy. Current
+tripwires are 11%/17%; `≤ 6%` is the v0.2.1 calibrated-quantization target
+(GPTQ/AWQ).
 
 ---
 
@@ -306,4 +310,3 @@ See `docs/overview.md` Section 6 for details.
 ---
 
 **Can't find your question?** Open an issue or discussion on GitHub!
-

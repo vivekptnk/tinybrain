@@ -371,7 +371,7 @@ final class QualityRegressionTests: XCTestCase {
         XCTAssertGreaterThan(pplINT8, 0, "INT8 perplexity must be positive")
         XCTAssertGreaterThan(pplINT4, 0, "INT4 perplexity must be positive")
         XCTAssertLessThanOrEqual(delta, 0.11,
-            "Gemma 2B INT4 perplexity regression tripwire exceeded: measured baseline on 2026-07-03 under the head-at-INT8 policy was INT8 ppl 7.89913, INT4 ppl 8.543102, Δ +8.152%; tripwire bound is 11% vs that baseline, while the ≤6% product target is deferred to v0.2.1 GPTQ/AWQ in docs/ROADMAP.md (got \(String(format: "%.3f%%", delta * 100)))")
+            "Gemma 2B INT4 perplexity regression tripwire exceeded: shipped-artifact measurement on 2026-07-03 under the head-at-INT8 policy was INT8 ppl 7.89913, INT4 ppl 8.58678, Δ +8.705%; tripwire bound is 11% vs that baseline, while the ≤6% product target is deferred to v0.2.1 GPTQ/AWQ in docs/ROADMAP.md (got \(String(format: "%.3f%%", delta * 100)))")
     }
 
 
@@ -450,8 +450,8 @@ final class QualityRegressionTests: XCTestCase {
 
         XCTAssertGreaterThan(pplINT8, 0, "INT8 perplexity must be positive")
         XCTAssertGreaterThan(pplINT4, 0, "INT4 perplexity must be positive")
-        XCTAssertLessThanOrEqual(delta, 0.24,
-            "TinyLlama 1.1B INT4 perplexity regression tripwire exceeded: measured baseline on 2026-07-03 under the head-at-INT8 policy was INT8 ppl 9.988422, INT4 ppl 11.910269, Δ +19.241%; tripwire bound is 24% vs that baseline, while the ≤6% product target is deferred to v0.2.1 GPTQ/AWQ in docs/ROADMAP.md (got \(String(format: "%.3f%%", delta * 100)))")
+        XCTAssertLessThanOrEqual(delta, 0.17,
+            "TinyLlama 1.1B INT4 perplexity regression tripwire exceeded: shipped-artifact measurement on 2026-07-03 under the head-at-INT8 policy was INT8 ppl 9.988422, INT4 ppl 11.313237, Δ +13.264%; tripwire bound is 17% vs that baseline, while the ≤6% product target is deferred to v0.2.1 GPTQ/AWQ in docs/ROADMAP.md (got \(String(format: "%.3f%%", delta * 100)))")
     }
 }
 

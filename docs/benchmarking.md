@@ -60,7 +60,7 @@ swift build -c release
 | `--perplexity <model.tbf>` | INT4 vs INT8 perplexity regression (CHA-108) | `--perplexity Models/tinyllama-1.1b-int8.tbf` |
 | `--perplexity-slice <path>` | Override pinned token slice | `--perplexity-slice custom.json` |
 | `--perplexity-group-size <n>` | INT4 group size when re-quantizing (default: 128) | `--perplexity-group-size 64` |
-| `--perplexity-threshold <r>` | Max acceptable \|Δppl\|/ppl_INT8 before non-zero exit (default: 0.01 per CHA-104 DoD) | `--perplexity-threshold 0.06` |
+| `--perplexity-threshold <r>` | Max acceptable \|Δppl\|/ppl_INT8 before non-zero exit; use `0.17` for the current TinyLlama v0.2.0 tripwire | `--perplexity-threshold 0.17` |
 
 ### Output Formats
 
@@ -108,13 +108,16 @@ Peak Memory: 1100.00 MB
 
 ## Perplexity Regression (CHA-108)
 
-The `--perplexity` mode proves [CHA-104](/CHA/issues/CHA-104)'s v0.2.0 DoD
-on a real model: RTN INT4 quantization (group=32) keeps perplexity within
-**6 %** of the INT8 baseline on the pinned slice. v0.2.1 restores the 1 %
-target via GPTQ/AWQ calibration in
+The `--perplexity` mode measures RTN INT4 quantization (group=32) against the
+INT8 baseline on real model artifacts. For v0.2.0, the enforced XCTest guards
+are shipped-artifact regression tripwires from the 2026-07-03 dod-rerun2
+artifact-loading run: Gemma 2B measured INT8 ppl 7.89913, INT4 ppl 8.58678,
+Δ +8.705% with an 11% bound; TinyLlama 1.1B measured INT8 ppl 9.988422,
+INT4 ppl 11.313237, Δ +13.264% with a 17% bound. The `≤ 6%` quality bar is the
+v0.2.1 calibrated-quantization target for GPTQ/AWQ in
 [CHA-156](/CHA/issues/CHA-156). The same harness powers both the CLI and
-`QualityRegressionTests.testTinyLlamaINT4VsINT8Perplexity`, so a passing
-test and a passing CLI run yield the same numbers (float noise aside).
+`QualityRegressionTests.testTinyLlamaINT4VsINT8Perplexity`, so a passing test
+and a passing CLI run yield the same numbers (float noise aside).
 
 ### Pinned slice
 
@@ -144,9 +147,10 @@ test and a passing CLI run yield the same numbers (float noise aside).
    time (teacher-forced), and compute `log P(tokens[i+1])` via a stable
    log-softmax with Float64 accumulation (max-subtracted `logsumexp` over
    the 32 000-vocab logits).
-4. Fail if `|ppl_int4 - ppl_int8| / ppl_int8 > 0.06`. The CLI's
-   `--perplexity-threshold` flag lets you override this (default matches
-   the test).
+4. For the current v0.2.0 shipped artifacts, fail if
+   `|ppl_int4 - ppl_int8| / ppl_int8 > 0.17` for TinyLlama 1.1B or `> 0.11`
+   for Gemma 2B. The CLI's `--perplexity-threshold` flag lets you override this
+   when validating the v0.2.1 `≤ 0.06` GPTQ/AWQ target.
 
 The harness is **deterministic**: same weights + same slice always yield
 the same tokens-per-step math, so any drift in perplexity is a real
@@ -175,30 +179,32 @@ Example output (numbers match the Swift test within float noise):
 🧠 Perplexity: INT4 vs INT8
    Model: Models/tinyllama-1.1b-int8.tbf
    Slice: Tests/TinyBrainRuntimeTests/Fixtures/wikitext2_slice.json (65 tokens, seed=CHA-108-v1)
-   INT8 perplexity: 276.5697  (64 preds, ...s)
-   INT4 perplexity: 262.0519  (64 preds, ...s)
-   Δ (INT4 vs INT8): +5.249%
-   ✅ within 6.00% threshold
+   INT8 perplexity: 9.988422  (64 preds, ...s)
+   INT4 perplexity: 11.313237  (64 preds, ...s)
+   Δ (INT4 vs INT8): +13.264%
+   ✅ within 17.00% TinyLlama v0.2.0 tripwire
 ```
 
-The CLI exits non-zero when the budget is exceeded, so it can gate
+The CLI exits non-zero when the configured tripwire is exceeded, so it can gate
 releases in the same way as the regression test.
 
 ### Observed numbers (2026-04-19, TinyLlama-1.1B, M-series, CHA-108-v1 65-token slice, Float64 log-softmax)
 
-| INT4 group size | INT8 ppl | INT4 ppl | Δ (INT4 vs INT8) | DoD bound |
+| INT4 group size | INT8 ppl | INT4 ppl | Δ (INT4 vs INT8) | Current v0.2.0 tripwire |
 |---|---|---|---|---|
-| **32 (v0.2.0 default)** | 276.5698 | 262.0519 |  **+5.25 %** | ≤ 6 % ✅ |
-| 128 (legacy)            | 276.5697 | 346.2165 | +25.18 %      | ≤ 6 % ❌ |
+| **32 (v0.2.0 default)** | 276.5698 | 262.0519 |  **+5.25 %** | ≤ 17 % TinyLlama ✅ |
+| 128 (legacy)            | 276.5697 | 346.2165 | +25.18 %      | > 17 % TinyLlama ❌ |
 
 Two things to call out:
 
-1. **The v0.2.0 DoD is a 6 % bound, not 1 %.** RTN INT4 on a 1.1B model
-   degrades perplexity by ~5–25 % depending on group size; sub-1 %
-   requires calibration-aware quantization (GPTQ/AWQ), which is tracked
-   as the v0.2.1 work in [CHA-156](/CHA/issues/CHA-156). Group=32
-   (4.5 bpw) is the quality/memory knee — smaller groups (16) erode the
-   INT4 memory win vs INT8 without a meaningful quality gain here.
+1. **The current v0.2.0 guard is a shipped-artifact regression tripwire, not
+   the v0.2.1 `≤ 6%` target.** RTN INT4 on a 1.1B model degrades perplexity by
+   ~5–25 % depending on group size; the current TinyLlama tripwire is 17% and
+   the Gemma 2B tripwire is 11%. Reaching the `≤ 6%` target requires
+   calibration-aware quantization (GPTQ/AWQ), which is tracked as the v0.2.1
+   work in [CHA-156](/CHA/issues/CHA-156). Group=32 (4.5 bpw) is the
+   quality/memory knee — smaller groups (16) erode the INT4 memory win vs INT8
+   without a meaningful quality gain here.
 2. **Absolute perplexity is inflated** by WikiText-2-raw's literal
    `<unk>`, `@.@`, `@-@` markup — these tokenize into rare ids every
    model predicts with near-zero probability. The *relative* delta is
@@ -604,4 +610,3 @@ leaks --atExit -- .build/release/tinybrain-bench --demo --tokens 50
 ---
 
 **Questions?** See `docs/faq.md` or open an issue on GitHub.
-
