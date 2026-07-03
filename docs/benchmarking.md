@@ -188,12 +188,11 @@ Example output (numbers match the Swift test within float noise):
 The CLI exits non-zero when the configured tripwire is exceeded, so it can gate
 releases in the same way as the regression test.
 
-### Observed numbers (2026-04-19, TinyLlama-1.1B, M-series, CHA-108-v1 65-token slice, Float64 log-softmax)
+### Observed numbers (2026-07-03, TinyLlama-1.1B, artifact-loading methodology, output head at INT8, CHA-108-v1 65-token slice)
 
 | INT4 group size | INT8 ppl | INT4 ppl | Δ (INT4 vs INT8) | Current v0.2.0 tripwire |
 |---|---|---|---|---|
-| **32 (v0.2.0 default)** | 276.5698 | 262.0519 |  **+5.25 %** | ≤ 17 % TinyLlama ✅ |
-| 128 (legacy)            | 276.5697 | 346.2165 | +25.18 %      | > 17 % TinyLlama ❌ |
+| **32 (v0.2.0 default)** | 9.988422 | 11.313237 |  **+13.264 %** | ≤ 17 % TinyLlama ✅ |
 
 Two things to call out:
 
