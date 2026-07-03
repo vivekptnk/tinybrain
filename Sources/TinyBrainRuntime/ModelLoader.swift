@@ -28,19 +28,6 @@ public enum ModelLoader {
             }
         }
         
-        // Try common locations (for Xcode builds)
-        let possibleRoots = [
-            "/Users/vivekesque/Desktop/CreativeSpace/CodingProjects/tinybrain",  // Absolute path
-            NSString(string: #file).deletingLastPathComponent  // Relative to this source file
-        ]
-        
-        for root in possibleRoots {
-            let packagePath = (root as NSString).appendingPathComponent("Package.swift")
-            if FileManager.default.fileExists(atPath: packagePath) {
-                return root
-            }
-        }
-        
         return nil
     }
     
@@ -173,4 +160,3 @@ public enum ModelLoader {
         return ModelWeights.makeToyModel(config: config, seed: 42)
     }
 }
-

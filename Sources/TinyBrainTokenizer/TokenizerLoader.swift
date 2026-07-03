@@ -295,13 +295,6 @@ public enum TokenizerLoader {
             }
         }
         
-        // Hardcoded project root as last resort
-        let projectRoot = "/Users/vivekesque/Desktop/CreativeSpace/CodingProjects/tinybrain"
-        let fullPath = (projectRoot as NSString).appendingPathComponent(path)
-        if FileManager.default.fileExists(atPath: fullPath) {
-            return fullPath
-        }
-        
         return nil
     }
 }

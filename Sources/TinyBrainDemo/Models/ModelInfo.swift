@@ -159,7 +159,6 @@ public enum ModelScanner {
             if current == "/" { break }
         }
 
-        // Hardcoded project root
-        return "/Users/vivekesque/Desktop/CreativeSpace/CodingProjects/tinybrain/Models"
+        return (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(relative)
     }
 }
