@@ -37,6 +37,10 @@ let package = Package(
             name: "TinyBrainProximaKit",
             targets: ["TinyBrainProximaKit"]
         ),
+        .library(
+            name: "TinyBrainRAG",
+            targets: ["TinyBrainRAG"]
+        ),
         // Cartographer bridge (optional — conforms to Cartographer's
         // SmartAnnotationService protocol). Cartographer is pinned by SHA
         // on feat/cg-003-demo-app-wiring (see dependencies below). Re-pin
@@ -54,6 +58,11 @@ let package = Package(
         .executable(
             name: "tinybrain-bench",
             targets: ["TinyBrainBench"]
+        ),
+        // Retrieval-augmented generation CLI
+        .executable(
+            name: "tinybrain-rag",
+            targets: ["RAGDemo"]
         )
     ],
     dependencies: [
@@ -164,6 +173,25 @@ let package = Package(
             path: "Tests/TinyBrainProximaKitTests"
         ),
 
+        // MARK: - Retrieval-Augmented Generation
+        .target(
+            name: "TinyBrainRAG",
+            dependencies: [
+                "TinyBrainRuntime",
+                "TinyBrainTokenizer",
+                .product(name: "ProximaKit", package: "ProximaKit")
+            ],
+            path: "Sources/TinyBrainRAG"
+        ),
+        .testTarget(
+            name: "TinyBrainRAGTests",
+            dependencies: ["TinyBrainRAG"],
+            path: "Tests/TinyBrainRAGTests",
+            resources: [
+                .process("Fixtures")
+            ]
+        ),
+
         // MARK: - Cartographer Bridge
         .target(
             name: "TinyBrainCartographerBridge",
@@ -191,6 +219,19 @@ let package = Package(
             path: "Examples/ChatDemo",
             exclude: ["Info.plist"]
         ),
+
+        // MARK: - RAG Demo Executable
+        .executableTarget(
+            name: "RAGDemo",
+            dependencies: [
+                "TinyBrainRAG",
+                "TinyBrainRuntime",
+                "TinyBrainTokenizer",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "ProximaEmbeddings", package: "ProximaKit")
+            ],
+            path: "Examples/RAGDemo"
+        ),
         
         // MARK: - Benchmark Tool
         .executableTarget(
@@ -214,4 +255,3 @@ let package = Package(
         )
     ]
 )
-
