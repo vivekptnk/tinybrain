@@ -4,7 +4,7 @@
 /// For each query row, iterate over key/value tiles (blocks of Bc columns).
 /// Within each tile:
 ///   1. Compute S_tile = Q_tile @ K_tile^T / sqrt(headDim)
-///   2. Apply causal mask (if enabled)
+///   2. Apply optional causal masking and 1-D additive key mask
 ///   3. Online softmax: track running max & sum across tiles
 ///   4. Accumulate output: O += diag(correction) @ O_prev + P_tile @ V_tile
 ///
@@ -23,7 +23,7 @@
 ///   [1] keys     — float [batch, kvSeqLen, numKVHeads * headDim]
 ///   [2] values   — float [batch, kvSeqLen, numKVHeads * headDim]
 ///   [3] output   — float [batch, seqLen, numHeads * headDim]
-///   [4] mask     — float [kvSeqLen] or nullptr (causal mask: 0.0 = attend, -inf = ignore)
+///   [4] mask     — optional float [kvSeqLen] additive key/padding mask (0.0 = attend, -inf = ignore)
 ///   [5] params   — AttentionParams struct
 
 #include <metal_stdlib>
@@ -39,6 +39,8 @@ struct AttentionParams {
     uint batch;        // Batch size
     float scale;       // 1.0 / sqrt(headDim)
     uint useMask;      // 1 if mask buffer is valid, 0 otherwise
+    uint causal;       // 1 to apply row-dependent causal masking
+    uint kvOffset;     // Absolute query-position offset for cached KV prefixes
 };
 
 // Tile sizes — tuned for Apple Silicon threadgroup memory limits (32 KB max)
@@ -141,7 +143,8 @@ kernel void flash_attention(
         // ── Step 1: Compute S = Q @ K^T / sqrt(d) for this tile ─────────
         // Each thread computes one element: S[tr, tc] = dot(q[qRow], k[kvCol]) * scale
         float score = -INFINITY;
-        if (validRow && kvCol < kvSeqLen) {
+        if (validRow && kvCol < kvSeqLen &&
+            !(params.causal != 0 && kvCol > qRow + params.kvOffset)) {
             score = 0.0;
             device const float* k_col = K_base + kvCol * kvStride + kvHead * headDim;
             for (uint d = 0; d < headDim; d++) {
@@ -170,25 +173,31 @@ kernel void flash_attention(
             float prev_max = row_max[tr];
             float new_max = max(prev_max, tile_max);
 
-            // Correction factor for previous accumulations
-            float prev_correction = exp(prev_max - new_max);
-            float new_sum = row_sum[tr] * prev_correction;
+            if (isfinite(new_max)) {
+                // Correction factor for previous accumulations.
+                float prev_correction = isfinite(prev_max) ? exp(prev_max - new_max) : 0.0;
+                float new_sum = row_sum[tr] * prev_correction;
 
-            // Exponentiate scores with new max and accumulate sum
-            for (uint c = 0; c < TILE_Bc; c++) {
-                float s = S_tile[tr * TILE_Bc + c];
-                float p = exp(s - new_max);
-                S_tile[tr * TILE_Bc + c] = p;  // Overwrite with softmax numerator
-                new_sum += p;
+                // Exponentiate scores with new max and accumulate sum.
+                for (uint c = 0; c < TILE_Bc; c++) {
+                    float s = S_tile[tr * TILE_Bc + c];
+                    float p = isfinite(s) ? exp(s - new_max) : 0.0;
+                    S_tile[tr * TILE_Bc + c] = p;  // Overwrite with softmax numerator
+                    new_sum += p;
+                }
+
+                // Correct previous output accumulator.
+                for (uint d = 0; d < headDim; d++) {
+                    O_acc[tr * headDim + d] *= prev_correction;
+                }
+
+                row_max[tr] = new_max;
+                row_sum[tr] = new_sum;
+            } else {
+                for (uint c = 0; c < TILE_Bc; c++) {
+                    S_tile[tr * TILE_Bc + c] = 0.0;
+                }
             }
-
-            // Correct previous output accumulator
-            for (uint d = 0; d < headDim; d++) {
-                O_acc[tr * headDim + d] *= prev_correction;
-            }
-
-            row_max[tr] = new_max;
-            row_sum[tr] = new_sum;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -212,9 +221,12 @@ kernel void flash_attention(
 
     // ── Normalize by sum and write output ───────────────────────────────
     if (validRow) {
-        float inv_sum = 1.0 / (row_sum[tr] + 1e-7);
         for (uint d = tc; d < headDim; d += TILE_Bc) {
-            o_row[d] = O_acc[tr * headDim + d] * inv_sum;
+            if (row_sum[tr] > 0.0) {
+                o_row[d] = O_acc[tr * headDim + d] / row_sum[tr];
+            } else {
+                o_row[d] = 0.0;
+            }
         }
     }
 }

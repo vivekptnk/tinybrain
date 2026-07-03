@@ -31,7 +31,21 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     
     /// Cache for GPU-resident quantized weight buffers (keyed by QuantizedTensor.identifier)
     private var quantizedBufferCache: [UUID: QuantizedBufferEntry] = [:]
+    private var int4BufferCache: [UUID: INT4BufferEntry] = [:]
+    private var int4QuantizedBufferUploadCounter: Int = 0
     private let quantizedCacheLock = NSLock()
+
+    var int4QuantizedBufferCacheCount: Int {
+        quantizedCacheLock.lock()
+        defer { quantizedCacheLock.unlock() }
+        return int4BufferCache.count
+    }
+
+    var int4QuantizedBufferUploadCount: Int {
+        quantizedCacheLock.lock()
+        defer { quantizedCacheLock.unlock() }
+        return int4QuantizedBufferUploadCounter
+    }
     
     /// Initialize the Metal backend
     /// - Throws: `MetalError` if Metal is unavailable
@@ -381,6 +395,8 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             uint batch;
             float scale;
             uint useMask;
+            uint causal;
+            uint kvOffset;
         };
 
         constant uint TILE_Br = 32;
@@ -446,7 +462,8 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
                 const uint kvCol = kvStart + tc;
 
                 float score = -INFINITY;
-                if (validRow && kvCol < kvSeqLen) {
+                if (validRow && kvCol < kvSeqLen &&
+                    !(params.causal != 0 && kvCol > qRow + params.kvOffset)) {
                     score = 0.0;
                     device const float* k_col = K_base + kvCol * kvStride + kvHead * headDim;
                     for (uint d = 0; d < headDim; d++) {
@@ -468,19 +485,25 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
                     }
                     float prev_max = row_max[tr];
                     float new_max = max(prev_max, tile_max);
-                    float prev_correction = exp(prev_max - new_max);
-                    float new_sum = row_sum[tr] * prev_correction;
-                    for (uint c = 0; c < TILE_Bc; c++) {
-                        float s = S_tile[tr * TILE_Bc + c];
-                        float p = exp(s - new_max);
-                        S_tile[tr * TILE_Bc + c] = p;
-                        new_sum += p;
+                    if (isfinite(new_max)) {
+                        float prev_correction = isfinite(prev_max) ? exp(prev_max - new_max) : 0.0;
+                        float new_sum = row_sum[tr] * prev_correction;
+                        for (uint c = 0; c < TILE_Bc; c++) {
+                            float s = S_tile[tr * TILE_Bc + c];
+                            float p = isfinite(s) ? exp(s - new_max) : 0.0;
+                            S_tile[tr * TILE_Bc + c] = p;
+                            new_sum += p;
+                        }
+                        for (uint d = 0; d < headDim; d++) {
+                            O_acc[tr * headDim + d] *= prev_correction;
+                        }
+                        row_max[tr] = new_max;
+                        row_sum[tr] = new_sum;
+                    } else {
+                        for (uint c = 0; c < TILE_Bc; c++) {
+                            S_tile[tr * TILE_Bc + c] = 0.0;
+                        }
                     }
-                    for (uint d = 0; d < headDim; d++) {
-                        O_acc[tr * headDim + d] *= prev_correction;
-                    }
-                    row_max[tr] = new_max;
-                    row_sum[tr] = new_sum;
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -500,9 +523,12 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
             }
 
             if (validRow) {
-                float inv_sum = 1.0 / (row_sum[tr] + 1e-7);
                 for (uint d = tc; d < headDim; d += TILE_Bc) {
-                    o_row[d] = O_acc[tr * headDim + d] * inv_sum;
+                    if (row_sum[tr] > 0.0) {
+                        o_row[d] = O_acc[tr * headDim + d] / row_sum[tr];
+                    } else {
+                        o_row[d] = 0.0;
+                    }
                 }
             }
         }
@@ -883,9 +909,10 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
     /// Matrix multiplication with quantized weights (INT8 or INT4)
     ///
     /// Auto-detects precision from the QuantizedTensor and dispatches
-    /// to the appropriate Metal kernel:
+    /// to the appropriate backend path:
     ///   - INT8 per-channel → `matmul_int8_dequant`
     ///   - INT4 per-group   → `matmul_int4_dequant`
+    ///   - INT4 per-channel → CPU fallback after per-column dequantization
     ///
     /// - Parameters:
     ///   - input: Float32 input [M, K]
@@ -896,8 +923,15 @@ public final class MetalBackend: MatMulBackend, TensorUploader, TensorDownloader
         precondition(quantized.shape.dimensions.count == 2, "Weights must be 2D")
         precondition(input.shape.dimensions[1] == quantized.shape.dimensions[0], "Dimensions must match")
 
-        // Route to INT4 kernel for 4-bit precision
+        // The INT4 Metal kernel is per-group: flattened index -> group scale.
+        // Per-channel INT4 stores scales by output column, so materialize with
+        // the correct column scale first. This favors correctness over speed
+        // until a dedicated per-channel INT4 kernel exists.
         if quantized.precision == .int4 {
+            if quantized.mode == .int4PerChannel {
+                let dequantized = dequantizeINT4PerChannel(quantized)
+                return input.matmulCPU(dequantized)
+            }
             return try matmulINT4(input, quantized)
         }
 
@@ -1318,15 +1352,41 @@ private extension MetalBackend {
         let zeroPoints: MTLBuffer  // Per-group INT4 zero points (stored as Int8)
     }
 
+    /// Dequantize INT4 per-channel weights using the column-scale contract.
+    func dequantizeINT4PerChannel(_ tensor: QuantizedTensor) -> Tensor<Float> {
+        precondition(tensor.precision == .int4 && tensor.mode == .int4PerChannel,
+                     "Expected INT4 per-channel tensor")
+        precondition(tensor.shape.dimensions.count == 2,
+                     "INT4 per-channel matmul weights must be 2D")
+
+        let rows = tensor.shape.dimensions[0]
+        let cols = tensor.shape.dimensions[1]
+        var values = [Float](repeating: 0, count: tensor.shape.count)
+
+        for row in 0..<rows {
+            for col in 0..<cols {
+                let linearIndex = row * cols + col
+                let packed = UInt8(bitPattern: tensor.data[linearIndex / 2])
+                let rawNibble = linearIndex.isMultiple(of: 2)
+                    ? Int((packed >> 4) & 0x0F)
+                    : Int(packed & 0x0F)
+                let int4Value = rawNibble > 7 ? rawNibble - 16 : rawNibble
+                let zeroPoint = Int(tensor.zeroPoints?[col] ?? 0)
+                values[linearIndex] = Float(int4Value - zeroPoint) * tensor.scales[col]
+            }
+        }
+
+        return Tensor<Float>(shape: tensor.shape, data: values)
+    }
+
     /// Upload or reuse GPU-resident INT4 buffers
     func cachedINT4Buffers(for tensor: QuantizedTensor) throws -> INT4BufferEntry {
         quantizedCacheLock.lock()
         defer { quantizedCacheLock.unlock() }
 
-        // Check if we already have cached INT4 buffers for this tensor
-        // We reuse the same cache dict but store an INT4BufferEntry wrapper
-        // For simplicity, we create fresh buffers keyed by identifier
-        // (The QuantizedBufferEntry cache is separate for INT8)
+        if let cached = int4BufferCache[tensor.identifier] {
+            return cached
+        }
 
         // Upload packed INT4 weights
         guard let weightsBuffer = device.makeBuffer(length: tensor.data.count, options: .storageModeShared) else {
@@ -1355,7 +1415,10 @@ private extension MetalBackend {
             memcpy(zpBuffer.contents(), src.baseAddress!, zpLength)
         }
 
-        return INT4BufferEntry(weights: weightsBuffer, scales: scalesBuffer, zeroPoints: zpBuffer)
+        let entry = INT4BufferEntry(weights: weightsBuffer, scales: scalesBuffer, zeroPoints: zpBuffer)
+        int4BufferCache[tensor.identifier] = entry
+        int4QuantizedBufferUploadCounter += 1
+        return entry
     }
 }
 
@@ -1367,13 +1430,14 @@ extension MetalBackend {
     ///
     /// Dispatches `flash_attention` which tiles Q×K^T + softmax + V into a
     /// single pass with O(Br×Bc) threadgroup memory instead of O(seqLen²).
-    /// Supports grouped-query attention (numKVHeads < numHeads).
+    /// Supports grouped-query attention (numKVHeads < numHeads). This entry
+    /// point is non-causal; pass an additive 1-D mask only for padding.
     ///
     /// - Parameters:
     ///   - query:  [batch?, seqLen, numHeads * headDim]
     ///   - keys:   [batch?, kvSeqLen, numKVHeads * headDim]
     ///   - values: [batch?, kvSeqLen, numKVHeads * headDim]
-    ///   - mask:   Optional [kvSeqLen] additive mask (0.0 = attend, -inf = ignore)
+    ///   - mask:   Optional [kvSeqLen] additive padding mask (0.0 = attend, -inf = ignore)
     ///   - headDim:    Dimension per attention head
     ///   - numHeads:   Number of query heads
     ///   - numKVHeads: Number of key/value heads
@@ -1381,6 +1445,26 @@ extension MetalBackend {
     public func attention(
         query: Tensor<Float>, keys: Tensor<Float>, values: Tensor<Float>,
         mask: Tensor<Float>?, headDim: Int, numHeads: Int, numKVHeads: Int
+    ) throws -> Tensor<Float> {
+        try attention(
+            query: query, keys: keys, values: values,
+            mask: mask, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads,
+            causal: false, kvOffset: 0)
+    }
+
+    /// Fused multi-head attention with optional causal masking.
+    ///
+    /// The 1-D `mask` remains an additive key/padding mask. Causal masking is
+    /// controlled separately because it depends on both query row and KV column.
+    ///
+    /// - Parameters:
+    ///   - causal: If true, skip KV columns greater than `qRow + kvOffset`.
+    ///   - kvOffset: Absolute-position offset for query rows when keys include
+    ///     cached prefixes. Defaults to `kvSeqLen - seqLen` for causal calls.
+    public func attention(
+        query: Tensor<Float>, keys: Tensor<Float>, values: Tensor<Float>,
+        mask: Tensor<Float>?, headDim: Int, numHeads: Int, numKVHeads: Int,
+        causal: Bool, kvOffset: Int? = nil
     ) throws -> Tensor<Float> {
         precondition(numHeads >= numKVHeads && numHeads % numKVHeads == 0,
                      "numHeads must be a multiple of numKVHeads")
@@ -1402,6 +1486,8 @@ extension MetalBackend {
             kvSeqLen  = kDims[0]
         }
 
+        let effectiveKVOffset = kvOffset ?? (causal ? max(kvSeqLen - seqLen, 0) : 0)
+        precondition(effectiveKVOffset >= 0, "kvOffset must be non-negative")
         let outputElementCount = batch * seqLen * numHeads * headDim
 
         // ── Upload tensors to GPU ─────────────────────────────────────────
@@ -1440,7 +1526,9 @@ extension MetalBackend {
             /* numKVHeads */ UInt32(numKVHeads),
             /* batch */     UInt32(batch),
             /* scale */     Float(1.0 / sqrt(Float(headDim))),
-            /* useMask */   useMask
+            /* useMask */   useMask,
+            /* causal */    UInt32(causal ? 1 : 0),
+            /* kvOffset */  UInt32(effectiveKVOffset)
         )
         let paramsBuffer = device.makeBuffer(bytes: &params,
                                              length: MemoryLayout.size(ofValue: params),
@@ -1462,6 +1550,16 @@ extension MetalBackend {
                 "FlashAttention requires \(requestedThreads) threads/threadgroup but device supports \(maxThreads)")
         }
 
+        // Threadgroup shared memory: S_tile(Br*Bc) + row_max(Br) + row_sum(Br) + O_acc(Br*headDim)
+        let smemFloats = tileBr * tileBc + tileBr + tileBr + tileBr * headDim
+        let smemBytes = smemFloats * MemoryLayout<Float>.stride
+        let maxThreadgroupMemory = device.maxThreadgroupMemoryLength
+        guard smemBytes <= maxThreadgroupMemory else {
+            throw MetalError.invalidKernelConfiguration(
+                "FlashAttention requires \(smemBytes) bytes of threadgroup memory for headDim=\(headDim), " +
+                "but device supports \(maxThreadgroupMemory) bytes")
+        }
+
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.invalidKernelConfiguration("Failed to create command buffer/encoder for FlashAttention")
@@ -1475,9 +1573,6 @@ extension MetalBackend {
         encoder.setBuffer(bufMask,       offset: 0, index: 4)
         encoder.setBuffer(paramsBuffer,  offset: 0, index: 5)
 
-        // Threadgroup shared memory: S_tile(Br*Bc) + row_max(Br) + row_sum(Br) + O_acc(Br*headDim)
-        let smemFloats = tileBr * tileBc + tileBr + tileBr + tileBr * headDim
-        let smemBytes = smemFloats * MemoryLayout<Float>.stride
         encoder.setThreadgroupMemoryLength(smemBytes, index: 0)
 
         // Grid: (numHeads, ceil(seqLen/Br), batch)

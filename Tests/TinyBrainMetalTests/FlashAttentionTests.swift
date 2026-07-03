@@ -59,7 +59,9 @@ final class FlashAttentionTests: XCTestCase {
         mask: Tensor<Float>?,
         headDim: Int,
         numHeads: Int,
-        numKVHeads: Int
+        numKVHeads: Int,
+        causal: Bool = false,
+        kvOffset: Int = 0
     ) -> Tensor<Float> {
         let qDims = query.shape.dimensions
         let batch: Int
@@ -95,8 +97,12 @@ final class FlashAttentionTests: XCTestCase {
                     let qOffset = b * seqLen * qStride + q * qStride + head * headDim
 
                     // Compute attention scores
-                    var scores = [Float](repeating: 0, count: kvSeqLen)
+                    var scores = [Float](repeating: -Float.infinity, count: kvSeqLen)
                     for kv in 0..<kvSeqLen {
+                        if causal && kv > q + kvOffset {
+                            continue
+                        }
+
                         var dot: Float = 0
                         let kOffset = b * kvSeqLen * kvStride + kv * kvStride + kvHead * headDim
                         for d in 0..<headDim {
@@ -109,13 +115,19 @@ final class FlashAttentionTests: XCTestCase {
                     }
 
                     // Softmax
-                    let maxScore = scores.max() ?? 0
+                    let oOffset = b * seqLen * qStride + q * qStride + head * headDim
+                    let maxScore = scores.max() ?? -Float.infinity
+                    if !maxScore.isFinite {
+                        continue
+                    }
                     var expScores = scores.map { exp($0 - maxScore) }
                     let sumExp = expScores.reduce(0, +)
+                    if sumExp == 0 || !sumExp.isFinite {
+                        continue
+                    }
                     expScores = expScores.map { $0 / sumExp }
 
                     // Weighted sum of values
-                    let oOffset = b * seqLen * qStride + q * qStride + head * headDim
                     for kv in 0..<kvSeqLen {
                         let w = expScores[kv]
                         let vOffset = b * kvSeqLen * kvStride + kv * kvStride + kvHead * headDim
@@ -331,7 +343,7 @@ final class FlashAttentionTests: XCTestCase {
         print("✓ Batched attention test passed")
     }
 
-    /// With mask (causal-style)
+    /// With additive key/padding mask
     func testMaskedAttention() throws {
         guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
         let backend = try MetalBackend()
@@ -364,6 +376,96 @@ final class FlashAttentionTests: XCTestCase {
         assertClose(gpuOut, cpuOut, tolerance: tolerance,
                     context: "masked attention")
         print("✓ Masked attention test passed")
+    }
+
+    func testCausalAttentionMatchesCPUReference() throws {
+        guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
+        let backend = try MetalBackend()
+
+        let seqLen = 4
+        let numHeads = 1
+        let numKVHeads = 1
+        let headDim = 2
+
+        let query = Tensor<Float>(shape: TensorShape(seqLen, headDim), data: [
+            1.0, 0.0,
+            0.0, 1.0,
+            1.0, 1.0,
+            -1.0, 0.5
+        ])
+        let keys = Tensor<Float>(shape: TensorShape(seqLen, headDim), data: [
+            1.0, 0.0,
+            0.0, 1.0,
+            1.0, 1.0,
+            -1.0, 0.5
+        ])
+        let values = Tensor<Float>(shape: TensorShape(seqLen, headDim), data: [
+            10.0, 0.0,
+            0.0, 20.0,
+            30.0, 30.0,
+            -40.0, 10.0
+        ])
+
+        let gpuOut = try backend.attention(
+            query: query, keys: keys, values: values,
+            mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads,
+            causal: true)
+
+        let cpuOut = cpuAttention(
+            query: query, keys: keys, values: values,
+            mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads,
+            causal: true)
+
+        assertClose(gpuOut, cpuOut, tolerance: tolerance,
+                    context: "causal attention")
+    }
+
+    func testFullyMaskedAttentionRowsReturnZeros() throws {
+        guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
+        let backend = try MetalBackend()
+
+        let seqLen = 4
+        let numHeads = 1
+        let numKVHeads = 1
+        let headDim = 4
+        let mask = Tensor<Float>(shape: TensorShape(seqLen), data: [Float](repeating: -Float.infinity, count: seqLen))
+        let query = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+        let keys = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+        let values = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+
+        let gpuOut = try backend.attention(
+            query: query, keys: keys, values: values,
+            mask: mask, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads)
+
+        let cpuOut = cpuAttention(
+            query: query, keys: keys, values: values,
+            mask: mask, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads)
+
+        assertClose(gpuOut, cpuOut, tolerance: tolerance,
+                    context: "fully masked attention rows")
+    }
+
+    func testHeadDim256ValidatesThreadgroupMemory() throws {
+        guard MetalBackend.isAvailable else { throw XCTSkip("Metal not available") }
+        let backend = try MetalBackend()
+
+        let seqLen = 2
+        let numHeads = 1
+        let numKVHeads = 1
+        let headDim = 256
+        let query = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+        let keys = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+        let values = Tensor<Float>.random(shape: TensorShape(seqLen, headDim))
+
+        do {
+            _ = try backend.attention(
+                query: query, keys: keys, values: values,
+                mask: nil, headDim: headDim, numHeads: numHeads, numKVHeads: numKVHeads)
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("FlashAttention") && message.contains("threadgroup memory"),
+                          "Expected descriptive threadgroup memory error, got: \(message)")
+        }
     }
 
     // ── Performance Benchmark ─────────────────────────────────────────────
