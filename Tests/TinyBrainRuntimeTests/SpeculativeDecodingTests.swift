@@ -254,6 +254,81 @@ final class VerificationSamplerTests: XCTestCase {
             XCTFail("Should reject when ratio is below acceptance threshold")
         }
     }
+
+    /// **Test:** Speculative sampling preserves the target distribution when it subtracts the full draft distribution.
+    ///
+    /// Math under test for one speculative position:
+    /// - Target distribution p = [0.02, 0.08, 0.10, 0.12, 0.18, 0.20, 0.14, 0.16]
+    /// - Draft distribution q = [0.42, 0.18, 0.14, 0.10, 0.06, 0.04, 0.03, 0.03]
+    /// - Acceptance uses a(x) = min(1, p(x) / q(x)); expected acceptance mass is
+    ///   sum_x min(p(x), q(x)) = 0.46, so expected rejection rate is 0.54.
+    /// - On rejection, Leviathan et al. require sampling from normalize(max(0, p - q)).
+    ///   That correction mass is concentrated on tokens 3...7.
+    /// - The old point-mass approximation subtracted only q(x) at the sampled token x.
+    ///   Its analytical output distribution is approximately
+    ///   [0.0231, 0.1162, 0.1517, 0.1674, 0.1610, 0.1523, 0.1086, 0.1198],
+    ///   with max absolute deviation about 0.0517 from p, so N=50k should fail
+    ///   a 0.01 max-deviation bound by a wide margin.
+    func testSpeculativeSamplingFullDraftDistributionMatchesTarget() {
+        let targetProbs: [Float] = [0.02, 0.08, 0.10, 0.12, 0.18, 0.20, 0.14, 0.16]
+        let draftProbs: [Float] = [0.42, 0.18, 0.14, 0.10, 0.06, 0.04, 0.03, 0.03]
+        let vocabSize = targetProbs.count
+        let targetLogits = Tensor<Float>(
+            shape: TensorShape(vocabSize),
+            data: targetProbs.map { log($0) }
+        )
+
+        var draftRNG = SeededRandomGenerator(seed: 0xC1C)
+        var sampler = VerificationSampler(seed: 0xC1C_FEED)
+        var histogram = [Int](repeating: 0, count: vocabSize)
+        let rounds = 50_000
+
+        for _ in 0..<rounds {
+            let tokenId = sampleIndex(from: draftProbs, rng: &draftRNG)
+            let draft = DraftToken(
+                tokenId: tokenId,
+                logProb: log(draftProbs[tokenId]),
+                probabilityDistribution: draftProbs
+            )
+
+            let result = sampler.verify(
+                draft: draft,
+                targetLogits: targetLogits,
+                vocabSize: vocabSize
+            )
+
+            switch result {
+            case .accepted(let acceptedId):
+                histogram[acceptedId] += 1
+            case .rejected(let resampledId):
+                histogram[resampledId] += 1
+            }
+        }
+
+        let observed = histogram.map { Float($0) / Float(rounds) }
+        let deviations = zip(observed, targetProbs).map { abs($0 - $1) }
+        let maxDeviation = deviations.max() ?? 0
+
+        XCTAssertLessThan(
+            maxDeviation,
+            0.01,
+            "Observed \(observed) should stay within 0.01 of target \(targetProbs); deviations \(deviations)"
+        )
+    }
+
+    private func sampleIndex(from probabilities: [Float], rng: inout SeededRandomGenerator) -> Int {
+        let threshold = Float(rng.next()) / Float(UInt64.max)
+        var cumulative: Float = 0
+
+        for (index, probability) in probabilities.enumerated() {
+            cumulative += probability
+            if threshold <= cumulative {
+                return index
+            }
+        }
+
+        return probabilities.count - 1
+    }
 }
 
 // MARK: - DraftModelRunner Tests
@@ -261,7 +336,7 @@ final class VerificationSamplerTests: XCTestCase {
 final class DraftModelRunnerTests: XCTestCase {
 
     /// **Test:** Draft runner produces tokens with log-probabilities
-    func testDraftTokenGeneration() {
+    func testDraftTokenGeneration() throws {
         let config = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 2, vocabSize: 100)
         let draft = DraftModelRunner(config: config)
 
@@ -272,6 +347,10 @@ final class DraftModelRunnerTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(token.tokenId, 0)
             XCTAssertLessThan(token.tokenId, 100)
             XCTAssertFalse(token.logProb.isNaN, "Log-prob should not be NaN")
+            let distribution = try XCTUnwrap(token.probabilityDistribution)
+            XCTAssertEqual(distribution.count, 100)
+            XCTAssertEqual(distribution.reduce(0, +), 1.0, accuracy: 1e-4)
+            XCTAssertEqual(distribution[token.tokenId], token.probability, accuracy: 1e-5)
         }
     }
 
@@ -494,6 +573,65 @@ final class SpeculativeDecoderTests: XCTestCase {
 
         XCTAssertGreaterThan(tokens.count, 0, "K=1 should still produce tokens")
         XCTAssertLessThanOrEqual(tokens.count, 5)
+    }
+
+    /// **Test:** Cancelling the consumer terminates the speculative producer task.
+    func testGenerationStreamCancellationStopsProducer() async throws {
+        let targetConfig = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 2, vocabSize: 64)
+        let draftConfig = ModelConfig(numLayers: 1, hiddenDim: 32, numHeads: 2, vocabSize: 64)
+        let targetRunner = ModelRunner(config: targetConfig)
+
+        let specConfig = SpeculativeConfig(
+            speculationDepth: 4,
+            draftModelPath: "test.tbf",
+            draftModelConfig: draftConfig
+        )
+
+        let decoder = SpeculativeDecoder(
+            targetRunner: targetRunner,
+            specConfig: specConfig,
+            seed: 42
+        )
+
+        let firstToken = expectation(description: "first speculative token")
+        let consumer = Task {
+            var emitted = 0
+            for try await _ in decoder.generateStream(
+                prompt: [1, 2, 3],
+                config: GenerationConfig(maxTokens: 5_000)
+            ) {
+                emitted += 1
+                firstToken.fulfill()
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            return emitted
+        }
+
+        await fulfillment(of: [firstToken], timeout: 2.0)
+        consumer.cancel()
+
+        let emitted: Int
+        do {
+            emitted = try await consumer.value
+        } catch is CancellationError {
+            emitted = 1
+        }
+        XCTAssertEqual(emitted, 1, "Consumer should stop after the first token")
+
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let roundsAfterCancellation = decoder.stats.totalRounds
+
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(
+            decoder.stats.totalRounds,
+            roundsAfterCancellation,
+            "Speculative loop should stop advancing after stream cancellation"
+        )
+        XCTAssertLessThan(
+            roundsAfterCancellation,
+            100,
+            "Cancelled generation should not run most of the requested 5,000-token workload"
+        )
     }
 }
 

@@ -12,8 +12,9 @@
 /// 3. If `u < r` → accept (target agrees with draft)
 /// 4. If `u >= r` → reject, resample from `norm(max(0, p_target - p_draft))`
 ///
-/// This guarantees the final distribution matches the target model exactly,
-/// regardless of draft model quality. Better drafts just accept more tokens.
+/// When the full draft distribution is available, this guarantees the final
+/// distribution matches the target model exactly, regardless of draft model
+/// quality. Better drafts just accept more tokens.
 ///
 /// **Edge cases:**
 /// - `p_draft = 0`: Accept unconditionally (draft didn't predict it, target did)
@@ -24,19 +25,26 @@ import Foundation
 
 // MARK: - Draft Token
 
-/// A token proposed by the draft model with its probability
+/// A token proposed by the draft model with its probability distribution.
 public struct DraftToken: Equatable {
     /// The proposed token ID
     public let tokenId: Int
     /// Log-probability from the draft model's distribution
     public let logProb: Float
+    /// Full draft probability distribution for this position, when available.
+    ///
+    /// Speculative rejection sampling is exact only when the rejection
+    /// correction subtracts this full draft distribution from the target
+    /// distribution. `nil` is kept for source compatibility with older callers.
+    public let probabilityDistribution: [Float]?
 
     /// Probability (exp of logProb)
     public var probability: Float { exp(logProb) }
 
-    public init(tokenId: Int, logProb: Float) {
+    public init(tokenId: Int, logProb: Float, probabilityDistribution: [Float]? = nil) {
         self.tokenId = tokenId
         self.logProb = logProb
+        self.probabilityDistribution = probabilityDistribution
     }
 }
 
@@ -56,7 +64,8 @@ public enum VerificationResult: Equatable {
 ///
 /// Compares draft vs target probability distributions to decide
 /// which draft tokens to accept. Guarantees output distribution
-/// matches the target model exactly.
+/// matches the target model exactly when each `DraftToken` carries its full
+/// draft probability distribution.
 public struct VerificationSampler {
     /// Random number generator (seeded for reproducibility in tests)
     private var rng: SeededRandomGenerator
@@ -95,14 +104,15 @@ public struct VerificationSampler {
         vocabSize: Int
     ) -> VerificationResult {
         let targetProbs = softmax(targetLogits.data)
+        let draftProbs = normalizedDraftProbs(from: draft, vocabSize: vocabSize)
         let pTarget = targetProbs[draft.tokenId]
-        let pDraft = draft.probability
+        let pDraft = draftProbs?[draft.tokenId] ?? draft.probability
 
         // Edge case: target assigns zero probability — always reject
         if pTarget <= 0 {
             let resampled = resampleFromAdjusted(
                 targetProbs: targetProbs,
-                draftProbs: nil,
+                draftProbs: draftProbs,
                 vocabSize: vocabSize
             )
             return .rejected(resampledTokenId: resampled)
@@ -119,7 +129,7 @@ public struct VerificationSampler {
         if ratio < acceptanceThreshold {
             let resampled = resampleFromAdjusted(
                 targetProbs: targetProbs,
-                draftProbs: makeDraftProbs(from: draft, vocabSize: vocabSize),
+                draftProbs: draftProbs,
                 vocabSize: vocabSize
             )
             return .rejected(resampledTokenId: resampled)
@@ -131,7 +141,6 @@ public struct VerificationSampler {
         }
 
         // Rejection: resample from norm(max(0, p_target - p_draft))
-        let draftProbs = makeDraftProbs(from: draft, vocabSize: vocabSize)
         let resampled = resampleFromAdjusted(
             targetProbs: targetProbs,
             draftProbs: draftProbs,
@@ -187,12 +196,35 @@ public struct VerificationSampler {
         return sum > 0 ? exps.map { $0 / sum } : exps
     }
 
-    /// Construct a full probability distribution from a single draft token
+    /// Return a normalized full draft distribution, or a selected-token fallback.
+    private func normalizedDraftProbs(from draft: DraftToken, vocabSize: Int) -> [Float]? {
+        guard let rawDistribution = draft.probabilityDistribution else {
+            return makePointMassDraftProbs(from: draft, vocabSize: vocabSize)
+        }
+
+        var probs = [Float](repeating: 0, count: vocabSize)
+        for i in 0..<min(vocabSize, rawDistribution.count) {
+            let probability = rawDistribution[i]
+            probs[i] = probability.isFinite ? max(0, probability) : 0
+        }
+
+        let sum = probs.reduce(0, +)
+        guard sum > 0 else {
+            return nil
+        }
+
+        for i in 0..<vocabSize {
+            probs[i] /= sum
+        }
+        return probs
+    }
+
+    /// Construct a compatibility fallback from a single draft token.
     ///
-    /// We only have the draft probability for the selected token.
-    /// For resampling we approximate: the draft model assigned `pDraft`
-    /// to the selected token and distributes the rest uniformly.
-    private func makeDraftProbs(from draft: DraftToken, vocabSize: Int) -> [Float] {
+    /// Older callers only provide the selected token probability. That fallback
+    /// cannot preserve the target distribution after rejection; exact
+    /// speculative sampling requires `DraftToken.probabilityDistribution`.
+    private func makePointMassDraftProbs(from draft: DraftToken, vocabSize: Int) -> [Float] {
         var probs = [Float](repeating: 0, count: vocabSize)
         if draft.tokenId < vocabSize {
             probs[draft.tokenId] = draft.probability

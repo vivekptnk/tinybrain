@@ -59,8 +59,18 @@ public final class SpeculativeDecoder {
     /// Verification sampler for acceptance/rejection
     private var verificationSampler: VerificationSampler
 
+    private let statsLock = NSLock()
+    private var protectedStats: SpeculativeStats = SpeculativeStats()
+
     /// Statistics for monitoring acceptance rates
-    public private(set) var stats: SpeculativeStats = SpeculativeStats()
+    public private(set) var stats: SpeculativeStats {
+        get {
+            withStatsLock { protectedStats }
+        }
+        set {
+            withStatsLock { protectedStats = newValue }
+        }
+    }
 
     /// Initialize with a target runner and optional speculative config
     ///
@@ -135,7 +145,14 @@ public final class SpeculativeDecoder {
         let vocabSize = targetRunner.config.vocabSize
 
         return AsyncThrowingStream { continuation in
+            let cancellation = SpeculativeCancellationState()
+            continuation.onTermination = { @Sendable _ in
+                cancellation.cancel()
+            }
+
             Task {
+                defer { continuation.finish() }
+
                 var mutableConfig = config
                 let sanitizedPrompt = prompt.map { max(0, min($0, vocabSize - 1)) }
 
@@ -146,6 +163,7 @@ public final class SpeculativeDecoder {
 
                 // Process prompt through target model
                 for token in sanitizedPrompt.dropLast() {
+                    if Task.isCancelled || cancellation.isCancelled { return }
                     _ = self.targetRunner.step(tokenId: token)
                 }
 
@@ -154,6 +172,8 @@ public final class SpeculativeDecoder {
                 var generated = 0
 
                 while generated < mutableConfig.maxTokens {
+                    if Task.isCancelled || cancellation.isCancelled { break }
+
                     // === DRAFT PHASE ===
                     // Run draft model for K tokens from current position
                     draftRunner.reset()
@@ -164,6 +184,8 @@ public final class SpeculativeDecoder {
                         count: min(specDepth, mutableConfig.maxTokens - generated),
                         samplerConfig: mutableConfig.sampler
                     )
+
+                    if Task.isCancelled || cancellation.isCancelled { break }
 
                     if draftTokens.isEmpty {
                         // No draft tokens — fall back to single-token generation
@@ -180,7 +202,9 @@ public final class SpeculativeDecoder {
                             entropy: detailed.entropy,
                             timestamp: Date()
                         )
-                        continuation.yield(output)
+                        if case .terminated = continuation.yield(output) {
+                            break
+                        }
 
                         currentToken = detailed.tokenId
                         history.append(detailed.tokenId)
@@ -202,9 +226,12 @@ public final class SpeculativeDecoder {
 
                     // Then: step through remaining draft tokens
                     for i in 1..<draftTokens.count {
+                        if Task.isCancelled || cancellation.isCancelled { break }
                         let logits = self.targetRunner.step(tokenId: draftTokens[i - 1].tokenId)
                         targetLogitsBatch.append(logits)
                     }
+
+                    if Task.isCancelled || cancellation.isCancelled { break }
 
                     // === ACCEPT/REJECT ===
                     let results = self.verificationSampler.verifyBatch(
@@ -213,17 +240,26 @@ public final class SpeculativeDecoder {
                         vocabSize: vocabSize
                     )
 
-                    self.stats.totalDraftTokens += draftTokens.count
-                    self.stats.totalRounds += 1
+                    self.updateStats { stats in
+                        stats.totalDraftTokens += draftTokens.count
+                        stats.totalRounds += 1
+                    }
 
                     // Yield accepted tokens
                     var shouldStop = false
                     for result in results {
+                        if Task.isCancelled || cancellation.isCancelled {
+                            shouldStop = true
+                            break
+                        }
+
                         let tokenId: Int
                         switch result {
                         case .accepted(let id):
                             tokenId = id
-                            self.stats.acceptedTokens += 1
+                            self.updateStats { stats in
+                                stats.acceptedTokens += 1
+                            }
                         case .rejected(let resampledId):
                             tokenId = resampledId
                         }
@@ -234,7 +270,15 @@ public final class SpeculativeDecoder {
                             entropy: 0.0,
                             timestamp: Date()
                         )
-                        continuation.yield(output)
+                        if case .terminated = continuation.yield(output) {
+                            shouldStop = true
+                            break
+                        }
+
+                        if Task.isCancelled || cancellation.isCancelled {
+                            shouldStop = true
+                            break
+                        }
 
                         currentToken = tokenId
                         history.append(tokenId)
@@ -265,8 +309,6 @@ public final class SpeculativeDecoder {
                         }
                     }
                 }
-
-                continuation.finish()
             }
         }
     }
@@ -276,6 +318,35 @@ public final class SpeculativeDecoder {
         targetRunner.reset()
         draftRunner?.reset()
         stats = SpeculativeStats()
+    }
+
+    private func updateStats(_ update: (inout SpeculativeStats) -> Void) {
+        withStatsLock {
+            update(&protectedStats)
+        }
+    }
+
+    private func withStatsLock<T>(_ body: () -> T) -> T {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        return body()
+    }
+}
+
+private final class SpeculativeCancellationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
     }
 }
 
