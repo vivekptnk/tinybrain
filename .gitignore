@@ -96,3 +96,4 @@ benchmarks/results/*.json
 # Cross-team dependency sources cloned locally for development
 # (see Sources/TinyBrainCartographerBridge/README.md).
 Dependencies/
+.harness/

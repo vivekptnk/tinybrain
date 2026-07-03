@@ -4,6 +4,38 @@ All notable changes to TinyBrain are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased — 0.2.0-dev]
+
+Status: unreleased as of 2026-07-03.
+
+Development release notes for the current v0.2.0 work. This section is not a tagged release.
+
+### Added
+
+#### Quantization and Metal Kernels
+- INT4 per-group quantization with group size 32 and FP16 scales.
+- Fused Metal INT4 dequantization plus matrix multiplication kernel.
+- FlashAttention Metal kernel using tiled attention and online softmax.
+- TBF loader fix for INT4 packed tensors.
+
+#### Generation Runtime
+- Speculative decoding with draft and verify passes.
+- Tool calling and constrained JSON generation module.
+- Gemma RMSNorm variant using `(1 + w) * x`.
+- Gemma 2B and Phi-2 architecture support.
+
+#### Bridges and Demo App
+- TinyBrainProximaKit bridge with `TextEmbedder`.
+- TinyBrainCartographerBridge with `SmartAnnotationService` adapter.
+- Model picker in ChatDemo for switching local `.tbf` files.
+
+#### Benchmark Harness
+- `tinybrain-bench` scenario system for scripted benchmark runs.
+
+### Known issues
+
+- A comprehensive correctness audit (2026-07-03) identified INT4 converter and RoPE convention defects under repair; see repo issues/commit history.
+
 ## [0.1.0] — 2025-10-25
 
 Codename: **Foundation**

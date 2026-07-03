@@ -62,7 +62,8 @@ let package = Package(
         // YAML parsing for benchmark scenarios
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
         // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge)
-        .package(url: "https://github.com/vivekptnk/ProximaKit.git", branch: "main"),
+        // ProximaKit pinned by revision (post-v1.6.0 HEAD, 2026-07-03): upstream has no v1.6.0 tag yet; re-pin to a version once tags are cut. Pinned so a moving main can't break resolution.
+        .package(url: "https://github.com/vivekptnk/ProximaKit.git", revision: "dcc55ca6b44d50707421b1da404c2e49117596e9"),
         // Cartographer — map annotation engine (used by TinyBrainCartographerBridge).
         // Pinned by revision (SHA) on feat/cg-003-demo-app-wiring: that's
         // the only branch carrying SmartAnnotationService. Pinning by

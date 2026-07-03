@@ -9,7 +9,7 @@
     <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.10+-F05138?logo=swift&logoColor=white" alt="Swift" /></a>
     <a href="https://developer.apple.com"><img src="https://img.shields.io/badge/Apple_Silicon-M1_M2_M3_M4-000000?logo=apple&logoColor=white" alt="Apple Silicon" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
-    <img src="https://img.shields.io/badge/tests-195_passing-brightgreen.svg" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-500%2B_passing-brightgreen.svg" alt="Tests" />
   </p>
 </p>
 
@@ -106,6 +106,17 @@ open Package.swift
 This opens the project in Xcode. Select the **ChatDemo** scheme from the dropdown, then hit **Run** (or press `Cmd+R`).
 
 > **macOS Tahoe note:** If the text field doesn't accept input, go to Edit Scheme > Run > Options and uncheck "Use the sandbox". This is a known macOS 15 SPM bug — the demo provides preset buttons as a workaround.
+
+### Step 5: Switch Models with the Model Picker
+
+The ChatDemo header shows the active model name. Click it to open the model picker — any `.tbf` file in your `Models/` directory appears automatically.
+
+*Screenshots coming with the v0.2.0 release notes.*
+
+To switch to Gemma 2B:
+1. Convert the model (see **Supported Models** below for the command)
+2. Click the model name in the ChatDemo header
+3. Select **gemma-2b-int4** — the app loads the model and resets the conversation
 
 ---
 
@@ -251,12 +262,14 @@ Measured on MacBook Pro M4 Max:
 
 | What | How Fast |
 |------|----------|
-| Matrix multiply (1536x1536, Metal) | 4.73ms |
+| Matrix multiply (1536x1536, Metal) | 4.73ms (historical v0.1.0 measurement — see docs/BENCHMARKS.md) |
 | GPU buffer allocation (pooled) | 0.001ms (450x faster than raw) |
 | KV cache append per token | 0.41ms |
 | Maximum context length | 2048 tokens |
 | TinyLlama 1.1B memory (INT8) | 1.1 GB (75% less than FP32) |
-| Quantization accuracy loss | Less than 1% |
+| Gemma 2B memory (INT4, group=32) | Not yet benchmarked — tracked for v0.2.1 |
+| Quantization accuracy loss (INT8) | Less than 1% |
+| Quantization accuracy loss (INT4) | ~6% at group=32 (GPTQ target deferred to v0.2.1) |
 
 ---
 
@@ -276,14 +289,34 @@ The [INT4 1% precision target](docs/ROADMAP.md#v021--int4-precision--tokenizer-c
 
 ## Supported Models
 
-TinyBrain works with any HuggingFace model that has a `tokenizer.json`:
+TinyBrain works with any HuggingFace model that has a `tokenizer.json`. Once converted, switch between models at runtime using the **model picker** in the ChatDemo header — no restart required.
 
-| Model | Parameters | Status |
-|-------|-----------|--------|
-| TinyLlama | 1.1B | Tested and working |
-| Llama 2/3 | Various | Compatible (same format) |
-| Phi-2 (Microsoft) | 2.7B | Compatible via `tokenizer.json` |
-| Gemma (Google) | 2B+ | Compatible via `tokenizer.json` |
+| Model | Parameters | Quantization | Status |
+|-------|-----------|--------------|--------|
+| TinyLlama 1.1B Chat | 1.1B | INT8 | Tested and working (default) |
+| Gemma 2B | 2B | INT4 (group=32) | Runs locally (manual validation on M4 Max; not CI-enforced — see docs/ROADMAP.md) |
+| Phi-2 (Microsoft) | 2.7B | INT4 (group=32) | Runtime + converter ready; run conversion to get `.tbf` |
+| Llama 2/3 | Various | INT8/INT4 | Compatible (same weight format) |
+
+**Converting Gemma 2B (requires HuggingFace access grant):**
+```bash
+huggingface-cli download google/gemma-2b --local-dir Models/gemma-2b-raw
+python Scripts/convert_model.py \
+  --input Models/gemma-2b-raw \
+  --output Models/gemma-2b-int4.tbf \
+  --quantize int4 --group-size 32 --auto-config
+```
+
+**Converting Phi-2:**
+```bash
+huggingface-cli download microsoft/phi-2 --local-dir Models/phi-2-raw
+python Scripts/convert_model.py \
+  --input Models/phi-2-raw \
+  --output Models/phi-2-int4.tbf \
+  --quantize int4 --group-size 32 --auto-config
+```
+
+Once any `.tbf` lands in `Models/`, the ChatDemo picker lists it automatically.
 
 Binary SentencePiece (native Gemma/Mistral checkpoints) is planned for v0.2.1. For now, use the HuggingFace `tokenizer.json` conversion path.
 
@@ -314,7 +347,7 @@ tinybrain/
 │   ├── TinyBrainDemo/          # SwiftUI app + X-Ray views
 │   └── TinyBrainBench/         # Benchmarks
 ├── Examples/ChatDemo/          # App entry point
-├── Tests/                      # 195 tests
+├── Tests/                      # 500+ tests
 ├── Scripts/                    # Model converter (Python)
 └── docs/                       # Architecture documentation
 ```
@@ -327,7 +360,7 @@ tinybrain/
 swift test --skip TinyBrainDemoTests
 ```
 
-> The `--skip TinyBrainDemoTests` is needed because of a known Xcode beta linker issue with SwiftUI test targets. All 195 other tests pass.
+> The `--skip TinyBrainDemoTests` is needed because of a known Xcode beta linker issue with SwiftUI test targets. All 500+ other tests pass.
 
 ---
 
