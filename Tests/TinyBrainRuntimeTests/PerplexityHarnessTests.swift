@@ -131,4 +131,46 @@ final class PerplexityHarnessTests: XCTestCase {
         XCTAssertLessThan(result.perplexity, Float(config.vocabSize) * 10,
                           "ppl=\(result.perplexity) far above vocab=\(config.vocabSize) suggests a broken log-softmax")
     }
+
+    func testStructuredINT4VsINT8PerplexityGateBindsInCI() throws {
+        let measurement = try StructuredQualityFixture.measureINT4VsINT8()
+
+        print("""
+        Structured INT4 vs INT8 perplexity
+           INT8: ppl=\(measurement.baselinePerplexity)
+           INT4: ppl=\(measurement.candidatePerplexity)
+           delta: \(measurement.delta * 100)%
+           bound: \(StructuredQualityFixture.int4PerplexityDeltaBound * 100)%
+        """)
+
+        XCTAssertLessThan(
+            measurement.baselinePerplexity,
+            Float(StructuredQualityFixture.config.vocabSize) / 3,
+            "Structured INT8 baseline must be informative, not near-uniform vocab-size perplexity"
+        )
+        XCTAssertLessThanOrEqual(
+            measurement.delta,
+            StructuredQualityFixture.int4PerplexityDeltaBound,
+            "INT4 perplexity must stay within the calibrated CI bound versus INT8"
+        )
+    }
+
+    func testStructuredINT4PerplexityGateCanaryFailsUnderScaleCorruption() throws {
+        let measurement = try StructuredQualityFixture.measureINT4Canary(corruptionScale: 1.5)
+
+        print("""
+        Structured INT4 corruption canary
+           INT8: ppl=\(measurement.baselinePerplexity)
+           corrupted INT4: ppl=\(measurement.candidatePerplexity)
+           scale factor: 1.5x output scales
+           delta: \(measurement.delta * 100)%
+           bound: \(StructuredQualityFixture.int4PerplexityDeltaBound * 100)%
+        """)
+
+        XCTAssertGreaterThan(
+            measurement.delta,
+            StructuredQualityFixture.int4PerplexityDeltaBound,
+            "Corrupted INT4 scales must exceed the CI gate so the 6% DoD-style check cannot be vacuous"
+        )
+    }
 }
