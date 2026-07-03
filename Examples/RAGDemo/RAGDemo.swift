@@ -11,6 +11,20 @@ enum EmbedderChoice: String, ExpressibleByArgument {
     case stub
 }
 
+enum PromptTemplateChoice: String, ExpressibleByArgument {
+    case zephyr
+    case none
+
+    var ragTemplate: PromptTemplate {
+        switch self {
+        case .zephyr:
+            return .zephyr
+        case .none:
+            return .none
+        }
+    }
+}
+
 @main
 struct RAGDemo: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -35,7 +49,10 @@ struct RAGDemo: AsyncParsableCommand {
     var k: Int = 4
 
     @Option(name: .long, help: "Maximum answer tokens.")
-    var tokens: Int = 32
+    var tokens: Int = 64
+
+    @Option(name: .long, help: "Prompt template: zephyr or none.")
+    var template: PromptTemplateChoice = .zephyr
 
     @Flag(name: .long, help: "Run retrieval only, without loading or calling a model.")
     var noGenerate: Bool = false
@@ -48,7 +65,8 @@ struct RAGDemo: AsyncParsableCommand {
             printStartup(
                 embedderSummary: embedderStartupSummary,
                 modelSummary: "missing: \(resolvedModel)",
-                quantizationSummary: "unavailable"
+                quantizationSummary: "unavailable",
+                templateSummary: template.rawValue
             )
             printMissingModel(path: resolvedModel)
             return
@@ -60,7 +78,8 @@ struct RAGDemo: AsyncParsableCommand {
         printStartup(
             embedderSummary: embedderSummary,
             modelSummary: modelSummary,
-            quantizationSummary: quantizationSummary
+            quantizationSummary: quantizationSummary,
+            templateSummary: template.rawValue
         )
 
         let boundedK = max(1, k)
@@ -68,6 +87,7 @@ struct RAGDemo: AsyncParsableCommand {
             index: index,
             generator: generator,
             tokenizer: tokenizer,
+            promptTemplate: template.ragTemplate,
             retrievalK: boundedK,
             generationConfig: GenerationConfig(
                 maxTokens: max(1, tokens),
@@ -237,11 +257,13 @@ struct RAGDemo: AsyncParsableCommand {
     private func printStartup(
         embedderSummary: String,
         modelSummary: String,
-        quantizationSummary: String
+        quantizationSummary: String,
+        templateSummary: String
     ) {
         print("Embedder: \(embedderSummary)")
         print("Model: \(modelSummary)")
-        print("Quantization: \(quantizationSummary)\n")
+        print("Quantization: \(quantizationSummary)")
+        print("Prompt template: \(templateSummary)\n")
     }
 
     private func printBanner() {

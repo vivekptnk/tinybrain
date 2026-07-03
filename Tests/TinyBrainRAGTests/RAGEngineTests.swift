@@ -16,6 +16,40 @@ private struct CharacterTokenizer: Tokenizer {
     }
 }
 
+private struct SentencePieceBoundaryTokenizer: Tokenizer {
+    let vocabularySize = 1_114_112
+    private let pieces: [Int: String] = [
+        10: "▁Steep",
+        11: "▁cold",
+        12: "▁brew",
+        13: "▁for",
+        14: "▁16",
+        15: "▁hours",
+        16: "▁[1]",
+        17: "."
+    ]
+
+    func encode(_ text: String) -> [Int] {
+        text.unicodeScalars.map { Int($0.value) }
+    }
+
+    func decode(_ tokens: [Int]) -> String {
+        var decoded = ""
+        for token in tokens {
+            if let piece = pieces[token] {
+                decoded += piece.replacingOccurrences(of: "▁", with: " ")
+            } else if let scalar = UnicodeScalar(token) {
+                decoded += String(scalar)
+            }
+        }
+
+        if decoded.hasPrefix(" ") {
+            decoded.removeFirst()
+        }
+        return decoded
+    }
+}
+
 private actor ScriptedGeneratorState {
     private(set) var prompts: [[Int]] = []
     private(set) var maxTokens: [Int] = []
@@ -50,6 +84,16 @@ private struct ScriptedGenerator: AnswerGenerator {
         state: ScriptedGeneratorState = ScriptedGeneratorState()
     ) {
         self.tokenIDs = tokenizer.encode(answer)
+        self.delayNanoseconds = delayNanoseconds
+        self.state = state
+    }
+
+    init(
+        tokenIDs: [Int],
+        delayNanoseconds: UInt64 = 0,
+        state: ScriptedGeneratorState = ScriptedGeneratorState()
+    ) {
+        self.tokenIDs = tokenIDs
         self.delayNanoseconds = delayNanoseconds
         self.state = state
     }
@@ -120,12 +164,15 @@ final class RAGEngineTests: XCTestCase {
             generator: generator,
             tokenizer: tokenizer,
             promptBuilder: builder,
-            retrievalK: 3,
+            retrievalK: 1,
             generationConfig: GenerationConfig(maxTokens: 120)
         )
-        _ = try await engine.index(documents: sampleDocuments(), chunkingConfig: ChunkingConfig(targetTokens: 180, overlapTokens: 0))
+        _ = try await engine.index(
+            documents: [RAGDocument(text: "Battery diagnostics stay local.", sourcePath: "device.md")],
+            chunkingConfig: ChunkingConfig(targetTokens: 180, overlapTokens: 0)
+        )
 
-        _ = try await engine.answer("How do battery diagnostics work?")
+        _ = try await engine.answer("Battery diagnostics?")
 
         let prompts = await state.prompts
         let prompt = try XCTUnwrap(prompts.first)
@@ -136,6 +183,48 @@ final class RAGEngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(prompt.count, 390)
         let maxTokens = await state.maxTokens
         XCTAssertEqual(maxTokens.first, 80)
+    }
+
+    func testAnswerWithZephyrTemplatePassesWrappedPromptAndSingleBOSToGenerator() async throws {
+        let tokenizer = CharacterTokenizer()
+        let index = RAGIndex(embedder: DeterministicStubEmbedder(dimension: 64, seed: 29))
+        let state = ScriptedGeneratorState()
+        let generator = ScriptedGenerator(
+            answer: "Cold brew should steep for 16 hours [1].",
+            tokenizer: tokenizer,
+            state: state
+        )
+        let engine = RAGEngine(
+            index: index,
+            generator: generator,
+            tokenizer: tokenizer,
+            promptTemplate: .zephyr,
+            retrievalK: 1
+        )
+        _ = try await engine.index(
+            documents: [
+                RAGDocument(
+                    text: "Cold brew coffee should steep for 16 hours.",
+                    sourcePath: "coffee.md"
+                )
+            ],
+            chunkingConfig: ChunkingConfig(targetTokens: 180, overlapTokens: 0)
+        )
+
+        _ = try await engine.answer("How long should I steep cold brew coffee?")
+
+        let prompts = await state.prompts
+        let prompt = try XCTUnwrap(prompts.first)
+        XCTAssertEqual(prompt.first, 1)
+        XCTAssertNotEqual(prompt.dropFirst().first, 1)
+
+        let decoded = tokenizer.decode(Array(prompt.dropFirst()))
+        XCTAssertTrue(decoded.hasPrefix("<|system|>\n"))
+        XCTAssertTrue(decoded.contains("[1] Cold brew coffee should steep for 16 hours."))
+        XCTAssertTrue(decoded.contains("For example, cite like: The steep time is 16 hours [1].</s>"))
+        XCTAssertTrue(decoded.contains("</s>\n<|user|>\nHow long should I steep cold brew coffee?</s>\n<|assistant|>\n"))
+        XCTAssertFalse(decoded.contains("Question:"))
+        XCTAssertFalse(decoded.contains("Answer:"))
     }
 
     func testAnswerWithNoCitationsReturnsEmptyCitationList() async throws {
@@ -192,6 +281,37 @@ final class RAGEngineTests: XCTestCase {
             return XCTFail("Last event should contain citations")
         }
         XCTAssertEqual(citations.count, 1)
+    }
+
+    func testAnswerStreamDetokenizesAccumulatedSentencePieceBoundaries() async throws {
+        let tokenizer = SentencePieceBoundaryTokenizer()
+        let generatedIDs = [10, 11, 12, 13, 14, 15, 16, 17]
+        let index = RAGIndex(embedder: DeterministicStubEmbedder(dimension: 64, seed: 28))
+        let generator = ScriptedGenerator(tokenIDs: generatedIDs)
+        let engine = RAGEngine(index: index, generator: generator, tokenizer: tokenizer, retrievalK: 1)
+        _ = try await engine.index(
+            documents: [RAGDocument(text: "Cold brew coffee should steep for 16 hours.", sourcePath: "coffee.md")],
+            chunkingConfig: ChunkingConfig(targetTokens: 180, overlapTokens: 0)
+        )
+
+        var streamed = ""
+        var citations: [Citation] = []
+        for try await event in engine.answerStream("How long should I steep cold brew coffee?") {
+            switch event {
+            case .token(let token):
+                streamed += token
+            case .done(let parsed):
+                citations = parsed
+            case .passages:
+                break
+            }
+        }
+
+        let fullDecode = tokenizer.decode(generatedIDs)
+        XCTAssertEqual(streamed, fullDecode)
+        XCTAssertTrue(streamed.contains("Steep cold brew for 16 hours"))
+        XCTAssertFalse(streamed.contains("Steepcoldbrew"))
+        XCTAssertEqual(citations.map(\.marker), [1])
     }
 
     func testAnswerStreamCancellationStopsGenerator() async throws {

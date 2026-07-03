@@ -21,10 +21,34 @@ public struct PromptBudget: Equatable, Sendable {
     }
 }
 
+/// Prompt envelope used when assembling retrieval-augmented instructions.
+public enum PromptTemplate: String, CaseIterable, Equatable, Sendable {
+    /// Preserve the original raw RAG prompt format.
+    case none
+
+    /// TinyLlama/Zephyr chat prompt format with a BOS token for generation.
+    case zephyr
+
+    var generationPrefixTokenIDs: [Int] {
+        switch self {
+        case .none:
+            return []
+        case .zephyr:
+            return [1]
+        }
+    }
+}
+
 /// Builds deterministic numbered-passage prompts under a token budget.
 public struct RAGPromptBuilder {
     private let tokenizer: any Tokenizer
     private let budget: PromptBudget
+    private let template: PromptTemplate
+
+    /// Prompt template used for rendered prompts and budget accounting.
+    public var promptTemplate: PromptTemplate {
+        template
+    }
 
     /// Maximum answer tokens reserved by this prompt budget.
     public var generationHeadroom: Int {
@@ -32,9 +56,14 @@ public struct RAGPromptBuilder {
     }
 
     /// Creates a prompt builder using the model tokenizer for all token counts.
-    public init(tokenizer: any Tokenizer, budget: PromptBudget = .init()) {
+    public init(
+        tokenizer: any Tokenizer,
+        budget: PromptBudget = .init(),
+        template: PromptTemplate = .none
+    ) {
         self.tokenizer = tokenizer
         self.budget = budget
+        self.template = template
     }
 
     /// Builds a prompt and returns the passages that fit inside the budget.
@@ -58,7 +87,7 @@ public struct RAGPromptBuilder {
         for passage in ordered {
             let candidate = included + [passage]
             let prompt = renderPrompt(question: question, passages: candidate)
-            if tokenizer.encode(prompt).count <= promptLimit {
+            if tokenIDs(for: prompt).count <= promptLimit {
                 included = candidate
             } else {
                 break
@@ -68,13 +97,30 @@ public struct RAGPromptBuilder {
         return (renderPrompt(question: question, passages: included), included)
     }
 
+    func tokenIDs(for prompt: String) -> [Int] {
+        template.generationPrefixTokenIDs + tokenizer.encode(prompt)
+    }
+
     private func renderPrompt(question: String, passages: [RetrievedPassage]) -> String {
-        let passageBlock = passages.enumerated()
+        switch template {
+        case .none:
+            return renderRawPrompt(question: question, passages: passages)
+        case .zephyr:
+            return renderZephyrPrompt(question: question, passages: passages)
+        }
+    }
+
+    private func renderPassageBlock(passages: [RetrievedPassage]) -> String {
+        passages.enumerated()
             .map { index, passage in "[\(index + 1)] \(passage.chunk.text)" }
             .joined(separator: "\n\n")
+    }
+
+    private func renderRawPrompt(question: String, passages: [RetrievedPassage]) -> String {
+        let passageBlock = renderPassageBlock(passages: passages)
 
         return """
-        You are TinyBrain Chat. Answer only from the numbered passages below. Do not use outside knowledge. If the passages do not contain the answer, say you do not know. cite every claim with its passage marker like [1].
+        You are TinyBrain Chat. Answer only from the numbered passages below. Do not use outside knowledge. If the passages do not contain the answer, say you do not know.
 
         Question:
         \(question)
@@ -82,7 +128,26 @@ public struct RAGPromptBuilder {
         Passages:
         \(passageBlock)
 
+        Cite every claim with its passage marker. For example, cite like: The steep time is 16 hours [1].
+
         Answer:
         """
+    }
+
+    private func renderZephyrPrompt(question: String, passages: [RetrievedPassage]) -> String {
+        let passageBlock = renderPassageBlock(passages: passages)
+
+        return """
+        <|system|>
+        You are TinyBrain Chat. Answer only from the numbered passages below. Do not use outside knowledge. If the passages do not contain the answer, say you do not know.
+
+        Passages:
+        \(passageBlock)
+
+        Cite every claim with its passage marker. For example, cite like: The steep time is 16 hours [1].</s>
+        <|user|>
+        \(question)</s>
+        <|assistant|>
+        """ + "\n"
     }
 }

@@ -41,11 +41,35 @@ public enum RAGEvent: Equatable, Sendable {
     /// Retrieval has completed and the passages are available for display.
     case passages([RetrievedPassage])
 
-    /// One decoded answer token.
+    /// One decoded answer text delta.
     case token(String)
 
     /// Generation finished and citations have been resolved.
     case done([Citation])
+}
+
+private struct IncrementalDetokenizer {
+    private let tokenizer: any Tokenizer
+    private var tokenIDs: [Int] = []
+    private var emittedText = ""
+    private(set) var decodedText = ""
+
+    init(tokenizer: any Tokenizer) {
+        self.tokenizer = tokenizer
+    }
+
+    mutating func append(_ tokenID: Int) -> String? {
+        tokenIDs.append(tokenID)
+        decodedText = tokenizer.decode(tokenIDs)
+
+        guard decodedText.hasPrefix(emittedText) else {
+            return nil
+        }
+
+        let delta = String(decodedText.dropFirst(emittedText.count))
+        emittedText = decodedText
+        return delta.isEmpty ? nil : delta
+    }
 }
 
 /// Retrieval-augmented generation orchestrator.
@@ -66,6 +90,7 @@ public actor RAGEngine {
         generator: any AnswerGenerator,
         tokenizer: any Tokenizer,
         promptBuilder: RAGPromptBuilder? = nil,
+        promptTemplate: PromptTemplate = .none,
         retrievalK: Int = 4,
         generationConfig: GenerationConfig = GenerationConfig(maxTokens: 256)
     ) {
@@ -73,7 +98,10 @@ public actor RAGEngine {
         self.ragIndex = index
         self.generator = generator
         self.tokenizer = tokenizer
-        self.promptBuilder = promptBuilder ?? RAGPromptBuilder(tokenizer: tokenizer)
+        self.promptBuilder = promptBuilder ?? RAGPromptBuilder(
+            tokenizer: tokenizer,
+            template: promptTemplate
+        )
         self.retrievalK = retrievalK
         self.generationConfig = generationConfig
     }
@@ -190,18 +218,18 @@ public actor RAGEngine {
             config.stopTokens.append(bpeTokenizer.eosToken)
         }
 
-        let promptTokens = tokenizer.encode(built.prompt)
+        let promptTokens = promptBuilder.tokenIDs(for: built.prompt)
         let stream = generator.generateStream(prompt: promptTokens, config: config)
 
-        var answer = ""
+        var detokenizer = IncrementalDetokenizer(tokenizer: tokenizer)
         for try await output in stream {
             try Task.checkCancellation()
-            let token = tokenizer.decode([output.tokenId])
-            answer += token
-            continuation.yield(.token(token))
+            if let delta = detokenizer.append(output.tokenId) {
+                continuation.yield(.token(delta))
+            }
         }
 
-        let citations = CitationParser(passages: built.included).parse(answer)
+        let citations = CitationParser(passages: built.included).parse(detokenizer.decodedText)
         continuation.yield(.done(citations))
     }
 
