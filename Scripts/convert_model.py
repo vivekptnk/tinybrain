@@ -4,6 +4,10 @@ PyTorch -> TBF (TinyBrain Binary Format) Model Converter
 
 Converts PyTorch checkpoints to TinyBrain's optimized binary format with INT8 or INT4 quantization.
 
+WARNING: INT4 .tbf files converted before the C1a transpose fix are invalid and must be
+reconverted; the old converter stored 2D INT4 packed bytes in PyTorch [out, in] order
+while declaring TinyBrain [in, out] shapes.
+
 Usage:
     python convert_model.py --input model.pt --output model.tbf --quantize int8
     python convert_model.py --input model.pt --output model.tbf --quantize int4
@@ -487,15 +491,23 @@ def write_tbf_format(weights: Dict, config: ModelConfig, output_path: str,
         3. Store scales per output channel (applied per column in Swift dequantizer)
         """
         if quantize_mode == 'int4' and len(tensor.shape) >= 1:
-            q_tensor, scales, zero_points = quantize_int4_per_group(tensor, group_size=group_size)
-            # INT4 is flattened, transpose doesn't apply the same way
-            # Store original shape transposed for matmul layout
-            transposed_shape = tuple(reversed(tensor.shape)) if tensor.ndim == 2 else tensor.shape
+            if tensor.ndim == 2:
+                # Swift and Metal unpack INT4 by row-major linear index over the
+                # stored [in, out] matrix: linearIdx = k * out + col, and
+                # groupIdx = linearIdx / groupSize. Transpose before packing so
+                # packed nibbles and per-group scales share that runtime order.
+                tensor_for_storage = np.ascontiguousarray(tensor.T)
+            else:
+                tensor_for_storage = tensor
+            q_tensor, scales, zero_points = quantize_int4_per_group(
+                tensor_for_storage,
+                group_size=group_size,
+            )
             quantized_weights[name] = {
                 'data': q_tensor,
                 'scales': scales,
                 'zero_points': zero_points,
-                'shape': transposed_shape,
+                'shape': tensor_for_storage.shape,
                 'quantized': True,
                 'precision': 'int4',
                 'group_size': group_size,
@@ -854,6 +866,11 @@ Examples:
 
   # Auto-infer configuration
   python convert_model.py --input model.pt --output model.tbf --auto-config
+
+WARNING:
+  INT4 .tbf files converted before the C1a transpose fix are invalid and must
+  be reconverted. Older converter output declared [in, out] shapes but packed
+  2D INT4 data in PyTorch [out, in] order.
         """
     )
 

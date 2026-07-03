@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import json
+import struct
 from pathlib import Path
 
 # Add Scripts to path for import
@@ -20,6 +21,7 @@ try:
         load_pytorch_checkpoint,
         extract_weights,
         quantize_int8_per_channel,
+        quantize_int4_per_group,
         write_tbf_format,
         ModelConfig,
         infer_config_from_weights,
@@ -27,6 +29,122 @@ try:
 except ImportError:
     # Tests will fail until we implement convert_model.py
     pytest.skip("convert_model.py not implemented yet", allow_module_level=True)
+
+
+def _align_4kb(offset):
+    return ((offset + 4095) // 4096) * 4096
+
+
+def _read_tbf_quantized_tensor(path, tensor_name):
+    """Read one quantized tensor from a converter-written TBF file."""
+    with open(path, 'rb') as f:
+        blob = f.read()
+
+    offset = 0
+    assert blob[offset:offset + 4] == b'TBFM'
+    offset += 4
+    _version = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4
+    config_len = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4 + config_len
+    offset = _align_4kb(offset)
+
+    metadata = {}
+    metadata_count = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4
+    for _ in range(metadata_count):
+        name_len = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        name = blob[offset:offset + name_len].decode('utf-8')
+        offset += name_len
+        precision = struct.unpack_from('<B', blob, offset)[0]
+        offset += 1
+        mode = struct.unpack_from('<B', blob, offset)[0]
+        offset += 1
+        group_size = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        scales_count = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        scales = np.array(
+            struct.unpack_from(f'<{scales_count}f', blob, offset),
+            dtype=np.float32,
+        )
+        offset += scales_count * 4
+        zp_count = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        zero_points = np.array(
+            struct.unpack_from(f'<{zp_count}b', blob, offset),
+            dtype=np.int8,
+        ) if zp_count else None
+        offset += zp_count
+        metadata[name] = {
+            'precision': precision,
+            'mode': mode,
+            'group_size': group_size,
+            'scales': scales,
+            'zero_points': zero_points,
+        }
+
+    offset = _align_4kb(offset)
+    tensor_index = {}
+    tensor_count = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4
+    for _ in range(tensor_count):
+        name_len = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        name = blob[offset:offset + name_len].decode('utf-8')
+        offset += name_len
+        dim_count = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        shape = struct.unpack_from(f'<{dim_count}i', blob, offset)
+        offset += dim_count * 4
+        data_offset = struct.unpack_from('<Q', blob, offset)[0]
+        offset += 8
+        data_size = struct.unpack_from('<Q', blob, offset)[0]
+        offset += 8
+        tensor_index[name] = {
+            'shape': tuple(shape),
+            'data_offset': data_offset,
+            'data_size': data_size,
+        }
+
+    index = tensor_index[tensor_name]
+    raw = blob[index['data_offset']:index['data_offset'] + index['data_size']]
+    return {
+        **metadata[tensor_name],
+        'shape': index['shape'],
+        'data': np.frombuffer(raw, dtype=np.int8).copy(),
+    }
+
+
+def _dequantize_int4_swift_order(packed, shape, scales, zero_points, group_size):
+    """Mirror QuantizedTensor.dequantize() for mode .int4."""
+    flat_count = int(np.prod(shape))
+    output = np.zeros(flat_count, dtype=np.float32)
+    packed_u8 = packed.view(np.uint8)
+    gs = group_size if group_size > 0 else flat_count
+    zps = zero_points if zero_points is not None else np.zeros_like(scales, dtype=np.int8)
+
+    for i in range(flat_count):
+        byte = int(packed_u8[i // 2])
+        raw = (byte >> 4) & 0x0F if i % 2 == 0 else byte & 0x0F
+        int4_val = raw - 16 if raw > 7 else raw
+        group_idx = i // gs
+        output[i] = (int4_val - int(zps[group_idx])) * scales[group_idx]
+
+    return output.reshape(shape)
+
+
+def _dequantize_int8_swift_order(q_data, shape, scales, zero_points):
+    """Mirror QuantizedTensor.dequantize() for 2D INT8 per-channel tensors."""
+    rows, cols = shape
+    q = q_data.reshape(shape).astype(np.float32)
+    zps = zero_points if zero_points is not None else np.zeros_like(scales, dtype=np.int8)
+    output = np.zeros(shape, dtype=np.float32)
+    for row in range(rows):
+        for col in range(cols):
+            output[row, col] = (q[row, col] - int(zps[col])) * scales[col]
+    return output
 
 
 class TestModelLoading:
@@ -371,6 +489,117 @@ class TestQuantization:
         assert quantized.shape == float_tensor.shape
         assert len(scales) == 128  # Num output channels
 
+    def test_int4_2d_weights_are_transposed_before_packing(self):
+        """INT4 2D weights must store packed bytes in TinyBrain [in, out] order."""
+        group_size = 2
+        hidden_dim = 6
+        kv_dim = 2
+        intermediate_dim = 8
+
+        # PyTorch linear weights are [out, in]. Distinct values make any missed
+        # transpose visible after Swift-style flat dequantization into [in, out].
+        k_weight = np.array(
+            [[out * 1000 + i for i in range(hidden_dim)] for out in range(kv_dim)],
+            dtype=np.float32,
+        )
+
+        config = ModelConfig(
+            num_layers=1,
+            hidden_dim=hidden_dim,
+            num_heads=3,
+            num_kv_heads=1,
+            vocab_size=4,
+            intermediate_dim=intermediate_dim,
+        )
+        weights = {
+            'embeddings': np.zeros((config.vocab_size, hidden_dim), dtype=np.float32),
+            'layers': [{
+                'q_proj': np.ones((hidden_dim, hidden_dim), dtype=np.float32),
+                'k_proj': k_weight,
+                'v_proj': np.ones((kv_dim, hidden_dim), dtype=np.float32),
+                'o_proj': np.ones((hidden_dim, hidden_dim), dtype=np.float32),
+                'gate_proj': np.ones((intermediate_dim, hidden_dim), dtype=np.float32),
+                'up_proj': np.ones((intermediate_dim, hidden_dim), dtype=np.float32),
+                'down_proj': np.ones((hidden_dim, intermediate_dim), dtype=np.float32),
+                'input_layernorm': np.ones((hidden_dim,), dtype=np.float32),
+                'post_attention_layernorm': np.ones((hidden_dim,), dtype=np.float32),
+            }],
+            'lm_head': np.ones((config.vocab_size, hidden_dim), dtype=np.float32),
+        }
+
+        with tempfile.NamedTemporaryFile(suffix='.tbf', delete=False) as f:
+            int4_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.tbf', delete=False) as f:
+            int8_path = f.name
+
+        try:
+            write_tbf_format(weights, config, int4_path,
+                             quantize_mode='int4', group_size=group_size)
+            int4_tensor = _read_tbf_quantized_tensor(int4_path, 'layer_0_attn_k')
+
+            assert int4_tensor['precision'] == 2
+            assert int4_tensor['mode'] == 3
+            assert int4_tensor['group_size'] == group_size
+            assert int4_tensor['shape'] == k_weight.T.shape
+
+            actual_int4 = _dequantize_int4_swift_order(
+                int4_tensor['data'],
+                int4_tensor['shape'],
+                int4_tensor['scales'],
+                int4_tensor['zero_points'],
+                int4_tensor['group_size'],
+            )
+
+            expected_packed, expected_scales, expected_zps = quantize_int4_per_group(
+                np.ascontiguousarray(k_weight.T),
+                group_size=group_size,
+            )
+            expected_int4 = _dequantize_int4_swift_order(
+                expected_packed,
+                k_weight.T.shape,
+                expected_scales,
+                expected_zps,
+                group_size,
+            )
+            np.testing.assert_allclose(actual_int4, expected_int4, atol=1e-6)
+
+            expected_group = (
+                np.arange(k_weight.size, dtype=np.int64) // group_size
+            ).reshape(k_weight.T.shape)
+            expected_error_bound = expected_scales[expected_group] / 2.0 + 1e-6
+            assert np.all(np.abs(actual_int4 - k_weight.T) <= expected_error_bound), (
+                f"INT4 dequantized matrix should approximate W.T.\n"
+                f"actual:\n{actual_int4}\nexpected W.T:\n{k_weight.T}"
+            )
+
+            # INT8 already follows this convention; keep it as a regression guard
+            # and as a contrast with the INT4 packing path.
+            write_tbf_format(weights, config, int8_path, quantize_mode='int8')
+            int8_tensor = _read_tbf_quantized_tensor(int8_path, 'layer_0_attn_k')
+            assert int8_tensor['precision'] == 1
+            assert int8_tensor['shape'] == k_weight.T.shape
+
+            actual_int8 = _dequantize_int8_swift_order(
+                int8_tensor['data'],
+                int8_tensor['shape'],
+                int8_tensor['scales'],
+                int8_tensor['zero_points'],
+            )
+            expected_q, expected_int8_scales, expected_int8_zps = quantize_int8_per_channel(k_weight)
+            expected_int8 = _dequantize_int8_swift_order(
+                np.ascontiguousarray(expected_q.T),
+                k_weight.T.shape,
+                expected_int8_scales,
+                expected_int8_zps,
+            )
+            np.testing.assert_allclose(actual_int8, expected_int8, atol=1e-6)
+
+            int8_error_bound = expected_int8_scales[np.arange(kv_dim)] / 2.0 + 1e-6
+            assert np.all(np.abs(actual_int8 - k_weight.T) <= int8_error_bound[np.newaxis, :])
+        finally:
+            os.unlink(int4_path)
+            os.unlink(int8_path)
+
 
 class TestTBFFormat:
     """Test TBF format compliance with docs/tbf-format-spec.md"""
@@ -481,4 +710,3 @@ class TestCLI:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
-
