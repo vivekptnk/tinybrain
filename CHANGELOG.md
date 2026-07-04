@@ -4,6 +4,46 @@ All notable changes to TinyBrain are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- F13 constrained generation is wired into `ModelRunner.generateStream` for strict schema-valid tool calls (`9f4c956`); Qwen tool-call smokes and two adversarial judging rounds verified the guarantee.
+- New `TinyBrainAgent` module (`562ff96`) with an `AgentLoop` actor for plan -> act -> observe, `ToolRegistry`, `SandboxPolicy`, built-in `retrieve` / `read_file` / `list_dir` / `write_file` / `current_time` tools, and `AgentTraceObserver` events.
+- ChatDemo Agent Mode (`d2d0bec`) with a Chat|Agent header toggle, `AgentWorkbenchView`, live `AgentTracePanel`, 15-note bundled demo corpus, on-device `NLEmbeddingProvider` retrieval when available, and a truthful disabled state for the toy model.
+
+### Changed
+
+- ProximaKit now resolves from semver `from: "1.8.0"` instead of a revision pin (`2283a2a`).
+- Retrieval now applies a relevance floor (`maxDistance = 0.85`) and the agent answers "I don't know" on vague queries instead of grounding on distant noise (`791e2c9`); both behaviors were real-model verified.
+
+### Fixed
+
+- Qwen tool observations now render with canonical `<tool_response>` ChatML wrapping, so retrieved facts survive into the final answer (`13b5c1e`).
+- `temperature = 0` now means deterministic greedy after repetition penalty; the previous `topK = nil` path could still sample stochastically (`b4894a9`).
+
+### Performance
+
+- Decode attention was vectorized with Accelerate and top-k changed from full sort to `O(V log k)` bounded heap while preserving byte-identical greedy output (`b4894a9`).
+- Batched prompt prefill (`5bf0ac7`) reduced release-build TTFT on M4 Max for ~210-230-token prompts with argmax-identical output:
+  - Qwen 1.5B: 49715ms -> 1177ms
+  - TinyLlama: 41362ms -> 941ms
+  - Gemma 2B: 42302ms -> 2250ms
+
+### Security
+
+- `SandboxPolicy` defaults to deny-all writes and canonicalizes paths symlink-safely before root checks. A write-file symlink escape found during security judging was fixed, then 15+ independent escape attacks were denied (`562ff96`).
+
+### Verification
+
+- Current gate: 606 tests, 0 failures.
+
+### Known limitations
+
+- No `tinybrain-agent` CLI is shipped yet; the agent runtime core and ChatDemo Agent Mode are present.
+- `docs/agent.md` is still pending.
+- Multi-tool `.auto` turns still generate unconstrained and are parsed after the fact, not masked by F13.
+
 ## [0.2.0] — 2026-07-04
 
 ### Added
@@ -161,5 +201,6 @@ First public release. Swift-native on-device LLM inference for Apple Silicon wit
 - 7 Python tests passing for model converter.
 - TDD methodology used throughout.
 
+[Unreleased]: https://github.com/vivekptnk/tinybrain/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/vivekptnk/tinybrain/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/vivekptnk/tinybrain/releases/tag/v0.1.0

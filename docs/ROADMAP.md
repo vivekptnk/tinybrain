@@ -6,7 +6,7 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ## v0.2.0 — Precision & Coverage
 
-**Status:** In progress  
+**Status:** Released 2026-07-04
 **Theme:** Production-grade quantization, broader model support, ecosystem bridges
 
 ### Quantization
@@ -21,7 +21,7 @@ This document tracks planned and in-progress work across TinyBrain versions. For
 
 ### Language & Tokenization
 
-- **Tool calling** — structured generation with function-call schema enforcement.
+- **Tool calling** — v0.2.0 shipped the tool-calling primitives; HEAD now includes F13, which wires strict constrained generation into the decode path for schema-valid tool-call JSON.
 - **Gemma RMSNorm variant** — `(1 + w) * x` normalization correctly implemented for Gemma 2B.
 - **Gemma 2B + Phi-2 2.7B model coverage** — routed via `tokenizer.json` + HuggingFace adapter (binary SentencePiece deferred; see v0.2.1).
 
@@ -85,7 +85,7 @@ The current `HuggingFaceAdapter` handles `tokenizer.json` (BPE text format). Bin
 ### Retrieval & Agents
 
 - **On-device RAG shipped early in 0.2.0-dev** — `TinyBrainRAG` and `tinybrain-rag` moved out of the v0.3.0 plan. See [`docs/rag.md`](rag.md).
-- **TB-011 private agent runtime** — design draft exists; next step is a local tool loop that can call the shipped `retrieve` tool.
+- **TB-011 private agent runtime shipped at HEAD** — `TinyBrainAgent` runtime core and ChatDemo Agent Mode are implemented. Outstanding: `tinybrain-agent` CLI and `docs/agent.md`.
 - **Context extension** — RoPE scaling or sliding-window support to move beyond the current 2048-token budget.
 - **Config-driven RoPE theta** — load model-specific rotary base values from config instead of relying on defaults.
 - **INT4 `lm_head` precision enhancement** — improve output projection quality without giving up the main INT4 memory win.

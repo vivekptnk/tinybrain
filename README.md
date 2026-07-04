@@ -9,13 +9,13 @@
     <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.10+-F05138?logo=swift&logoColor=white" alt="Swift" /></a>
     <a href="https://developer.apple.com"><img src="https://img.shields.io/badge/Apple_Silicon-M1_M2_M3_M4-000000?logo=apple&logoColor=white" alt="Apple Silicon" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
-    <img src="https://img.shields.io/badge/tests-500%2B_passing-brightgreen.svg" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-606_passing-brightgreen.svg" alt="Tests" />
   </p>
 </p>
 
 ---
 
-TinyBrain runs large language models **entirely on your device** — no server, no API key, no internet. It's written in pure Swift with Metal GPU acceleration, and it's the only tool that lets you **watch the transformer think in real-time**.
+TinyBrain runs large language models **entirely on your device** — no server, no API key, no internet. It's written in pure Swift with Metal GPU acceleration, and the demo app can show the transformer internals while it generates.
 
 > *What [micrograd](https://github.com/karpathy/micrograd) did for understanding backprop, TinyBrain does for on-device LLM inference.*
 
@@ -94,6 +94,25 @@ Sources:
 
 ---
 
+## Agent Mode (New)
+
+TinyBrain now includes a private on-device agent path in `tinybrain-chat`: switch the header segmented control from **Chat** to **Agent**. The agent runs a plan -> act -> observe loop over local notes, using `TinyBrainAgent` for the loop and `TinyBrainRAG` for retrieval. The ChatDemo Agent UI currently registers the `retrieve` tool over a bundled demo corpus; the library module also includes sandbox-gated file tools for adopters who wire their own grants.
+
+Agent Mode needs a chat/instruct model that can emit tool calls. `Qwen2.5-1.5B-Instruct` is the default real model path; the built-in toy model shows a disabled state instead of faking tool use.
+
+What the UI shows:
+
+| Surface | What It Shows |
+|---------|---------------|
+| **Demo Corpus** | 15 bundled notes indexed into 15 chunks with `NLEmbeddingProvider` when available |
+| **Trace Panel** | Planning steps, tool-call JSON, tool results, and final answer |
+| **Retrieved Passages** | Source paths, excerpts, and lower-is-better vector distances |
+| **Final Answer** | The model's answer after observing retrieved evidence |
+
+The retrieval tool applies a relevance floor (`maxDistance = 0.85` by default). When the best passage is too far away, real-model verification shows the agent answers honestly that it does not know instead of grounding on noise.
+
+---
+
 ## Get Started (5 minutes)
 
 ### What You Need
@@ -133,20 +152,23 @@ To get actual language output, you need a real model. Here's how:
 
 ```bash
 # Install Python dependencies (one time)
-pip install torch safetensors
+pip install torch safetensors huggingface_hub
 
-# Download TinyLlama (1.1B parameters, ~2GB download)
-huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir Models/tinyllama-raw
+# Download Qwen2.5-1.5B-Instruct
+huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct --local-dir Models/qwen2.5-1.5b-raw
 
-# Convert to TinyBrain format (~30 seconds)
+# Convert to TinyBrain format
 python3 Scripts/convert_model.py \
-  --input Models/tinyllama-raw/model.safetensors \
-  --output Models/tinyllama-1.1b-int8.tbf \
+  --input Models/qwen2.5-1.5b-raw \
+  --output Models/qwen2.5-1.5b-int8.tbf \
+  --quantize int8 \
   --auto-config
 
 # Run with the real model
 swift run tinybrain-chat
 ```
+
+At launch, ChatDemo looks for `Models/qwen2.5-1.5b-int8.tbf` first, then `Models/tinyllama-1.1b-int8.tbf`, then falls back to the toy model.
 
 ### Step 4: Open in Xcode (Best Experience)
 
@@ -279,14 +301,15 @@ All of this happens **on your device**, using Metal GPU acceleration. No interne
 ```
 ┌──────────────────────────────────────┐
 │      TinyBrain Chat (SwiftUI)        │
-│  ┌───────────┐  ┌──────────────────┐ │
-│  │ Chat View  │  │  X-Ray Panel     │ │
-│  │            │  │  Attention map   │ │
-│  │            │  │  Token probs     │ │
-│  │            │  │  Layer norms     │ │
-│  │            │  │  KV cache grid   │ │
-│  └───────────┘  └──────────────────┘ │
+│  ┌───────────┐ ┌──────────┐ ┌──────┐ │
+│  │ Chat View │ │ Agent UI │ │ X-Ray│ │
+│  └───────────┘ └──────────┘ └──────┘ │
 └───────────┬──────────────────────────┘
+            v
+┌───────────────────────────────────────┐
+│ TinyBrainAgent · TinyBrainRAG         │
+│ Tool loop · Trace observer · Retrieval│
+└───────────┬───────────────────────────┘
             v
 ┌───────────────────────────────────────┐
 │          TinyBrainRuntime             │
@@ -307,6 +330,7 @@ All of this happens **on your device**, using Metal GPU acceleration. No interne
 | `TinyBrainMetal` | GPU acceleration via Metal shaders (with automatic CPU fallback) |
 | `TinyBrainTokenizer` | Converts text to/from token IDs (supports HuggingFace format) |
 | `TinyBrainRAG` | Local retrieval-augmented generation over ProximaKit indexes |
+| `TinyBrainAgent` | On-device plan -> act -> observe loop, tool registry, sandbox policy, and trace events |
 | `TinyBrainDemo` | The SwiftUI chat app with X-Ray visualizations |
 | `TinyBrainBench` | Command-line benchmarking tool |
 
@@ -324,6 +348,9 @@ Measured on MacBook Pro M4 Max:
 | Maximum context length | 2048 tokens |
 | TinyLlama 1.1B memory (INT8) | 1.1 GB (75% less than FP32) |
 | Gemma 2B memory (INT4, group=32) | Not yet benchmarked — tracked for v0.2.1 |
+| Batched prefill TTFT, Qwen 1.5B INT8 | 49715ms -> 1177ms (release, M4 Max, ~210-230-token prompt, argmax-identical) |
+| Batched prefill TTFT, TinyLlama INT8 | 41362ms -> 941ms (same gate) |
+| Batched prefill TTFT, Gemma 2B INT8 | 42302ms -> 2250ms (same gate) |
 | Quantization accuracy loss (INT8) | Less than 1% |
 | Quantization accuracy loss (INT4) | 8.7% (Gemma 2B) / 13.3% (TinyLlama) measured at group=32 RTN, output head INT8 — <=6% target moves to v0.2.1 (GPTQ/AWQ) |
 
@@ -335,7 +362,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full versioned milestone plan. 
 
 | Version | Status | Highlights |
 |---------|--------|-----------|
-| **v0.2.0** | In progress | INT4 quantization (group=32), FlashAttention kernel parity tests, speculative decoding, Gemma/Phi-2 coverage, ProximaKit + Cartographer bridges |
+| **v0.2.0** | Released | INT4 quantization (group=32), FlashAttention kernel parity tests, speculative decoding, Gemma/Phi-2 coverage, ProximaKit + Cartographer bridges |
+| **Unreleased** | HEAD | Batched prompt prefill, F13 constrained generation, TinyBrainAgent runtime core, and ChatDemo Agent Mode |
 | **v0.2.1** | Planned | GPTQ/AWQ for <=6% INT4 perplexity exit bar (<=1% stretch), binary SentencePiece tokenizer |
 | **v0.3.0** | Planned | iOS 17 deployment, Mistral/Llama-3 support, FlashAttention inference integration, 8K context, TikToken adapter |
 
@@ -349,10 +377,31 @@ TinyBrain works with any HuggingFace model that has a `tokenizer.json`. Once con
 
 | Model | Parameters | Quantization | Status |
 |-------|-----------|--------------|--------|
-| TinyLlama 1.1B Chat | 1.1B | INT8 | Tested and working (default) |
+| Qwen2.5-1.5B-Instruct | 1.5B | INT8 | Default chat/instruct model; ChatDemo loads `Models/qwen2.5-1.5b-int8.tbf` first |
+| TinyLlama 1.1B Chat | 1.1B | INT8 | Tested and supported; fallback after Qwen |
 | Gemma 2B | 2B | INT4 (group=32) | Runs locally (manual validation on M4 Max; not CI-enforced — see docs/ROADMAP.md) |
 | Phi-2 (Microsoft) | 2.7B | INT4 (group=32) | Runtime + converter ready; run conversion to get `.tbf` |
 | Llama 2/3 | Various | INT8/INT4 | Compatible (same weight format) |
+
+**Converting Qwen2.5-1.5B-Instruct (default chat path):**
+```bash
+huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct --local-dir Models/qwen2.5-1.5b-raw
+python3 Scripts/convert_model.py \
+  --input Models/qwen2.5-1.5b-raw \
+  --output Models/qwen2.5-1.5b-int8.tbf \
+  --quantize int8 \
+  --auto-config
+```
+
+**Converting TinyLlama 1.1B Chat:**
+```bash
+huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir Models/tinyllama-raw
+python3 Scripts/convert_model.py \
+  --input Models/tinyllama-raw \
+  --output Models/tinyllama-1.1b-int8.tbf \
+  --quantize int8 \
+  --auto-config
+```
 
 **Converting Gemma 2B (requires HuggingFace access grant):**
 ```bash
@@ -401,11 +450,12 @@ tinybrain/
 │   ├── TinyBrainMetal/         # GPU backend
 │   ├── TinyBrainTokenizer/     # Tokenization
 │   ├── TinyBrainRAG/           # On-device RAG pipeline
+│   ├── TinyBrainAgent/         # On-device agent loop, tools, sandbox, trace events
 │   ├── TinyBrainDemo/          # SwiftUI app + X-Ray views
 │   └── TinyBrainBench/         # Benchmarks
 ├── Examples/ChatDemo/          # App entry point
 ├── Examples/RAGDemo/           # RAG CLI entry point
-├── Tests/                      # 500+ tests
+├── Tests/                      # 606-test gate
 ├── Scripts/                    # Model converter (Python)
 └── docs/                       # Architecture documentation
 ```
@@ -418,7 +468,7 @@ tinybrain/
 swift test --skip TinyBrainDemoTests
 ```
 
-> The `--skip TinyBrainDemoTests` is needed because of a known Xcode beta linker issue with SwiftUI test targets. All 500+ other tests pass.
+> The `--skip TinyBrainDemoTests` is needed because of a known Xcode beta linker issue with SwiftUI test targets. The current gate is 606 tests, 0 failures.
 
 ---
 

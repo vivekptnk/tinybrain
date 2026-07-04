@@ -1,11 +1,11 @@
 # TinyBrain Architecture Overview
 
-**Version:** 3.0
-**Last Updated:** 2026-07-03 (0.2.0-dev documentation sweep)
+**Version:** 3.1
+**Last Updated:** 2026-07-04 (agent-era documentation sweep)
 **Status:** Living Document
 
-**Latest Milestone:** 0.2.0-dev — On-Device RAG, tokenizer parity, and model-accuracy fixes
-**Test Status:** 500+ tests passing | **Tasks:** v0.2.0-dev in progress
+**Latest Milestone:** HEAD after 0.2.0 — batched prefill, F13 constrained generation, TinyBrainAgent, and Agent Mode
+**Test Status:** 606 tests, 0 failures | **Tasks:** v0.2.0 released; TB-011 core shipped, CLI/docs outstanding
 
 ---
 
@@ -37,8 +37,22 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 ┌─────────────────────────────────────────────────────────┐
 │              Application Layer (SwiftUI)                │
 │  ┌────────────────┐  ┌──────────────┐  ┌─────────────┐ │
-│  │ TinyBrain Chat │  │ Metrics View │  │ Model Picker│ │
+│  │ TinyBrain Chat │  │ Agent Mode   │  │ Model Picker│ │
 │  └────────────────┘  └──────────────┘  └─────────────┘ │
+│  ┌────────────────┐  ┌──────────────┐                  │
+│  │ X-Ray Panel    │  │ Trace Panel  │                  │
+│  └────────────────┘  └──────────────┘                  │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────────────┐
+│                Agent + Retrieval Layer                  │
+│  ┌────────────────────┐      ┌───────────────────────┐  │
+│  │  TinyBrainAgent    │      │     TinyBrainRAG      │  │
+│  │  • AgentLoop actor │      │  • Chunk/index/search │  │
+│  │  • ToolRegistry    │      │  • RetrievalTool      │  │
+│  │  • SandboxPolicy   │      │  • Prompt/citations   │  │
+│  │  • Trace observer  │      │  • ProximaKit HNSW    │  │
+│  └────────────────────┘      └───────────────────────┘  │
 └─────────────────┬───────────────────────────────────────┘
                   │
 ┌─────────────────▼───────────────────────────────────────┐
@@ -81,6 +95,12 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 - **View Models**: State management via `@ObservableObject`
 - **Metrics Display**: Real-time performance visualization
 - **X-Ray Panel**: Live transformer visualization
+- **Agent Trace Panel**: Live plan -> act -> observe timeline for Agent Mode
+
+#### Agent + Retrieval Layer
+- **TinyBrainAgent**: On-device agent loop, tool registry, sandbox policy, built-in tools, and trace events
+- **TinyBrainRAG**: Local document chunking, ProximaKit HNSW retrieval, prompt building, citations, and the shared `retrieve` tool
+- **TinyBrainProximaKit**: Bridge from TinyBrain embeddings to ProximaKit's `TextEmbedder` protocol
 
 #### Runtime Layer
 - **ModelRunner**: Orchestrates the inference pipeline
@@ -94,6 +114,27 @@ TinyBrain is a Swift-native runtime for running large language models (LLMs) ent
 - **Metal**: GPU-accelerated tensor operations (matmul, INT8 dequant)
 - **Accelerate**: CPU fallback (BLAS, vDSP)
 - **Core ML**: Optional ANE acceleration (future)
+
+### 2.3 Component Table
+
+| Component | Primary Location | Responsibility | Current Status |
+|-----------|------------------|----------------|----------------|
+| ChatDemo | `Examples/ChatDemo`, `Sources/TinyBrainDemo` | SwiftUI chat, X-Ray views, model picker, Agent Mode | Shipped |
+| TinyBrainAgent | `Sources/TinyBrainAgent` | `AgentLoop` actor, tool registry, sandbox policy, built-in tools, trace events | Core shipped; CLI/docs outstanding |
+| TinyBrainRAG | `Sources/TinyBrainRAG` | Chunking, indexing, retrieval, prompt/citation helpers, `retrieve` tool | Shipped |
+| TinyBrainRuntime | `Sources/TinyBrainRuntime` | Model loading, generation, constrained decoding, sampling, quantized inference | Shipped |
+| TinyBrainTokenizer | `Sources/TinyBrainTokenizer` | BPE and HuggingFace `tokenizer.json` loading, Qwen ByteLevel parity | Shipped |
+| TinyBrainMetal | `Sources/TinyBrainMetal` | Metal kernels and CPU fallback boundaries | Kernel parity shipped; inference-path integration remains selective |
+
+### 2.4 Agent Architecture
+
+`TinyBrainAgent` turns the runtime into a local plan -> act -> observe loop. `AgentLoop` is an actor so access to the non-Sendable `ModelRunner` stays serialized. Each step builds a tool-aware prompt, generates either one tool call or a final answer, executes the selected tool through `ToolRegistry`, appends the observation, and emits trace events.
+
+F13 is the reliability boundary for tool calls: when strict constrained generation is active, logits are masked so a tool turn must stay inside the declared JSON schema. TB-011 deliberately keeps one tool per step; multi-tool `.auto` turns are still parsed after generation rather than masked.
+
+Effects cross a separate sandbox boundary. `SandboxPolicy` denies writes by default, resolves paths with symlink-safe canonicalization before root checks, caps reads, and audits allowed and denied operations. A symlink write escape found during security judging was fixed; the follow-up security judge denied 15+ independent escape attacks.
+
+`AgentTraceObserver` mirrors the X-Ray observer pattern at the agent level. ChatDemo's Agent Mode consumes those events in `AgentTracePanel`, showing planning steps, proposed tool calls, retrieved passages with lower-is-better distances, tool results, budget exhaustion, and the final answer.
 
 ---
 
