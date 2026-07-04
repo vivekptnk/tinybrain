@@ -138,6 +138,8 @@ final class ChatViewModelTests: XCTestCase {
         let config = viewModel.currentSamplerConfig
         
         XCTAssertGreaterThan(config.temperature, 0, "Temperature should be positive")
+        XCTAssertEqual(config.temperature, 0.4, accuracy: 0.001, "Default chat sampling should be focused enough to reduce open-prompt rambling")
+        XCTAssertEqual(config.repetitionPenalty, 1.2, accuracy: 0.001)
     }
     
     func testSamplerPresets() {
@@ -221,6 +223,57 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.messages.last?.content.contains("Helloworld") ?? true)
         XCTAssertFalse(viewModel.isGenerating)
     }
+
+    func testZephyrChatTemplateMatchesTinyLlamaFormatExactly() {
+        let messages = [Message(role: .user, content: "hi")]
+
+        let formatted = TinyBrainChatTemplate.format(messages: messages)
+        let expected = """
+        <|system|>
+        \(TinyBrainChatDefaults.systemPrompt)</s>
+        <|user|>
+        hi</s>
+        <|assistant|>
+
+        """
+
+        XCTAssertEqual(formatted, expected)
+        XCTAssertEqual(Array(formatted.utf8), Array(expected.utf8), "Template bytes must not gain stray spaces, missing newlines, or misplaced </s> markers")
+    }
+
+    func testMultiTokenStopMatcherStopsAtEncodedUserTurnBoundary() {
+        let tokenizer = MarkerTokenizer()
+        let userBoundary = tokenizer.encode("<|user|>")
+        let stopSequences = TinyBrainChatStops.stopSequences(
+            for: tokenizer,
+            promptStyle: .zephyrChat,
+            eosTokens: [2]
+        )
+        XCTAssertTrue(stopSequences.contains(userBoundary), "Chat stop sequences must be encoded with the active tokenizer")
+
+        var matcher = StopSequenceMatcher<Int>(
+            stopSequences: [userBoundary],
+            tokenID: { $0 }
+        )
+        var emitted: [Int] = []
+        var stopped = false
+
+        tokenLoop: for token in [101] + userBoundary + [102] {
+            switch matcher.append(token) {
+            case .emit(let safeTokens):
+                emitted.append(contentsOf: safeTokens)
+            case .stop(let safeTokens):
+                emitted.append(contentsOf: safeTokens)
+                stopped = true
+                break tokenLoop
+            }
+        }
+
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(emitted, [101], "Boundary tokens should be consumed as the stop signal, not emitted to the visible answer")
+        XCTAssertFalse(emitted.contains(userBoundary[0]))
+        XCTAssertFalse(emitted.contains(userBoundary[1]))
+    }
     
     // MARK: - Error Handling Tests
     
@@ -266,6 +319,51 @@ final class ChatViewModelTests: XCTestCase {
                       "Telemetry should reset with conversation")
     }
 
+    func testTokenizerVocabCompatibilityAcceptsExactTinyLlamaVocab() {
+        let result = TokenizerVocabularyCompatibility.evaluate(
+            tokenizerVocab: 32_000,
+            modelVocab: 32_000
+        )
+
+        XCTAssertEqual(result, .compatible)
+        XCTAssertTrue(result.isCompatible)
+    }
+
+    func testTokenizerVocabCompatibilityAcceptsGemmaPaddedEmbeddingRows() {
+        let result = TokenizerVocabularyCompatibility.evaluate(
+            tokenizerVocab: 255_933,
+            modelVocab: 256_000
+        )
+
+        XCTAssertEqual(result, .padded(gap: 67, allowedGap: 256))
+        XCTAssertTrue(result.isCompatible)
+    }
+
+    func testTokenizerVocabCompatibilityRejectsExcessivePaddingGap() {
+        let result = TokenizerVocabularyCompatibility.evaluate(
+            tokenizerVocab: 50_000,
+            modelVocab: 256_000
+        )
+
+        XCTAssertEqual(result, .excessivePadding(
+            tokenizerVocab: 50_000,
+            modelVocab: 256_000,
+            gap: 206_000,
+            allowedGap: 256
+        ))
+        XCTAssertFalse(result.isCompatible)
+    }
+
+    func testTokenizerVocabCompatibilityRejectsTokenizerLargerThanModel() {
+        let result = TokenizerVocabularyCompatibility.evaluate(
+            tokenizerVocab: 32_001,
+            modelVocab: 32_000
+        )
+
+        XCTAssertEqual(result, .tokenizerTooLarge(tokenizerVocab: 32_001, modelVocab: 32_000))
+        XCTAssertFalse(result.isCompatible)
+    }
+
     func testSwitchModelRejectsTokenizerVocabMismatchAndKeepsPreviousModel() async throws {
         viewModel.promptText = "keep this"
         viewModel.addUserMessage()
@@ -279,7 +377,7 @@ final class ChatViewModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
         let modelURL = modelsDirectory.appendingPathComponent("gemma-2b-int8.tbf")
-        try makeArgmaxModel(argmaxToken: 1, vocabSize: 8).save(to: modelURL.path)
+        try makeArgmaxModel(argmaxToken: 1, vocabSize: 512).save(to: modelURL.path)
         try writeTokenizer(vocabSize: 4, to: gemmaRawDirectory.appendingPathComponent("tokenizer.json"))
 
         await viewModel.switchModel(ModelInfo(path: modelURL.path))
@@ -289,6 +387,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.messages, originalMessages, "A failed switch should not clear the active conversation")
         XCTAssertTrue(viewModel.hasError)
         XCTAssertTrue(viewModel.errorMessage.contains("Tokenizer vocabulary mismatch"))
+        XCTAssertTrue(viewModel.errorMessage.contains("exceeds the supported padded-vocab window"))
         XCTAssertTrue(viewModel.errorMessage.contains("Decoding with a mismatched tokenizer would produce garbage"))
     }
 
@@ -434,5 +533,26 @@ final class ChatViewModelTests: XCTestCase {
         }
         """
         try tokenizerJSON.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private struct MarkerTokenizer: Tokenizer {
+        let vocabularySize = 128
+
+        func encode(_ text: String) -> [Int] {
+            switch text {
+            case "<|user|>":
+                return [40, 41]
+            case "<|system|>":
+                return [42, 43, 44]
+            case "</s>":
+                return [2]
+            default:
+                return [10]
+            }
+        }
+
+        func decode(_ tokens: [Int]) -> String {
+            tokens.map(String.init).joined(separator: " ")
+        }
     }
 }

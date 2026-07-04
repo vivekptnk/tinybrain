@@ -89,7 +89,11 @@ public final class ModelPickerViewModel: ObservableObject {
             }.value
 
             let tokenizer = try TokenizerLoader.loadTokenizer(forModelAt: path)
-            try validateTokenizer(tokenizer, weights: weights, modelPath: path)
+            try TokenizerVocabularyCompatibility.validate(
+                tokenizerVocab: tokenizer.vocabularySize,
+                modelVocab: weights.config.vocabSize,
+                modelPath: path
+            )
 
             return (weights, tokenizer)
         } catch {
@@ -110,21 +114,6 @@ public final class ModelPickerViewModel: ObservableObject {
             maxSeqLen: 256
         )
         return ModelWeights.makeToyModel(config: config, seed: 42)
-    }
-
-    private func validateTokenizer(
-        _ tokenizer: any Tokenizer,
-        weights: ModelWeights,
-        modelPath: String
-    ) throws {
-        let tokenizerVocab = tokenizer.vocabularySize
-        let modelVocab = weights.config.vocabSize
-        guard tokenizerVocab == modelVocab else {
-            let modelName = URL(fileURLWithPath: modelPath).lastPathComponent
-            throw ModelPickerLoadError(
-                "Tokenizer vocabulary mismatch for \(modelName): tokenizer has \(tokenizerVocab) tokens, model expects \(modelVocab). Decoding with a mismatched tokenizer would produce garbage."
-            )
-        }
     }
 
     private func userFacingLoadError(_ error: Error, modelPath: String) -> String {
@@ -149,5 +138,73 @@ private struct ModelPickerLoadError: Error, CustomStringConvertible, LocalizedEr
 
     var errorDescription: String? {
         description
+    }
+}
+
+/// Validates whether a tokenizer can safely pair with a model vocabulary.
+///
+/// Some model files pad their embedding table above the real tokenizer entry
+/// count. That is harmless when every token ID the tokenizer can emit is below
+/// `tokenizerVocab <= modelVocab`: the extra model rows are unreachable padding,
+/// not a decode mismatch or an out-of-bounds risk.
+enum TokenizerVocabularyCompatibility: Equatable {
+    case compatible
+    case padded(gap: Int, allowedGap: Int)
+    case tokenizerTooLarge(tokenizerVocab: Int, modelVocab: Int)
+    case excessivePadding(tokenizerVocab: Int, modelVocab: Int, gap: Int, allowedGap: Int)
+
+    var isCompatible: Bool {
+        switch self {
+        case .compatible, .padded:
+            return true
+        case .tokenizerTooLarge, .excessivePadding:
+            return false
+        }
+    }
+
+    static func allowedPaddingGap(for modelVocab: Int) -> Int {
+        max(256, modelVocab / 1_000)
+    }
+
+    static func evaluate(tokenizerVocab: Int, modelVocab: Int) -> TokenizerVocabularyCompatibility {
+        if tokenizerVocab == modelVocab {
+            return .compatible
+        }
+
+        if tokenizerVocab > modelVocab {
+            return .tokenizerTooLarge(tokenizerVocab: tokenizerVocab, modelVocab: modelVocab)
+        }
+
+        let gap = modelVocab - tokenizerVocab
+        let allowedGap = allowedPaddingGap(for: modelVocab)
+        if gap <= allowedGap {
+            return .padded(gap: gap, allowedGap: allowedGap)
+        }
+
+        return .excessivePadding(
+            tokenizerVocab: tokenizerVocab,
+            modelVocab: modelVocab,
+            gap: gap,
+            allowedGap: allowedGap
+        )
+    }
+
+    static func validate(tokenizerVocab: Int, modelVocab: Int, modelPath: String) throws {
+        let compatibility = evaluate(tokenizerVocab: tokenizerVocab, modelVocab: modelVocab)
+        guard !compatibility.isCompatible else { return }
+
+        let modelName = URL(fileURLWithPath: modelPath).lastPathComponent
+        switch compatibility {
+        case .compatible, .padded:
+            return
+        case .tokenizerTooLarge:
+            throw ModelPickerLoadError(
+                "Tokenizer vocabulary mismatch for \(modelName): tokenizer has \(tokenizerVocab) tokens, model expects \(modelVocab). The tokenizer could emit token IDs the model cannot embed. Decoding with a mismatched tokenizer would produce garbage."
+            )
+        case .excessivePadding(_, _, let gap, let allowedGap):
+            throw ModelPickerLoadError(
+                "Tokenizer vocabulary mismatch for \(modelName): tokenizer has \(tokenizerVocab) tokens, model expects \(modelVocab). The \(gap)-token gap exceeds the supported padded-vocab window of \(allowedGap), which usually means the wrong tokenizer was paired with the model. Decoding with a mismatched tokenizer would produce garbage."
+            )
+        }
     }
 }

@@ -38,7 +38,7 @@ public final class ChatViewModel: ObservableObject {
     @Published public var errorMessage: String = ""
 
     /// Sampler configuration
-    @Published public var temperature: Float = 0.7
+    @Published public var temperature: Float = TinyBrainChatDefaults.temperature
     @Published public var topK: Int = 40
     @Published public var topP: Float = 0.9
     @Published public var useTopK: Bool = true
@@ -261,20 +261,7 @@ public final class ChatViewModel: ObservableObject {
     
     /// Format conversation history using TinyLlama/Zephyr chat template.
     private func formatChatPrompt() -> String {
-        var prompt = ""
-        // System message
-        prompt += "<|system|>\nYou are a friendly, helpful assistant.</s>\n"
-        // Conversation turns
-        for message in messages {
-            if message.isUser {
-                prompt += "<|user|>\n\(message.content)</s>\n"
-            } else if !message.content.isEmpty {
-                prompt += "<|assistant|>\n\(message.content)</s>\n"
-            }
-        }
-        // Generation prompt
-        prompt += "<|assistant|>\n"
-        return prompt
+        TinyBrainChatTemplate.format(messages: messages)
     }
 
     /// Format a raw completion prompt for base models.
@@ -297,7 +284,7 @@ public final class ChatViewModel: ObservableObject {
     private var activeGenerationMaxTokens: Int {
         switch activePromptStyle {
         case .zephyrChat:
-            return 200
+            return TinyBrainChatDefaults.chatMaxTokens
         case .rawCompletion:
             return 64
         }
@@ -337,6 +324,12 @@ public final class ChatViewModel: ObservableObject {
             stopTokens = []
         }
 
+        let stopSequences = TinyBrainChatStops.stopSequences(
+            for: tokenizer,
+            promptStyle: activePromptStyle,
+            eosTokens: stopTokens
+        )
+
         // Configure generation
         let generationConfig = GenerationConfig(
             maxTokens: activeGenerationMaxTokens,
@@ -356,55 +349,105 @@ public final class ChatViewModel: ObservableObject {
             detokenizer = IncrementalDetokenizer(tokenizer: tokenizer)
         }
 
+        var stopMatcher = StopSequenceMatcher<TokenOutput>(
+            stopSequences: stopSequences,
+            tokenID: { $0.tokenId }
+        )
+        var stoppedBySequence = false
+
         // Stream generation
         for try await output in runner.generateStream(prompt: promptTokens, config: generationConfig) {
             // Check cancellation
             if Task.isCancelled { break }
 
-            if stopTokens.contains(output.tokenId) {
-                break
-            }
-            
-            // Detokenize
-            let text: String
-            if tokenizer != nil {
-                guard let delta = detokenizer?.append(output.tokenId) else {
-                    continue
+            switch stopMatcher.append(output) {
+            case .emit(let outputs):
+                for safeOutput in outputs {
+                    appendGeneratedToken(
+                        safeOutput,
+                        detokenizer: &detokenizer,
+                        responseContent: &responseContent,
+                        assistantIndex: assistantIndex,
+                        assistantID: assistantID
+                    )
                 }
-                text = delta
-            } else {
-                // Fallback: character-based
-                let char = Character(UnicodeScalar(UInt8(output.tokenId % 94 + 33)))
-                text = String(char)
+            case .stop(let outputsBeforeStop):
+                for safeOutput in outputsBeforeStop {
+                    appendGeneratedToken(
+                        safeOutput,
+                        detokenizer: &detokenizer,
+                        responseContent: &responseContent,
+                        assistantIndex: assistantIndex,
+                        assistantID: assistantID
+                    )
+                }
+                stoppedBySequence = true
             }
             
-            responseContent += text
-            
-            // Update message
-            if assistantIndex < messages.count {
-                messages[assistantIndex] = Message(
-                    id: assistantID,
-                    role: .assistant,
-                    content: responseContent,
-                    timestamp: messages[assistantIndex].timestamp
-                )
-            }
-            
-            // Update telemetry
-            telemetry.recordTokenWithProbability(
-                tokenId: output.tokenId,
-                probability: output.probability,
-                at: Date()
-            )
-            telemetry.calculateMetrics()
-
-            // Update X-Ray KV cache visualization
-            if xRay.isEnabled {
-                xRay.kvCachePages = runner.kvCache.pageAllocationStatus()
+            if stoppedBySequence {
+                break
             }
 
             // Small delay for animation smoothness
             try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        }
+
+        if !stoppedBySequence {
+            for safeOutput in stopMatcher.flush() {
+                appendGeneratedToken(
+                    safeOutput,
+                    detokenizer: &detokenizer,
+                    responseContent: &responseContent,
+                    assistantIndex: assistantIndex,
+                    assistantID: assistantID
+                )
+            }
+        }
+    }
+
+    private func appendGeneratedToken(
+        _ output: TokenOutput,
+        detokenizer: inout IncrementalDetokenizer?,
+        responseContent: inout String,
+        assistantIndex: Int,
+        assistantID: UUID
+    ) {
+        // Detokenize
+        let text: String
+        if tokenizer != nil {
+            guard let delta = detokenizer?.append(output.tokenId) else {
+                return
+            }
+            text = delta
+        } else {
+            // Fallback: character-based
+            let char = Character(UnicodeScalar(UInt8(output.tokenId % 94 + 33)))
+            text = String(char)
+        }
+
+        responseContent += text
+
+        // Update message
+        if assistantIndex < messages.count {
+            messages[assistantIndex] = Message(
+                id: assistantID,
+                role: .assistant,
+                content: responseContent,
+                timestamp: messages[assistantIndex].timestamp
+            )
+        }
+
+        // Update telemetry
+        telemetry.recordTokenWithProbability(
+            tokenId: output.tokenId,
+            probability: output.probability,
+            at: Date()
+        )
+        telemetry.calculateMetrics()
+
+        // Update X-Ray KV cache visualization
+        if xRay.isEnabled {
+            xRay.kvCachePages = runner.kvCache.pageAllocationStatus()
         }
     }
     
@@ -518,6 +561,144 @@ public final class ChatViewModel: ObservableObject {
 }
 
 // MARK: - Supporting Types
+
+enum TinyBrainChatDefaults {
+    // TinyLlama-1.1B can still wander; these defaults aim for short, bounded
+    // replies rather than promising high factual quality.
+    static let systemPrompt = "You are TinyBrain, a concise on-device assistant. Answer the user directly in a sentence or two. If you don't know, say so briefly."
+    static let temperature: Float = 0.4
+    static let chatMaxTokens = 128
+}
+
+enum TinyBrainChatTemplate {
+    static func format(
+        messages: [Message],
+        systemPrompt: String = TinyBrainChatDefaults.systemPrompt
+    ) -> String {
+        var prompt = ""
+        prompt += "<|system|>\n\(systemPrompt)</s>\n"
+        for message in messages {
+            if message.isUser {
+                prompt += "<|user|>\n\(message.content)</s>\n"
+            } else if !message.content.isEmpty {
+                prompt += "<|assistant|>\n\(message.content)</s>\n"
+            }
+        }
+        prompt += "<|assistant|>\n"
+        return prompt
+    }
+}
+
+enum TinyBrainChatStops {
+    static let endOfSequenceMarker = "</s>"
+    static let turnBoundaryMarkers = ["<|user|>", "<|system|>"]
+
+    static func stopSequences(
+        for tokenizer: (any Tokenizer)?,
+        promptStyle: ModelPromptStyle,
+        eosTokens: [Int]
+    ) -> [[Int]] {
+        var sequences = eosTokens.map { [$0] }
+
+        guard let tokenizer else {
+            return uniqueSequences(sequences)
+        }
+
+        sequences.append(tokenizer.encode(endOfSequenceMarker))
+
+        guard promptStyle == .zephyrChat else {
+            return uniqueSequences(sequences.filter { !$0.isEmpty })
+        }
+
+        sequences.append(contentsOf: turnBoundaryMarkers.map { tokenizer.encode($0) })
+        return uniqueSequences(sequences.filter { !$0.isEmpty })
+    }
+
+    private static func uniqueSequences(_ sequences: [[Int]]) -> [[Int]] {
+        var seen: Set<String> = []
+        var result: [[Int]] = []
+        for sequence in sequences {
+            let key = sequence.map(String.init).joined(separator: ",")
+            if seen.insert(key).inserted {
+                result.append(sequence)
+            }
+        }
+        return result
+    }
+}
+
+enum StopSequenceDecision<Element> {
+    case emit([Element])
+    case stop([Element])
+}
+
+struct StopSequenceMatcher<Element> {
+    private let stopSequences: [[Int]]
+    private let tokenID: (Element) -> Int
+    private var pending: [Element] = []
+
+    init(stopSequences: [[Int]], tokenID: @escaping (Element) -> Int) {
+        self.stopSequences = stopSequences
+            .filter { !$0.isEmpty }
+            .sorted { $0.count > $1.count }
+        self.tokenID = tokenID
+    }
+
+    mutating func append(_ element: Element) -> StopSequenceDecision<Element> {
+        guard !stopSequences.isEmpty else {
+            return .emit([element])
+        }
+
+        pending.append(element)
+        let ids = pending.map(tokenID)
+
+        if let stopLength = matchingStopSuffixLength(in: ids) {
+            let emitCount = pending.count - stopLength
+            let outputsBeforeStop = Array(pending.prefix(emitCount))
+            pending.removeAll()
+            return .stop(outputsBeforeStop)
+        }
+
+        let keepCount = longestStopPrefixSuffixLength(in: ids)
+        let emitCount = pending.count - keepCount
+        guard emitCount > 0 else {
+            return .emit([])
+        }
+
+        let safeOutputs = Array(pending.prefix(emitCount))
+        pending = Array(pending.suffix(keepCount))
+        return .emit(safeOutputs)
+    }
+
+    mutating func flush() -> [Element] {
+        defer { pending.removeAll() }
+        return pending
+    }
+
+    private func matchingStopSuffixLength(in ids: [Int]) -> Int? {
+        for sequence in stopSequences where ids.count >= sequence.count {
+            if Array(ids.suffix(sequence.count)) == sequence {
+                return sequence.count
+            }
+        }
+        return nil
+    }
+
+    private func longestStopPrefixSuffixLength(in ids: [Int]) -> Int {
+        let maxLength = min(ids.count, stopSequences.map(\.count).max() ?? 0)
+        guard maxLength > 0 else { return 0 }
+
+        for length in stride(from: maxLength, through: 1, by: -1) {
+            let suffix = Array(ids.suffix(length))
+            if stopSequences.contains(where: { sequence in
+                sequence.count >= length && Array(sequence.prefix(length)) == suffix
+            }) {
+                return length
+            }
+        }
+        return 0
+    }
+}
 
 /// Sampler presets for quick configuration
 public enum SamplerPreset {
