@@ -139,9 +139,25 @@ public final class SpeculativeDecoder {
         prompt: [Int],
         config: GenerationConfig = GenerationConfig()
     ) -> AsyncThrowingStream<TokenOutput, Error> {
+        generateStream(prompt: prompt, config: config, tokenLookup: nil)
+    }
+
+    /// Generate a stream of tokens with an optional token lookup for constrained decoding.
+    ///
+    /// Speculative decoding is bypassed whenever an effective output constraint
+    /// is active; draft/verify sampling needs a separate constrained design.
+    public func generateStream(
+        prompt: [Int],
+        config: GenerationConfig = GenerationConfig(),
+        tokenLookup: (any TokenLookup)?
+    ) -> AsyncThrowingStream<TokenOutput, Error> {
+        if config.hasActiveConstraint {
+            return targetRunner.generateStream(prompt: prompt, config: config, tokenLookup: tokenLookup)
+        }
+
         // Fallback: no draft model → standard generation
         guard let draftRunner = draftRunner, specConfig != nil else {
-            return targetRunner.generateStream(prompt: prompt, config: config)
+            return targetRunner.generateStream(prompt: prompt, config: config, tokenLookup: tokenLookup)
         }
 
         let specDepth = specConfig!.speculationDepth

@@ -275,114 +275,182 @@ public final class ModelRunner {
         prompt: [Int],
         config: GenerationConfig = GenerationConfig()
     ) -> AsyncThrowingStream<TokenOutput, Error> {
+        generateStream(prompt: prompt, config: config, tokenLookup: nil)
+    }
+
+    /// Generate stream of tokens using AsyncSequence.
+    ///
+    /// Use the `tokenLookup` overload when `config.outputSchema` or an
+    /// unambiguous single-tool `config.toolCallingConfig` enables constrained
+    /// generation. The lookup is execution context for the active tokenizer; it
+    /// is ignored on the unconstrained path.
+    ///
+    /// - Parameters:
+    ///   - prompt: Initial token IDs.
+    ///   - config: Generation configuration.
+    ///   - tokenLookup: Optional raw token-text lookup for constrained decoding.
+    /// - Returns: AsyncThrowingStream of TokenOutput with rich metadata.
+    public func generateStream(
+        prompt: [Int],
+        config: GenerationConfig = GenerationConfig(),
+        tokenLookup: (any TokenLookup)?
+    ) -> AsyncThrowingStream<TokenOutput, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
-                var mutableConfig = config
+                do {
+                    var mutableConfig = config
+                    var constraintSession = try ConstraintSession.make(
+                        config: mutableConfig,
+                        tokenLookup: tokenLookup
+                    )
 
-                self.reset()
+                    self.reset()
 
-                // Sanitize prompt tokens (clip to valid range)
-                let sanitizedPrompt = prompt.map { max(0, min($0, self.config.vocabSize - 1)) }
+                    // Sanitize prompt tokens (clip to valid range)
+                    let sanitizedPrompt = prompt.map { max(0, min($0, self.config.vocabSize - 1)) }
 
-                guard mutableConfig.maxTokens > 0 else {
-                    continuation.finish()
-                    return
-                }
+                    guard mutableConfig.maxTokens > 0 else {
+                        if constraintSession != nil {
+                            throw GenerationError.constrainedGenerationIncomplete
+                        }
+                        continuation.finish()
+                        return
+                    }
 
-                // Process prompt. Batched prefill returns the final prompt
-                // position logits; the serial fallback warms all but the last
-                // token and lets the decode loop step the last token.
-                var currentToken = sanitizedPrompt.last ?? 0
-                var prefetchedLogits: Tensor<Float>?
-                if !sanitizedPrompt.isEmpty {
-                    if DecodePerfFlags.disableBatchedPrefill ||
-                        sanitizedPrompt.count > self.config.maxSeqLen ||
-                        !self.supportsBatchedPrefill() {
-                        for token in sanitizedPrompt.dropLast() {
+                    // Process prompt. Batched prefill returns the final prompt
+                    // position logits; the serial fallback warms all but the last
+                    // token and lets the decode loop step the last token.
+                    var currentToken = sanitizedPrompt.last ?? 0
+                    var prefetchedLogits: Tensor<Float>?
+                    if !sanitizedPrompt.isEmpty {
+                        if DecodePerfFlags.disableBatchedPrefill ||
+                            sanitizedPrompt.count > self.config.maxSeqLen ||
+                            !self.supportsBatchedPrefill() {
+                            for token in sanitizedPrompt.dropLast() {
+                                if Task.isCancelled {
+                                    continuation.finish()
+                                    return
+                                }
+                                _ = self.step(tokenId: token)
+                            }
+                        } else {
+                            prefetchedLogits = self.prefill(promptTokens: sanitizedPrompt)
                             if Task.isCancelled {
                                 continuation.finish()
                                 return
                             }
-                            _ = self.step(tokenId: token)
                         }
-                    } else {
-                        prefetchedLogits = self.prefill(promptTokens: sanitizedPrompt)
+                    }
+
+                    // Track generation history for repetition penalty
+                    var history: [Int] = Array(sanitizedPrompt)
+
+                    // Generate tokens
+                    var generated = 0
+                    while generated < mutableConfig.maxTokens && !Task.isCancelled {
+                        // Step 1: Forward pass to get raw logits
+                        let logits: Tensor<Float>
+                        if let prefetched = prefetchedLogits {
+                            logits = prefetched
+                            prefetchedLogits = nil
+                        } else {
+                            logits = self.step(tokenId: currentToken)
+                        }
+
+                        // Step 2: Mask if active, sample, then advance the constraint.
+                        let detailed: SamplerResult
+                        let constraintState: String?
+                        let constraintComplete: Bool
+                        if var constraint = constraintSession {
+                            let masked = try constraint.maskedLogits(from: logits)
+                            detailed = Sampler.sampleDetailed(
+                                logits: masked,
+                                config: &mutableConfig.sampler,
+                                history: history
+                            )
+                            try constraint.accept(tokenId: detailed.tokenId)
+                            constraintState = constraint.stateDescription
+                            constraintComplete = constraint.isComplete
+                            constraintSession = constraint
+                        } else {
+                            detailed = Sampler.sampleDetailed(
+                                logits: logits,
+                                config: &mutableConfig.sampler,
+                                history: history
+                            )
+                            constraintState = nil
+                            constraintComplete = false
+                        }
+
+                        if constraintSession != nil,
+                           mutableConfig.stopTokens.contains(detailed.tokenId),
+                           !constraintComplete {
+                            throw GenerationError.constrainedGenerationSelectedStopTokenBeforeCompletion(
+                                tokenId: detailed.tokenId,
+                                state: constraintState ?? "unknown"
+                            )
+                        }
+
+                        // Step 3: Create output with metadata
+                        let strategySummary: String? = {
+                            var parts: [String] = []
+                            parts.append(String(format: "temp=%.2f", mutableConfig.sampler.temperature))
+                            if let k = mutableConfig.sampler.topK { parts.append("topK=\(k)") }
+                            if let p = mutableConfig.sampler.topP { parts.append(String(format: "topP=%.2f", p)) }
+                            if mutableConfig.sampler.repetitionPenalty != 1.0 { parts.append(String(format: "penalty=%.2f", mutableConfig.sampler.repetitionPenalty)) }
+                            return parts.isEmpty ? nil : parts.joined(separator: ", ")
+                        }()
+
+                        let output = TokenOutput(
+                            tokenId: detailed.tokenId,
+                            probability: detailed.probability,
+                            entropy: detailed.entropy,
+                            timestamp: Date(),
+                            strategy: strategySummary,
+                            energyJoules: nil,
+                            constraintState: constraintState
+                        )
+
+                        // Step 5: Yield token to consumer
+                        switch continuation.yield(output) {
+                        case .terminated:
+                            return
+                        case .enqueued, .dropped:
+                            break
+                        @unknown default:
+                            break
+                        }
+
+                        await Task.yield()
                         if Task.isCancelled {
                             continuation.finish()
                             return
                         }
-                    }
-                }
 
-                // Track generation history for repetition penalty
-                var history: [Int] = Array(sanitizedPrompt)
+                        // Step 6: Check completion and stop tokens
+                        if constraintComplete || mutableConfig.stopTokens.contains(detailed.tokenId) {
+                            break
+                        }
 
-                // Generate tokens
-                var generated = 0
-                while generated < mutableConfig.maxTokens && !Task.isCancelled {
-                    // Step 1: Forward pass to get logits
-                    let logits: Tensor<Float>
-                    if let prefetched = prefetchedLogits {
-                        logits = prefetched
-                        prefetchedLogits = nil
-                    } else {
-                        logits = self.step(tokenId: currentToken)
+                        // Step 7: Update state for next iteration
+                        currentToken = detailed.tokenId
+                        history.append(detailed.tokenId)
+                        generated += 1
                     }
 
-                    // Step 2: Sample next token using detailed sampler (correct probability & entropy)
-                    let detailed = Sampler.sampleDetailed(
-                        logits: logits,
-                        config: &mutableConfig.sampler,
-                        history: history
-                    )
-
-                    // Step 3: Create output with metadata
-                    let strategySummary: String? = {
-                        var parts: [String] = []
-                        parts.append(String(format: "temp=%.2f", mutableConfig.sampler.temperature))
-                        if let k = mutableConfig.sampler.topK { parts.append("topK=\(k)") }
-                        if let p = mutableConfig.sampler.topP { parts.append(String(format: "topP=%.2f", p)) }
-                        if mutableConfig.sampler.repetitionPenalty != 1.0 { parts.append(String(format: "penalty=%.2f", mutableConfig.sampler.repetitionPenalty)) }
-                        return parts.isEmpty ? nil : parts.joined(separator: ", ")
-                    }()
-
-                    let output = TokenOutput(
-                        tokenId: detailed.tokenId,
-                        probability: detailed.probability,
-                        entropy: detailed.entropy,
-                        timestamp: Date(),
-                        strategy: strategySummary,
-                        energyJoules: nil
-                    )
-
-                    // Step 5: Yield token to consumer
-                    switch continuation.yield(output) {
-                    case .terminated:
-                        return
-                    case .enqueued, .dropped:
-                        break
-                    @unknown default:
-                        break
-                    }
-
-                    await Task.yield()
                     if Task.isCancelled {
                         continuation.finish()
                         return
                     }
 
-                    // Step 6: Check for stop tokens
-                    if mutableConfig.stopTokens.contains(detailed.tokenId) {
-                        break
+                    if let constraintSession, !constraintSession.isComplete {
+                        throw GenerationError.constrainedGenerationIncomplete
                     }
 
-                    // Step 7: Update state for next iteration
-                    currentToken = detailed.tokenId
-                    history.append(detailed.tokenId)
-                    generated += 1
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
-
-                continuation.finish()
             }
             continuation.onTermination = { @Sendable _ in
                 task.cancel()
