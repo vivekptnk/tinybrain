@@ -96,6 +96,16 @@ public struct BPETokenizer: Tokenizer {
     
     /// Padding token ID
     public let padToken: Int
+
+    /// Whether the source tokenizer metadata asks callers to prepend BOS.
+    ///
+    /// `encode(_:)` intentionally returns only the encoded input text. Callers
+    /// that construct model prompts can use this flag to decide whether adding
+    /// `bosToken` matches the source tokenizer configuration.
+    public let addsBosToken: Bool
+
+    /// Whether HuggingFace metadata declares NFC normalization before BPE.
+    public let appliesNFC: Bool
     
     // MARK: - Private Properties
     
@@ -124,6 +134,12 @@ public struct BPETokenizer: Tokenizer {
 
     /// Whether text segments use SentencePiece/HF metaspace normalization.
     private let usesSentencePieceWhitespace: Bool
+
+    /// Whether text segments use GPT/Qwen ByteLevel pre-tokenization.
+    private let usesByteLevel: Bool
+
+    /// Regex from tokenizer.json's Split pre-tokenizer, when declared.
+    private let byteLevelRegex: NSRegularExpression?
     
     // MARK: - Initialization
     
@@ -145,6 +161,31 @@ public struct BPETokenizer: Tokenizer {
                 byteFallback: Bool = false,
                 preTokenizedTokens: Set<String> = [],
                 usesSentencePieceWhitespace: Bool? = nil) {
+        self.init(
+            vocab: vocab,
+            merges: merges,
+            specialTokens: specialTokens,
+            byteFallback: byteFallback,
+            preTokenizedTokens: preTokenizedTokens,
+            usesSentencePieceWhitespace: usesSentencePieceWhitespace,
+            byteLevel: false,
+            byteLevelPattern: nil,
+            addsBosToken: false,
+            appliesNFC: false
+        )
+    }
+
+    /// Initialize BPE tokenizer with explicit HuggingFace pre-tokenizer metadata.
+    public init(vocab: [String: Int],
+                merges: [[String]],
+                specialTokens: BPEVocabulary.SpecialTokens,
+                byteFallback: Bool,
+                preTokenizedTokens: Set<String>,
+                usesSentencePieceWhitespace: Bool?,
+                byteLevel: Bool,
+                byteLevelPattern: String?,
+                addsBosToken: Bool,
+                appliesNFC: Bool = false) {
         // Build token maps
         self.tokenToId = vocab
         self.vocabularySize = vocab.count
@@ -186,8 +227,18 @@ public struct BPETokenizer: Tokenizer {
             }
 
         let spaceMarker = "\u{2581}"
-        self.usesSentencePieceWhitespace = usesSentencePieceWhitespace ??
-            (vocab[spaceMarker] != nil || vocab[spaceMarker + "a"] != nil)
+        self.usesByteLevel = byteLevel
+        self.usesSentencePieceWhitespace = byteLevel ? false : (
+            usesSentencePieceWhitespace ??
+                (vocab[spaceMarker] != nil || vocab[spaceMarker + "a"] != nil)
+        )
+        if byteLevel, let byteLevelPattern {
+            self.byteLevelRegex = try? NSRegularExpression(pattern: byteLevelPattern)
+        } else {
+            self.byteLevelRegex = nil
+        }
+        self.addsBosToken = addsBosToken
+        self.appliesNFC = appliesNFC
         
         // Extract special tokens with smart fallback to actual vocab entries
         // Use first available valid token if special tokens not defined
@@ -283,6 +334,10 @@ public struct BPETokenizer: Tokenizer {
 
     /// Encode one ordinary text segment after any added/special tokens are removed.
     private func encodeTextSegment(_ text: String) -> [Int] {
+        if usesByteLevel {
+            return encodeByteLevelTextSegment(text)
+        }
+
         // Unicode normalization (NFC - canonical composition) applies to text,
         // not to already-split special tokens whose HF config marks normalized=false.
         let normalized = text.precomposedStringWithCanonicalMapping
@@ -313,6 +368,62 @@ public struct BPETokenizer: Tokenizer {
             ids.append(contentsOf: tokenIds(for: token))
         }
         return ids
+    }
+
+    /// Encode a normal text segment using HF/GPT ByteLevel BPE semantics.
+    private func encodeByteLevelTextSegment(_ text: String) -> [Int] {
+        let normalized = appliesNFC ? text.precomposedStringWithCanonicalMapping : text
+        guard !normalized.isEmpty else {
+            return []
+        }
+
+        var ids: [Int] = []
+        for preToken in byteLevelPreTokens(in: normalized) {
+            let initialTokens = preToken.utf8.map { byte in
+                String(Self.byteToUnicode[byte]!)
+            }
+            let mergedTokens = applyBPEMerges(initialTokens)
+
+            for token in mergedTokens {
+                ids.append(tokenToId[token] ?? unkToken)
+            }
+        }
+
+        return ids
+    }
+
+    /// Apply tokenizer.json's GPT-style Split regex before ByteLevel mapping.
+    private func byteLevelPreTokens(in text: String) -> [String] {
+        guard let byteLevelRegex else {
+            return [text]
+        }
+
+        let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = byteLevelRegex.matches(in: text, options: [], range: fullRange)
+        guard !matches.isEmpty else {
+            return [text]
+        }
+
+        var pieces: [String] = []
+        var cursor = text.startIndex
+
+        for match in matches {
+            guard let range = Range(match.range, in: text), !range.isEmpty else {
+                continue
+            }
+
+            if cursor < range.lowerBound {
+                pieces.append(String(text[cursor..<range.lowerBound]))
+            }
+            pieces.append(String(text[range]))
+            cursor = range.upperBound
+        }
+
+        if cursor < text.endIndex {
+            pieces.append(String(text[cursor..<text.endIndex]))
+        }
+
+        return pieces.filter { !$0.isEmpty }
     }
 
     /// Split text into normal spans and declared added/special token spans.
@@ -454,6 +565,10 @@ public struct BPETokenizer: Tokenizer {
     /// - Parameter tokens: Token IDs to decode
     /// - Returns: Reconstructed text
     public func decode(_ tokens: [Int]) -> String {
+        if usesByteLevel {
+            return decodeByteLevel(tokens)
+        }
+
         let tokenStrings = tokens.compactMap { idToToken[$0] }
         
         // Handle byte-level BPE (used by GPT-2, Llama, etc.)
@@ -482,6 +597,53 @@ public struct BPETokenizer: Tokenizer {
         }
         return result
     }
+
+    /// Decode GPT/Qwen ByteLevel tokens back through unicode-to-byte mapping.
+    private func decodeByteLevel(_ tokens: [Int]) -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(tokens.count)
+
+        for token in tokens {
+            guard let tokenString = idToToken[token] else {
+                continue
+            }
+
+            for scalar in tokenString.unicodeScalars {
+                if let byte = Self.unicodeToByte[scalar] {
+                    bytes.append(byte)
+                } else {
+                    bytes.append(contentsOf: tokenString.utf8)
+                    break
+                }
+            }
+        }
+
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// GPT-2 ByteLevel bytes-to-unicode map used by Qwen/GPT BPE tokenizers.
+    private static let byteToUnicode: [UInt8: UnicodeScalar] = {
+        let printableBytes = Array(33...126) + Array(161...172) + Array(174...255)
+        var mapping: [UInt8: UnicodeScalar] = [:]
+
+        for byte in printableBytes {
+            mapping[UInt8(byte)] = UnicodeScalar(byte)!
+        }
+
+        var nextOffset = 0
+        let printableSet = Set(printableBytes)
+        for byte in 0...255 where !printableSet.contains(byte) {
+            mapping[UInt8(byte)] = UnicodeScalar(256 + nextOffset)!
+            nextOffset += 1
+        }
+
+        return mapping
+    }()
+
+    /// Inverse of `byteToUnicode`, used by the ByteLevel decoder.
+    private static let unicodeToByte: [UnicodeScalar: UInt8] = {
+        Dictionary(uniqueKeysWithValues: byteToUnicode.map { ($0.value, $0.key) })
+    }()
     
     // MARK: - Helper Functions
     

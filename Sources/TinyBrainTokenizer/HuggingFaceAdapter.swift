@@ -34,6 +34,8 @@ public enum HuggingFaceAdapter {
         guard let model = json["model"] as? [String: Any] else {
             throw TokenizerError.missingRequiredField("model")
         }
+
+        let tokenizerConfig = loadSiblingTokenizerConfig(for: url)
         
         // Extract vocabulary
         let vocab = try extractVocabulary(from: model, addedTokens: json["added_tokens"] as? [[String: Any]])
@@ -42,7 +44,12 @@ public enum HuggingFaceAdapter {
         let merges = try extractMerges(from: model)
         
         // Extract special tokens
-        let specialTokens = extractSpecialTokens(from: json, vocab: vocab)
+        let specialTokens = extractSpecialTokens(
+            from: json,
+            tokenizerConfig: tokenizerConfig,
+            model: model,
+            vocab: vocab
+        )
 
         // Extract HF model behavior that affects parity with SentencePiece BPE.
         let byteFallback = (model["byte_fallback"] as? Bool) ?? false
@@ -51,6 +58,13 @@ public enum HuggingFaceAdapter {
             vocab: vocab
         )
         let usesSentencePieceWhitespace = extractSentencePieceWhitespaceNormalizer(from: json)
+        let byteLevelConfiguration = extractByteLevelConfiguration(from: json, model: model)
+        let appliesNFC = extractAppliesNFCNormalizer(from: json)
+        let addsBosToken = extractAddsBosToken(
+            from: tokenizerConfig,
+            json: json,
+            bosToken: specialTokens.bos_token
+        )
         
         #if DEBUG
         print("📖 Loaded HuggingFace tokenizer:")
@@ -58,6 +72,8 @@ public enum HuggingFaceAdapter {
         print("   Merge rules: \(merges.count)")
         print("   Special tokens: BOS=\(specialTokens.bos_token ?? "none"), EOS=\(specialTokens.eos_token ?? "none")")
         print("   Byte fallback: \(byteFallback)")
+        print("   ByteLevel: \(byteLevelConfiguration.enabled)")
+        print("   NFC normalizer: \(appliesNFC)")
         print("   Pre-tokenized added tokens: \(preTokenizedTokens.count)")
         #endif
         
@@ -67,7 +83,11 @@ public enum HuggingFaceAdapter {
             specialTokens: specialTokens,
             byteFallback: byteFallback,
             preTokenizedTokens: preTokenizedTokens,
-            usesSentencePieceWhitespace: usesSentencePieceWhitespace
+            usesSentencePieceWhitespace: usesSentencePieceWhitespace,
+            byteLevel: byteLevelConfiguration.enabled,
+            byteLevelPattern: byteLevelConfiguration.splitRegexPattern,
+            addsBosToken: addsBosToken,
+            appliesNFC: appliesNFC
         )
     }
     
@@ -189,13 +209,18 @@ public enum HuggingFaceAdapter {
     
     private static func extractSpecialTokens(
         from json: [String: Any],
+        tokenizerConfig: [String: Any]?,
+        model: [String: Any],
         vocab: [String: Int]
     ) -> BPEVocabulary.SpecialTokens {
         // Look in multiple possible locations
-        var bosToken: String?
-        var eosToken: String?
-        var unkToken: String?
-        var padToken: String?
+        let bosTokenConfigured = tokenizerConfig?.keys.contains("bos_token") == true
+        let shouldInferBosToken = !bosTokenConfigured || extractTokenContent(tokenizerConfig?["bos_token"]) != nil
+
+        var bosToken = extractTokenContent(tokenizerConfig?["bos_token"])
+        var eosToken = extractTokenContent(tokenizerConfig?["eos_token"])
+        var unkToken = extractTokenContent(tokenizerConfig?["unk_token"]) ?? (model["unk_token"] as? String)
+        var padToken = extractTokenContent(tokenizerConfig?["pad_token"])
         
         // Check added_tokens array
         if let added = json["added_tokens"] as? [[String: Any]] {
@@ -205,17 +230,25 @@ public enum HuggingFaceAdapter {
                    special {
                     // Match by name patterns
                     let lower = content.lowercased()
-                    if lower.contains("bos") || lower.contains("<s>") || lower == "<|begin_of_text|>" {
-                        bosToken = content
+                    if shouldInferBosToken,
+                       lower.contains("bos") || lower.contains("<s>") || lower == "<|begin_of_text|>" {
+                        bosToken = bosToken ?? content
                     }
-                    if lower.contains("eos") || lower.contains("</s>") || lower == "<|end_of_text|>" {
+                    if lower == "<|im_end|>" {
                         eosToken = content
                     }
+                    if lower.contains("eos") || lower.contains("</s>") || lower == "<|end_of_text|>" {
+                        eosToken = eosToken ?? content
+                    }
                     if lower.contains("unk") || lower == "<unk>" {
-                        unkToken = content
+                        unkToken = unkToken ?? content
                     }
                     if lower.contains("pad") || lower == "<pad>" {
-                        padToken = content
+                        padToken = padToken ?? content
+                    }
+                    if lower == "<|endoftext|>" {
+                        padToken = padToken ?? content
+                        eosToken = eosToken ?? content
                     }
                 }
             }
@@ -227,7 +260,7 @@ public enum HuggingFaceAdapter {
                 for item in single {
                     if let specialToken = item["SpecialToken"] as? [String: Any],
                        let id = specialToken["id"] as? String {
-                        if id.contains("bos") || id == "<s>" {
+                        if shouldInferBosToken, id.contains("bos") || id == "<s>" {
                             bosToken = id
                         }
                         if id.contains("eos") || id == "</s>" {
@@ -239,7 +272,7 @@ public enum HuggingFaceAdapter {
         }
         
         // Fallback: Look for common patterns in vocab
-        if bosToken == nil {
+        if bosToken == nil, shouldInferBosToken {
             if vocab["<s>"] != nil {
                 bosToken = "<s>"
             } else if vocab["<BOS>"] != nil {
@@ -281,6 +314,150 @@ public enum HuggingFaceAdapter {
             unk_token: unkToken,
             pad_token: padToken
         )
+    }
+
+    private static func loadSiblingTokenizerConfig(for tokenizerURL: URL) -> [String: Any]? {
+        let configURL = tokenizerURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("tokenizer_config.json")
+
+        guard FileManager.default.fileExists(atPath: configURL.path),
+              let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        return json
+    }
+
+    private static func extractTokenContent(_ value: Any?) -> String? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+
+        if let string = value as? String {
+            return string
+        }
+
+        if let dictionary = value as? [String: Any] {
+            return dictionary["content"] as? String
+        }
+
+        return nil
+    }
+
+    private static func extractAddsBosToken(
+        from tokenizerConfig: [String: Any]?,
+        json: [String: Any],
+        bosToken: String?
+    ) -> Bool {
+        if let addBosToken = tokenizerConfig?["add_bos_token"] as? Bool {
+            return addBosToken
+        }
+
+        guard let bosToken,
+              let postProcessor = json["post_processor"] as? [String: Any],
+              let single = postProcessor["single"] as? [[String: Any]] else {
+            return false
+        }
+
+        return single.contains { item in
+            guard let specialToken = item["SpecialToken"] as? [String: Any],
+                  let id = specialToken["id"] as? String else {
+                return false
+            }
+            return id == bosToken
+        }
+    }
+
+    // MARK: - ByteLevel Extraction
+
+    private struct ByteLevelConfiguration {
+        let enabled: Bool
+        let splitRegexPattern: String?
+    }
+
+    private static func extractByteLevelConfiguration(
+        from json: [String: Any],
+        model: [String: Any]
+    ) -> ByteLevelConfiguration {
+        guard (model["type"] as? String) == "BPE",
+              tokenizerComponent(json["pre_tokenizer"], containsType: "ByteLevel"),
+              (
+                tokenizerComponent(json["decoder"], containsType: "ByteLevel") ||
+                    tokenizerComponent(json["post_processor"], containsType: "ByteLevel")
+              ) else {
+            return ByteLevelConfiguration(enabled: false, splitRegexPattern: nil)
+        }
+
+        return ByteLevelConfiguration(
+            enabled: true,
+            splitRegexPattern: firstSplitRegexPattern(in: json["pre_tokenizer"])
+        )
+    }
+
+    private static func tokenizerComponent(_ value: Any?, containsType expectedType: String) -> Bool {
+        if value == nil || value is NSNull {
+            return false
+        }
+
+        if let dictionary = value as? [String: Any] {
+            if dictionary["type"] as? String == expectedType {
+                return true
+            }
+
+            for key in ["pretokenizers", "decoders", "normalizers", "processors"] {
+                if tokenizerComponent(dictionary[key], containsType: expectedType) {
+                    return true
+                }
+            }
+        }
+
+        if let array = value as? [[String: Any]] {
+            return array.contains { tokenizerComponent($0, containsType: expectedType) }
+        }
+
+        return false
+    }
+
+    private static func firstSplitRegexPattern(in component: Any?) -> String? {
+        if component == nil || component is NSNull {
+            return nil
+        }
+
+        if let dictionary = component as? [String: Any] {
+            if dictionary["type"] as? String == "Split" {
+                return regexPatternString(from: dictionary["pattern"])
+            }
+
+            for key in ["pretokenizers", "decoders", "normalizers", "processors"] {
+                if let pattern = firstSplitRegexPattern(in: dictionary[key]) {
+                    return pattern
+                }
+            }
+        }
+
+        if let array = component as? [[String: Any]] {
+            for child in array {
+                if let pattern = firstSplitRegexPattern(in: child) {
+                    return pattern
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func regexPatternString(from pattern: Any?) -> String? {
+        if let string = pattern as? String {
+            return string
+        }
+
+        if let dictionary = pattern as? [String: Any] {
+            return dictionary["Regex"] as? String
+        }
+
+        return nil
     }
 
     // MARK: - Added Tokens / Normalizer Extraction
@@ -341,6 +518,36 @@ public enum HuggingFaceAdapter {
 
         if let normalizers = normalizer["normalizers"] as? [[String: Any]] {
             return normalizers.contains { normalizerUsesSentencePieceWhitespace($0) }
+        }
+
+        return false
+    }
+
+    private static func extractAppliesNFCNormalizer(from json: [String: Any]) -> Bool {
+        guard let normalizer = json["normalizer"], !(normalizer is NSNull) else {
+            return false
+        }
+
+        return normalizerAppliesNFC(normalizer)
+    }
+
+    private static func normalizerAppliesNFC(_ normalizer: Any?) -> Bool {
+        if normalizer == nil || normalizer is NSNull {
+            return false
+        }
+
+        if let dictionary = normalizer as? [String: Any] {
+            if dictionary["type"] as? String == "NFC" {
+                return true
+            }
+
+            if let normalizers = dictionary["normalizers"] as? [[String: Any]] {
+                return normalizers.contains { normalizerAppliesNFC($0) }
+            }
+        }
+
+        if let normalizers = normalizer as? [[String: Any]] {
+            return normalizers.contains { normalizerAppliesNFC($0) }
         }
 
         return false

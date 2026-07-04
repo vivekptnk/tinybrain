@@ -17,6 +17,26 @@ final class HuggingFaceParityTests: XCTestCase {
         return url.path(percentEncoded: false)
     }
 
+    private var byteLevelFixturePath: String {
+        guard let url = Bundle.module.url(
+            forResource: "hf_bytelevel_tokenizer",
+            withExtension: "json"
+        ) else {
+            fatalError("Missing fixture: hf_bytelevel_tokenizer.json")
+        }
+        return url.path(percentEncoded: false)
+    }
+
+    private var byteLevelNFCFixturePath: String {
+        guard let url = Bundle.module.url(
+            forResource: "hf_bytelevel_nfc_tokenizer",
+            withExtension: "json"
+        ) else {
+            fatalError("Missing fixture: hf_bytelevel_nfc_tokenizer.json")
+        }
+        return url.path(percentEncoded: false)
+    }
+
     func testHuggingFaceByteFallbackEncodesUnknownScalarsAsUtf8Bytes() throws {
         let tokenizer = try TokenizerLoader.loadHuggingFace(from: byteFallbackFixturePath)
 
@@ -73,8 +93,44 @@ final class HuggingFaceParityTests: XCTestCase {
         XCTAssertEqual(tokenizer.encode("🧠"), [2])
     }
 
+    func testHuggingFaceByteLevelFixtureUsesSplitByteMapMergesAndDecoder() throws {
+        let tokenizer = try TokenizerLoader.loadHuggingFace(from: byteLevelFixturePath)
+
+        XCTAssertEqual(tokenizer.eosToken, 3)
+        XCTAssertEqual(tokenizer.padToken, 1)
+        XCTAssertFalse(tokenizer.addsBosToken)
+        XCTAssertFalse(tokenizer.appliesNFC)
+
+        let cases: [(name: String, text: String, expected: [Int])] = [
+            ("hello_world", "Hello world", [33, 38]),
+            ("newline_byte", "\n", [18]),
+            ("utf8_byte_pair", "café", [21, 22, 23, 40]),
+            ("chatml_specials", "<|im_start|>hi<|im_end|>", [2, 39, 3])
+        ]
+
+        for testCase in cases {
+            XCTAssertEqual(tokenizer.encode(testCase.text), testCase.expected, "Mismatch for \(testCase.name)")
+            XCTAssertEqual(tokenizer.decode(testCase.expected), testCase.text, "Round-trip failed for \(testCase.name)")
+        }
+
+        let decomposedCafe = "café".decomposedStringWithCanonicalMapping
+        XCTAssertEqual(tokenizer.encode(decomposedCafe), [21, 22, 23, 11, 0, 0])
+    }
+
+    func testHuggingFaceByteLevelNFCFixtureNormalizesNFDInput() throws {
+        let tokenizer = try TokenizerLoader.loadHuggingFace(from: byteLevelNFCFixturePath)
+        let decomposedCafe = "café".decomposedStringWithCanonicalMapping
+        let expected = [21, 22, 23, 40]
+
+        XCTAssertTrue(tokenizer.appliesNFC)
+        XCTAssertEqual(tokenizer.encode("café"), expected)
+        XCTAssertEqual(tokenizer.encode(decomposedCafe), expected)
+        XCTAssertEqual(tokenizer.decode(expected), "café")
+    }
+
     func testTinyLlamaChatTemplateMatchesHuggingFaceReference() throws {
         let tokenizer = try loadRealTinyLlamaTokenizerOrSkip()
+        XCTAssertFalse(tokenizer.appliesNFC)
         let prompt = "<|system|>\nYou are a helpful assistant.</s>\n<|user|>\nWhat is 2+2?</s>\n<|assistant|>\n"
 
         // Captured with HuggingFace tokenizers 0.22.2 on 2026-07-03:
@@ -115,10 +171,75 @@ final class HuggingFaceParityTests: XCTestCase {
         }
     }
 
+    func testQwenSpecialTokenMetadataMatchesTokenizerConfig() throws {
+        let tokenizer = try loadRealQwenTokenizerOrSkip()
+
+        XCTAssertEqual(tokenizer.eosToken, 151645)
+        XCTAssertEqual(tokenizer.padToken, 151643)
+        XCTAssertFalse(tokenizer.addsBosToken)
+        XCTAssertTrue(tokenizer.appliesNFC)
+        XCTAssertEqual(tokenizer.encode("<|im_start|>"), [151644])
+        XCTAssertEqual(tokenizer.encode("<|im_end|>"), [151645])
+        XCTAssertEqual(tokenizer.encode("<|endoftext|>"), [151643])
+    }
+
+    func testQwenByteLevelProbeStringsMatchHuggingFaceReference() throws {
+        let tokenizer = try loadRealQwenTokenizerOrSkip()
+
+        // Captured with:
+        // python3 -c "from tokenizers import Tokenizer; t=Tokenizer.from_file('Models/qwen2.5-1.5b-raw/tokenizer.json'); [print(repr(s), t.encode(s).ids) for s in ['Hello world','hi','\n','2+2=4','café','<|im_start|>user\nhi<|im_end|>\n','The capital of France is',' leading space','こんにちは']]"
+        // using tokenizers 0.22.2.
+        let cases: [(name: String, text: String, expected: [Int])] = [
+            ("hello_world", "Hello world", [9707, 1879]),
+            ("hi", "hi", [6023]),
+            ("newline", "\n", [198]),
+            ("arithmetic", "2+2=4", [17, 10, 17, 28, 19]),
+            ("unicode_cafe", "café", [924, 58858]),
+            ("chatml", "<|im_start|>user\nhi<|im_end|>\n", [151644, 872, 198, 6023, 151645, 198]),
+            ("completion_prefix", "The capital of France is", [785, 6722, 315, 9625, 374]),
+            ("leading_space", " leading space", [6388, 3550]),
+            ("cjk", "こんにちは", [89015])
+        ]
+
+        for testCase in cases {
+            let actual = tokenizer.encode(testCase.text)
+            XCTAssertEqual(actual, testCase.expected, "Mismatch for \(testCase.name)")
+            XCTAssertEqual(tokenizer.decode(testCase.expected), testCase.text, "Round-trip failed for \(testCase.name)")
+        }
+    }
+
+    func testQwenNFDInputsNormalizeToHuggingFaceNFCReference() throws {
+        let tokenizer = try loadRealQwenTokenizerOrSkip()
+
+        // Captured with:
+        // python3 -c "import unicodedata as u; from tokenizers import Tokenizer; t=Tokenizer.from_file('Models/qwen2.5-1.5b-raw/tokenizer.json'); [print(repr(s), t.encode(u.normalize('NFD',s), add_special_tokens=False).ids) for s in ['café','한국어','Tiếng Việt','naïve résumé']]"
+        // using tokenizers 0.22.2.
+        let cases: [(name: String, text: String, expected: [Int])] = [
+            ("nfd_cafe", "café", [924, 58858]),
+            ("nfd_korean", "한국어", [23573, 124785, 31079]),
+            ("nfd_vietnamese", "Tiếng Việt", [45351, 26068, 968, 128324]),
+            ("nfd_latin_mix", "naïve résumé", [3376, 37572, 586, 9333, 1242, 963])
+        ]
+
+        for testCase in cases {
+            let nfd = testCase.text.decomposedStringWithCanonicalMapping
+            XCTAssertEqual(tokenizer.encode(testCase.text), testCase.expected, "NFC changed for \(testCase.name)")
+            XCTAssertEqual(tokenizer.encode(nfd), testCase.expected, "NFD mismatch for \(testCase.name)")
+        }
+    }
+
     private func loadRealTinyLlamaTokenizerOrSkip() throws -> BPETokenizer {
         let path = resolveProjectPath("Models/tinyllama-raw/tokenizer.json")
         guard FileManager.default.fileExists(atPath: path) else {
             throw XCTSkip("Models/tinyllama-raw/tokenizer.json not available")
+        }
+        return try TokenizerLoader.loadHuggingFace(from: path)
+    }
+
+    private func loadRealQwenTokenizerOrSkip() throws -> BPETokenizer {
+        let path = resolveProjectPath("Models/qwen2.5-1.5b-raw/tokenizer.json")
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw XCTSkip("Models/qwen2.5-1.5b-raw/tokenizer.json not available")
         }
         return try TokenizerLoader.loadHuggingFace(from: path)
     }
