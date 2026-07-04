@@ -273,6 +273,35 @@ final class AgentLoopTests: XCTestCase {
         )
     }
 
+    func testQwenToolObservationRendersAsReadableToolResponseUserTurn() async throws {
+        let passage = "Atlas review lock is August 14, 2026, and the owner is Mira Chen."
+        let registry = ToolRegistry()
+        await registry.register(RegisteredTool(definition: echoDefinition) { _ in
+            "[1] \(passage) (source: atlas.md, distance: 0.001)"
+        })
+        let generator = ScriptedAgentGenerator(outputs: [
+            #"{"name":"echo","arguments":{"text":"atlas"}}"#,
+            "Atlas review lock is August 14, 2026, and the owner is Mira Chen."
+        ])
+        let loop = AgentLoop(
+            generator: generator,
+            tokenizer: CharacterTokenizer(),
+            registry: registry,
+            config: AgentConfig(maxSteps: 2, promptStyle: .qwenChatML)
+        )
+
+        _ = try await collectEvents(from: loop.run("Find the Project Atlas review lock timing and owner."))
+
+        let requests = await generator.requests
+        XCTAssertGreaterThanOrEqual(requests.count, 2)
+        let observationPrompt = requests[1].prompt
+        XCTAssertTrue(observationPrompt.contains("<|im_start|>user\n<tool_response>\n"), observationPrompt)
+        XCTAssertTrue(observationPrompt.contains(passage), observationPrompt)
+        XCTAssertTrue(observationPrompt.contains("</tool_response><|im_end|>"), observationPrompt)
+        XCTAssertFalse(observationPrompt.contains(#"<|im_start|>tool"#), observationPrompt)
+        XCTAssertFalse(observationPrompt.contains(#"{"content":"#), observationPrompt)
+    }
+
     func testQwenRetrieveSmokeUsesRealModelWhenEnabled() async throws {
         guard ProcessInfo.processInfo.environment["TINYBRAIN_RUN_QWEN_SMOKE"] == "1" else {
             throw XCTSkip("Set TINYBRAIN_RUN_QWEN_SMOKE=1 to run the real Qwen agent smoke")
@@ -292,21 +321,11 @@ final class AgentLoopTests: XCTestCase {
         }
 
         let fixture = try AgentLoopFixture()
-        let factFile = fixture.root.appendingPathComponent("aster.md")
+        let factFile = fixture.root.appendingPathComponent("atlas.md")
         try """
-        Project Aster offline launch code phrase is Aurora Quartz.
+        Atlas review lock is August 14, 2026, and the owner is Mira Chen.
         This fact is only available in the local document.
         """.write(to: factFile, atomically: true, encoding: .utf8)
-        try "Project Borealis uses a different placeholder phrase.".write(
-            to: fixture.root.appendingPathComponent("borealis.md"),
-            atomically: true,
-            encoding: .utf8
-        )
-        try "TinyBrain agents execute tools on-device without network calls.".write(
-            to: fixture.root.appendingPathComponent("agent.md"),
-            atomically: true,
-            encoding: .utf8
-        )
 
         let weights = try ModelLoader.load(from: resolveProjectPath(modelPath))
         let tokenizer = try TokenizerLoader.loadHuggingFace(from: resolveProjectPath(tokenizerPath))
@@ -339,13 +358,18 @@ final class AgentLoopTests: XCTestCase {
         )
 
         let events = try await collectEvents(
-            from: loop.run("Use retrieval to answer: what is Project Aster's offline launch code phrase?")
+            from: loop.run("Find the Project Atlas review lock timing and owner.")
         )
 
         let retrieveCalls = events.toolCalls.filter { $0.call.name == "retrieve" }
         XCTAssertGreaterThanOrEqual(retrieveCalls.count, 1)
         let final = try XCTUnwrap(events.finalAnswers.last)
-        XCTAssertTrue(final.answer.lowercased().contains("aurora quartz"), final.answer)
+        XCTAssertTrue(
+            final.answer.contains("August 14, 2026") || final.answer.contains("August 14"),
+            final.answer
+        )
+        XCTAssertTrue(final.answer.contains("Mira Chen"), final.answer)
+        print("TINYBRAIN_QWEN_FINAL_ANSWER: \(final.answer)")
 
         print("TINYBRAIN_AGENT_TRACE_BEGIN")
         for line in observer.lines {

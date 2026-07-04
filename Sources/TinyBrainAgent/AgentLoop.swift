@@ -387,8 +387,26 @@ public actor AgentLoop {
         messages: [AgentTranscriptMessage]
     ) -> String {
         var prompt = "<|im_start|>system\n\(systemPrompt)<|im_end|>\n"
-        for message in messages {
-            prompt += "<|im_start|>\(message.role.rawValue)\n\(message.content)<|im_end|>\n"
+        var index = 0
+        while index < messages.count {
+            let message = messages[index]
+            switch message.role {
+            case .user, .assistant:
+                prompt += "<|im_start|>\(message.role.rawValue)\n\(message.content)<|im_end|>\n"
+                index += 1
+            case .tool:
+                prompt += "<|im_start|>user\n"
+                var isFirstToolResponse = true
+                while index < messages.count, messages[index].role == .tool {
+                    if !isFirstToolResponse {
+                        prompt += "\n"
+                    }
+                    prompt += "<tool_response>\n\(messages[index].content)\n</tool_response>"
+                    isFirstToolResponse = false
+                    index += 1
+                }
+                prompt += "<|im_end|>\n"
+            }
         }
         prompt += "<|im_start|>assistant\n"
         return prompt
@@ -426,16 +444,7 @@ public actor AgentLoop {
     }
 
     private func formatObservation(call: ToolCall?, result: ToolResult) -> String {
-        var payload: [String: Any] = [
-            "call_id": result.callId,
-            "is_error": result.isError,
-            "content": result.content
-        ]
-        if let call {
-            payload["tool"] = call.name
-            payload["arguments"] = call.arguments
-        }
-        return AgentJSON.objectString(payload)
+        result.content
     }
 
     private func sanitizeFinalAnswer(_ answer: String) -> String {
