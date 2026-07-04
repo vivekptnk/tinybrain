@@ -29,6 +29,11 @@ private enum DecodePerfFlags {
         let value = ProcessInfo.processInfo.environment["TINYBRAIN_DISABLE_VECTORIZED_ATTENTION"] ?? ""
         return value == "1" || value.lowercased() == "true"
     }()
+
+    static var disableBatchedPrefill: Bool {
+        let value = ProcessInfo.processInfo.environment["TINYBRAIN_DISABLE_BATCHED_PREFILL"] ?? ""
+        return value == "1" || value.lowercased() == "true"
+    }
 }
 
 /// Configuration for model inference
@@ -279,15 +284,33 @@ public final class ModelRunner {
                 // Sanitize prompt tokens (clip to valid range)
                 let sanitizedPrompt = prompt.map { max(0, min($0, self.config.vocabSize - 1)) }
 
-                // Process prompt (all except last token)
+                guard mutableConfig.maxTokens > 0 else {
+                    continuation.finish()
+                    return
+                }
+
+                // Process prompt. Batched prefill returns the final prompt
+                // position logits; the serial fallback warms all but the last
+                // token and lets the decode loop step the last token.
                 var currentToken = sanitizedPrompt.last ?? 0
+                var prefetchedLogits: Tensor<Float>?
                 if !sanitizedPrompt.isEmpty {
-                    for token in sanitizedPrompt.dropLast() {
+                    if DecodePerfFlags.disableBatchedPrefill ||
+                        sanitizedPrompt.count > self.config.maxSeqLen ||
+                        !self.supportsBatchedPrefill() {
+                        for token in sanitizedPrompt.dropLast() {
+                            if Task.isCancelled {
+                                continuation.finish()
+                                return
+                            }
+                            _ = self.step(tokenId: token)
+                        }
+                    } else {
+                        prefetchedLogits = self.prefill(promptTokens: sanitizedPrompt)
                         if Task.isCancelled {
                             continuation.finish()
                             return
                         }
-                        _ = self.step(tokenId: token)
                     }
                 }
 
@@ -298,7 +321,13 @@ public final class ModelRunner {
                 var generated = 0
                 while generated < mutableConfig.maxTokens && !Task.isCancelled {
                     // Step 1: Forward pass to get logits
-                    let logits = self.step(tokenId: currentToken)
+                    let logits: Tensor<Float>
+                    if let prefetched = prefetchedLogits {
+                        logits = prefetched
+                        prefetchedLogits = nil
+                    } else {
+                        logits = self.step(tokenId: currentToken)
+                    }
 
                     // Step 2: Sample next token using detailed sampler (correct probability & entropy)
                     let detailed = Sampler.sampleDetailed(
@@ -455,6 +484,179 @@ public final class ModelRunner {
 // MARK: - Private helpers
 
 private extension ModelRunner {
+    /// Process the full prompt in one causal forward pass and return logits for
+    /// the first generated token. This is semantically equivalent to warming
+    /// with `prompt.dropLast()` and then stepping the final prompt token, but it
+    /// batches prompt linear projections as `[seqLen, hidden] x [hidden, out]`.
+    func prefill(promptTokens: [Int]) -> Tensor<Float> {
+        precondition(!promptTokens.isEmpty, "prefill requires at least one prompt token")
+
+        let basePosition = currentPosition
+        let seqLen = promptTokens.count
+        var hiddenRows = embeddings(forPromptTokens: promptTokens)
+
+        if config.isGemmaStyle {
+            hiddenRows = hiddenRows * sqrt(Float(config.hiddenDim))
+        }
+
+        for (layerIndex, layerWeights) in weights.layers.enumerated() {
+            hiddenRows = applyPrefillLayer(
+                hiddenRows,
+                layerWeights: layerWeights,
+                layerIndex: layerIndex,
+                basePosition: basePosition
+            )
+        }
+
+        var lastHiddenRow = hiddenRows.row(seqLen - 1).asRowMatrix()
+        if let finalNorm = weights.finalNormWeights {
+            if config.isPhiStyle {
+                lastHiddenRow = lastHiddenRow.layerNorm(weight: finalNorm, bias: weights.finalNormBias)
+            } else if config.isGemmaStyle {
+                lastHiddenRow = lastHiddenRow.rmsNormWithOffset(weight: finalNorm,
+                                                                epsilon: config.rmsNormEpsilon)
+            } else {
+                lastHiddenRow = lastHiddenRow.rmsNorm(weight: finalNorm,
+                                                      epsilon: config.rmsNormEpsilon)
+            }
+        }
+
+        let logitsPosition = basePosition + seqLen - 1
+        observer?.didComputeFinalHiddenState(lastHiddenRow.squeezedRowVector().data,
+                                             position: logitsPosition)
+
+        let logitsRow = weights.output.apply(toRow: lastHiddenRow)
+        let logits = logitsRow.squeezedRowVector()
+        observer?.didComputeLogits(logits: logits.data, position: logitsPosition)
+
+        currentPosition = basePosition + seqLen
+        lastLogits = logits
+        return logits
+    }
+
+    func embeddings(forPromptTokens promptTokens: [Int]) -> Tensor<Float> {
+        var data: [Float] = []
+        data.reserveCapacity(promptTokens.count * config.hiddenDim)
+
+        for tokenId in promptTokens {
+            data.append(contentsOf: weights.embedding(for: tokenId).data)
+        }
+
+        return Tensor<Float>(shape: TensorShape(promptTokens.count, config.hiddenDim), data: data)
+    }
+
+    func supportsBatchedPrefill() -> Bool {
+        guard supportsBatchedPrefill(weights.output) else { return false }
+
+        for layer in weights.layers {
+            guard supportsBatchedPrefill(layer.attention.query),
+                  supportsBatchedPrefill(layer.attention.key),
+                  supportsBatchedPrefill(layer.attention.value),
+                  supportsBatchedPrefill(layer.attention.output),
+                  supportsBatchedPrefill(layer.feedForward.up),
+                  supportsBatchedPrefill(layer.feedForward.down) else {
+                return false
+            }
+            if let gate = layer.feedForward.gate,
+               !supportsBatchedPrefill(gate) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    func supportsBatchedPrefill(_ linear: LinearLayerWeights) -> Bool {
+        linear.weights.precision == .int8
+    }
+
+    func applyPrefillLayer(_ hiddenRows: Tensor<Float>,
+                           layerWeights: TransformerLayerWeights,
+                           layerIndex: Int,
+                           basePosition: Int) -> Tensor<Float> {
+        notifyLayerEntry(hiddenRows: hiddenRows, layerIndex: layerIndex, basePosition: basePosition)
+
+        if config.isPhiStyle {
+            let normed: Tensor<Float>
+            if let w = layerWeights.inputNormWeights {
+                normed = hiddenRows.layerNorm(weight: w, bias: layerWeights.inputNormBias)
+            } else {
+                normed = hiddenRows
+            }
+
+            let attnOut = prefillAttention(hiddenRows: normed,
+                                           layerWeights: layerWeights.attention,
+                                           layerIndex: layerIndex,
+                                           basePosition: basePosition)
+            let ffnUp = layerWeights.feedForward.up.apply(toRow: normed).gelu()
+            let ffnOut = layerWeights.feedForward.down.apply(toRow: ffnUp)
+            return hiddenRows + attnOut + ffnOut
+        }
+
+        let normedForAttn: Tensor<Float>
+        if let normWeights = layerWeights.inputNormWeights {
+            normedForAttn = config.isGemmaStyle
+                ? hiddenRows.rmsNormWithOffset(weight: normWeights,
+                                               epsilon: config.rmsNormEpsilon)
+                : hiddenRows.rmsNorm(weight: normWeights,
+                                     epsilon: config.rmsNormEpsilon)
+        } else {
+            normedForAttn = hiddenRows
+        }
+
+        let attentionOutput = prefillAttention(hiddenRows: normedForAttn,
+                                               layerWeights: layerWeights.attention,
+                                               layerIndex: layerIndex,
+                                               basePosition: basePosition)
+        let residual1 = hiddenRows + attentionOutput
+
+        let normedForFFN: Tensor<Float>
+        if let normWeights = layerWeights.postAttentionNormWeights {
+            normedForFFN = config.isGemmaStyle
+                ? residual1.rmsNormWithOffset(weight: normWeights,
+                                              epsilon: config.rmsNormEpsilon)
+                : residual1.rmsNorm(weight: normWeights,
+                                    epsilon: config.rmsNormEpsilon)
+        } else {
+            normedForFFN = residual1
+        }
+
+        let ffnOutput: Tensor<Float>
+        if let gate = layerWeights.feedForward.gate {
+            let gateProjected = gate.apply(toRow: normedForFFN)
+            let gateOut = config.isGemmaStyle ? Self.exactGELU(gateProjected) : gateProjected.silu()
+            let upOut = layerWeights.feedForward.up.apply(toRow: normedForFFN)
+            let gated = gateOut * upOut
+            ffnOutput = layerWeights.feedForward.down.apply(toRow: gated)
+        } else {
+            let ffnUp = layerWeights.feedForward.up.apply(toRow: normedForFFN).gelu()
+            ffnOutput = layerWeights.feedForward.down.apply(toRow: ffnUp)
+        }
+
+        return residual1 + ffnOutput
+    }
+
+    func notifyLayerEntry(hiddenRows: Tensor<Float>, layerIndex: Int, basePosition: Int) {
+        guard observer != nil else { return }
+        let seqLen = hiddenRows.shape.dimensions[0]
+        let hiddenDim = hiddenRows.shape.dimensions[1]
+        let data = hiddenRows.data
+
+        for row in 0..<seqLen {
+            let start = row * hiddenDim
+            var squaredSum: Float = 0
+            for i in 0..<hiddenDim {
+                let value = data[start + i]
+                squaredSum += value * value
+            }
+            observer?.didEnterLayer(
+                layerIndex: layerIndex,
+                hiddenStateNorm: sqrt(squaredSum),
+                position: basePosition + row
+            )
+        }
+    }
+
     func applyLayer(_ hiddenRow: Tensor<Float>,
                     layerWeights: TransformerLayerWeights,
                     layerIndex: Int) -> Tensor<Float> {
@@ -692,6 +894,141 @@ private extension ModelRunner {
         let context = Tensor<Float>(shape: TensorShape(1, numHeads * headDim), data: attentionContext.context)
 
         return layerWeights.output.apply(toRow: context)
+    }
+
+    func prefillAttention(hiddenRows: Tensor<Float>,
+                          layerWeights: AttentionProjectionWeights,
+                          layerIndex: Int,
+                          basePosition: Int) -> Tensor<Float> {
+        let seqLen = hiddenRows.shape.dimensions[0]
+        let headDim = config.headDim
+        let rotaryDims = config.rotaryDims
+        let hiddenDim = config.numHeads * headDim
+        let kvDim = config.numKVHeads * headDim
+
+        precondition(hiddenRows.shape == TensorShape(seqLen, config.hiddenDim),
+                     "Prefill hidden rows must be [seqLen, hiddenDim]")
+
+        let queryRows = layerWeights.query.apply(toRow: hiddenRows)
+        let keyRows = layerWeights.key.apply(toRow: hiddenRows)
+        let valueRows = layerWeights.value.apply(toRow: hiddenRows)
+
+        let queryData = applyRoPEToRows(
+            queryRows.data,
+            rowCount: seqLen,
+            rowDim: hiddenDim,
+            headDim: headDim,
+            numHeads: config.numHeads,
+            basePosition: basePosition,
+            rotaryDims: rotaryDims
+        )
+        let keyData = applyRoPEToRows(
+            keyRows.data,
+            rowCount: seqLen,
+            rowDim: kvDim,
+            headDim: headDim,
+            numHeads: config.numKVHeads,
+            basePosition: basePosition,
+            rotaryDims: rotaryDims
+        )
+        let valueData = valueRows.data
+
+        for row in 0..<seqLen {
+            let position = basePosition + row
+            let kvStart = row * kvDim
+            let kvEnd = kvStart + kvDim
+            kvCache.append(
+                layer: layerIndex,
+                key: Tensor<Float>(shape: TensorShape(kvDim), data: Array(keyData[kvStart..<kvEnd])),
+                value: Tensor<Float>(shape: TensorShape(kvDim), data: Array(valueData[kvStart..<kvEnd])),
+                position: position
+            )
+        }
+
+        let scalingFactor = 1.0 / sqrt(Float(headDim))
+        let numHeads = config.numHeads
+        let repeats = numHeads / config.numKVHeads
+        let recordAttentionWeights = observer != nil
+        var contextData = [Float](repeating: 0, count: seqLen * hiddenDim)
+
+        for row in 0..<seqLen {
+            let qStart = row * hiddenDim
+            let qEnd = qStart + hiddenDim
+            let qFlat = Array(queryData[qStart..<qEnd])
+            let sequenceLength = row + 1
+
+            let attentionContext: (context: [Float], weights: [Float]?)
+            if DecodePerfFlags.disableVectorizedAttention {
+                attentionContext = attentionContextScalar(
+                    qFlat: qFlat,
+                    kData: keyData,
+                    vData: valueData,
+                    sequenceLength: sequenceLength,
+                    headDim: headDim,
+                    numHeads: numHeads,
+                    repeats: repeats,
+                    kvDim: kvDim,
+                    scalingFactor: scalingFactor,
+                    recordAttentionWeights: recordAttentionWeights
+                )
+            } else {
+                attentionContext = attentionContextVectorized(
+                    qFlat: qFlat,
+                    kData: keyData,
+                    vData: valueData,
+                    sequenceLength: sequenceLength,
+                    headDim: headDim,
+                    numHeads: numHeads,
+                    repeats: repeats,
+                    kvDim: kvDim,
+                    scalingFactor: scalingFactor,
+                    recordAttentionWeights: recordAttentionWeights
+                )
+            }
+
+            for i in 0..<hiddenDim {
+                contextData[qStart + i] = attentionContext.context[i]
+            }
+
+            if let weights = attentionContext.weights {
+                observer?.didComputeAttention(
+                    layerIndex: layerIndex,
+                    weights: weights,
+                    position: basePosition + row
+                )
+            }
+        }
+
+        let contextRows = Tensor<Float>(shape: TensorShape(seqLen, hiddenDim), data: contextData)
+        return layerWeights.output.apply(toRow: contextRows)
+    }
+
+    func applyRoPEToRows(_ data: [Float],
+                         rowCount: Int,
+                         rowDim: Int,
+                         headDim: Int,
+                         numHeads: Int,
+                         basePosition: Int,
+                         rotaryDims: Int) -> [Float] {
+        precondition(data.count == rowCount * rowDim,
+                     "RoPE data count must match rowCount * rowDim")
+
+        var result = data
+        for row in 0..<rowCount {
+            let start = row * rowDim
+            let end = start + rowDim
+            let rotated = applyRoPE(
+                Array(data[start..<end]),
+                headDim: headDim,
+                numHeads: numHeads,
+                position: basePosition + row,
+                rotaryDims: rotaryDims
+            )
+            for i in 0..<rowDim {
+                result[start + i] = rotated[i]
+            }
+        }
+        return result
     }
 
     func attentionContextVectorized(qFlat: [Float],
