@@ -38,7 +38,7 @@ public final class ChatViewModel: ObservableObject {
     @Published public var errorMessage: String = ""
 
     /// Sampler configuration
-    @Published public var temperature: Float = TinyBrainChatDefaults.temperature
+    @Published public var temperature: Float = ModelPromptStyle.rawCompletion.samplingDefaults.temperature
     @Published public var topK: Int = 40
     @Published public var topP: Float = 0.9
     @Published public var useTopK: Bool = true
@@ -121,6 +121,7 @@ public final class ChatViewModel: ObservableObject {
         self.telemetry = TelemetryViewModel()
         self.xRay = XRayViewModel(numLayers: runner.config.numLayers)
         self.modelPicker = ModelPickerViewModel()
+        applySamplerDefaults(for: activePromptStyle)
         self.modelPicker.refresh()
         self.modelPicker.select(path: activeModelPath)
     }
@@ -149,6 +150,7 @@ public final class ChatViewModel: ObservableObject {
             runner = ModelRunner(weights: weights)
             tokenizer = newTokenizer
             activePromptStyle = model?.promptStyle ?? .rawCompletion
+            applySamplerDefaults(for: activePromptStyle)
 
             // Rebuild X-Ray for new layer count.
             xRay = XRayViewModel(numLayers: runner.config.numLayers)
@@ -260,8 +262,13 @@ public final class ChatViewModel: ObservableObject {
     }
     
     /// Format conversation history using TinyLlama/Zephyr chat template.
-    private func formatChatPrompt() -> String {
+    private func formatZephyrChatPrompt() -> String {
         TinyBrainChatTemplate.format(messages: messages)
+    }
+
+    /// Format conversation history using Qwen ChatML.
+    private func formatQwenChatPrompt() -> String {
+        TinyBrainQwenChatTemplate.format(messages: messages)
     }
 
     /// Format a raw completion prompt for base models.
@@ -275,7 +282,9 @@ public final class ChatViewModel: ObservableObject {
     private func formattedPromptForActiveModel() throws -> String {
         switch activePromptStyle {
         case .zephyrChat:
-            return formatChatPrompt()
+            return formatZephyrChatPrompt()
+        case .qwenChatML:
+            return formatQwenChatPrompt()
         case .rawCompletion:
             return try formatRawPrompt()
         }
@@ -285,6 +294,8 @@ public final class ChatViewModel: ObservableObject {
         switch activePromptStyle {
         case .zephyrChat:
             return TinyBrainChatDefaults.chatMaxTokens
+        case .qwenChatML:
+            return TinyBrainChatDefaults.qwenChatMaxTokens
         case .rawCompletion:
             return 64
         }
@@ -299,30 +310,20 @@ public final class ChatViewModel: ObservableObject {
         // Build prompt with the active model family's expected formatting.
         let prompt = try formattedPromptForActiveModel()
 
-        // Tokenize with the active tokenizer's BOS token when available.
-        let promptTokens: [Int]
-        if let tokenizer = tokenizer {
-            var encoded = tokenizer.encode(prompt)
-            if let bpeTokenizer = tokenizer as? BPETokenizer {
-                encoded.insert(bpeTokenizer.bosToken, at: 0)
-            }
-            promptTokens = encoded
-        } else {
-            // Fallback: character-based
-            promptTokens = Array(prompt.prefix(50)).map { char in
-                Int(char.asciiValue ?? 0) % runner.config.vocabSize
-            }
-        }
+        // Tokenize with the active tokenizer's source-configured BOS behavior.
+        let promptTokens = TinyBrainPromptTokenizer.encode(
+            prompt: prompt,
+            tokenizer: tokenizer,
+            fallbackVocabSize: runner.config.vocabSize
+        )
 
         // Reset runner for fresh generation (clear KV cache from previous turns)
         runner.reset()
 
-        let stopTokens: [Int]
-        if let bpeTokenizer = tokenizer as? BPETokenizer {
-            stopTokens = [bpeTokenizer.eosToken]
-        } else {
-            stopTokens = []
-        }
+        let stopTokens = TinyBrainChatStops.stopTokenIDs(
+            for: tokenizer,
+            promptStyle: activePromptStyle
+        )
 
         let stopSequences = TinyBrainChatStops.stopSequences(
             for: tokenizer,
@@ -455,12 +456,22 @@ public final class ChatViewModel: ObservableObject {
     
     /// Current sampler configuration based on UI settings
     public var currentSamplerConfig: SamplerConfig {
-        SamplerConfig(
+        let defaults = activePromptStyle.samplingDefaults
+        let topPValue = (!useTopK || defaults.includesTopPWithTopK) ? topP : nil
+        return SamplerConfig(
             temperature: temperature,
             topK: useTopK ? topK : nil,
-            topP: useTopK ? nil : topP,
-            repetitionPenalty: 1.2
+            topP: topPValue,
+            repetitionPenalty: defaults.repetitionPenalty
         )
+    }
+
+    private func applySamplerDefaults(for promptStyle: ModelPromptStyle) {
+        let defaults = promptStyle.samplingDefaults
+        temperature = defaults.temperature
+        topK = defaults.topK ?? 0
+        topP = defaults.topP ?? 1.0
+        useTopK = defaults.topK != nil
     }
     
     /// Apply a preset sampler configuration
@@ -568,6 +579,38 @@ enum TinyBrainChatDefaults {
     static let systemPrompt = "You are TinyBrain, a concise on-device assistant. Answer the user directly in a sentence or two. If you don't know, say so briefly."
     static let temperature: Float = 0.4
     static let chatMaxTokens = 128
+    static let qwenChatMaxTokens = 200
+}
+
+struct TinyBrainSamplingDefaults {
+    let temperature: Float
+    let topK: Int?
+    let topP: Float?
+    let includesTopPWithTopK: Bool
+    let repetitionPenalty: Float
+}
+
+extension ModelPromptStyle {
+    var samplingDefaults: TinyBrainSamplingDefaults {
+        switch self {
+        case .zephyrChat, .rawCompletion:
+            return TinyBrainSamplingDefaults(
+                temperature: TinyBrainChatDefaults.temperature,
+                topK: 40,
+                topP: 0.9,
+                includesTopPWithTopK: false,
+                repetitionPenalty: 1.2
+            )
+        case .qwenChatML:
+            return TinyBrainSamplingDefaults(
+                temperature: 0.7,
+                topK: 20,
+                topP: 0.8,
+                includesTopPWithTopK: true,
+                repetitionPenalty: 1.05
+            )
+        }
+    }
 }
 
 enum TinyBrainChatTemplate {
@@ -589,9 +632,65 @@ enum TinyBrainChatTemplate {
     }
 }
 
+enum TinyBrainQwenChatTemplate {
+    static func format(
+        messages: [Message],
+        systemPrompt: String = TinyBrainChatDefaults.systemPrompt
+    ) -> String {
+        var prompt = ""
+        prompt += "<|im_start|>system\n\(systemPrompt)<|im_end|>\n"
+        for message in messages {
+            if message.isUser {
+                prompt += "<|im_start|>user\n\(message.content)<|im_end|>\n"
+            } else if !message.content.isEmpty {
+                prompt += "<|im_start|>assistant\n\(message.content)<|im_end|>\n"
+            }
+        }
+        prompt += "<|im_start|>assistant\n"
+        return prompt
+    }
+}
+
+enum TinyBrainPromptTokenizer {
+    static func encode(
+        prompt: String,
+        tokenizer: (any Tokenizer)?,
+        fallbackVocabSize: Int
+    ) -> [Int] {
+        if let tokenizer {
+            var encoded = tokenizer.encode(prompt)
+            if let bpeTokenizer = tokenizer as? BPETokenizer, bpeTokenizer.addsBosToken {
+                encoded.insert(bpeTokenizer.bosToken, at: 0)
+            }
+            return encoded
+        }
+
+        return Array(prompt.prefix(50)).map { char in
+            Int(char.asciiValue ?? 0) % fallbackVocabSize
+        }
+    }
+}
+
 enum TinyBrainChatStops {
     static let endOfSequenceMarker = "</s>"
     static let turnBoundaryMarkers = ["<|user|>", "<|system|>"]
+    static let qwenEndOfTextToken = 151_643
+    static let qwenTurnBoundaryMarker = "<|im_end|>"
+
+    static func stopTokenIDs(
+        for tokenizer: (any Tokenizer)?,
+        promptStyle: ModelPromptStyle
+    ) -> [Int] {
+        guard let bpeTokenizer = tokenizer as? BPETokenizer else {
+            return []
+        }
+
+        var tokens = [bpeTokenizer.eosToken]
+        if promptStyle == .qwenChatML {
+            tokens.append(qwenEndOfTextToken)
+        }
+        return uniqueTokenIDs(tokens)
+    }
 
     static func stopSequences(
         for tokenizer: (any Tokenizer)?,
@@ -604,14 +703,25 @@ enum TinyBrainChatStops {
             return uniqueSequences(sequences)
         }
 
-        sequences.append(tokenizer.encode(endOfSequenceMarker))
-
-        guard promptStyle == .zephyrChat else {
-            return uniqueSequences(sequences.filter { !$0.isEmpty })
+        switch promptStyle {
+        case .zephyrChat:
+            sequences.append(tokenizer.encode(endOfSequenceMarker))
+            sequences.append(contentsOf: turnBoundaryMarkers.map { tokenizer.encode($0) })
+        case .qwenChatML:
+            sequences.append(tokenizer.encode(qwenTurnBoundaryMarker))
+        case .rawCompletion:
+            sequences.append(tokenizer.encode(endOfSequenceMarker))
         }
-
-        sequences.append(contentsOf: turnBoundaryMarkers.map { tokenizer.encode($0) })
         return uniqueSequences(sequences.filter { !$0.isEmpty })
+    }
+
+    private static func uniqueTokenIDs(_ tokens: [Int]) -> [Int] {
+        var seen: Set<Int> = []
+        var result: [Int] = []
+        for token in tokens where seen.insert(token).inserted {
+            result.append(token)
+        }
+        return result
     }
 
     private static func uniqueSequences(_ sequences: [[Int]]) -> [[Int]] {

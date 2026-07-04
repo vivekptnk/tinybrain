@@ -78,6 +78,20 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertNil(info.interactionHint)
     }
 
+    func testModelInfoSurfacesQwenChatTunedHint() {
+        let names = [
+            "/tmp/qwen-1.5b-int8.tbf",
+            "/tmp/qwen2-1.5b-int8.tbf",
+            "/tmp/qwen2.5-1.5b-int8.tbf"
+        ]
+
+        for path in names {
+            let info = ModelInfo(path: path)
+            XCTAssertEqual(info.promptStyle, .qwenChatML)
+            XCTAssertEqual(info.interactionHint, "instruct model — chat-tuned")
+        }
+    }
+
     // MARK: - QuantizationHint Tests
 
     func testDetectInt4FromFilename() {

@@ -74,12 +74,16 @@ public struct ModelInfo: Identifiable, Equatable {
 /// Prompt formatting expected by a model family.
 public enum ModelPromptStyle: Equatable {
     case zephyrChat
+    case qwenChatML
     case rawCompletion
 
     static func detect(from filename: String) -> ModelPromptStyle {
         let lower = filename.lowercased()
         if lower.contains("tinyllama") {
             return .zephyrChat
+        }
+        if lower.contains("qwen") {
+            return .qwenChatML
         }
         return .rawCompletion
     }
@@ -88,6 +92,8 @@ public enum ModelPromptStyle: Equatable {
         switch self {
         case .zephyrChat:
             return nil
+        case .qwenChatML:
+            return "instruct model — chat-tuned"
         case .rawCompletion:
             return "base model - free-form completion"
         }

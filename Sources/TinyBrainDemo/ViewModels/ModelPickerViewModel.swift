@@ -145,8 +145,11 @@ private struct ModelPickerLoadError: Error, CustomStringConvertible, LocalizedEr
 ///
 /// Some model files pad their embedding table above the real tokenizer entry
 /// count. That is harmless when every token ID the tokenizer can emit is below
-/// `tokenizerVocab <= modelVocab`: the extra model rows are unreachable padding,
-/// not a decode mismatch or an out-of-bounds risk.
+/// the model vocabulary size. The tokenizer protocol currently exposes count,
+/// not max emitted token ID, so this keeps a conservative reserved-row window.
+/// Qwen uses roughly 271 model vocab rows above the parsed tokenizer count for
+/// control/reserved entries; those IDs remain below `modelVocab`, so they are
+/// not an embedding out-of-bounds risk.
 enum TokenizerVocabularyCompatibility: Equatable {
     case compatible
     case padded(gap: Int, allowedGap: Int)
@@ -163,7 +166,7 @@ enum TokenizerVocabularyCompatibility: Equatable {
     }
 
     static func allowedPaddingGap(for modelVocab: Int) -> Int {
-        max(256, modelVocab / 1_000)
+        max(512, modelVocab / 500)
     }
 
     static func evaluate(tokenizerVocab: Int, modelVocab: Int) -> TokenizerVocabularyCompatibility {
