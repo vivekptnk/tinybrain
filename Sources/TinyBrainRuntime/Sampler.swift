@@ -124,17 +124,7 @@ public struct Sampler {
     /// - Parameter logits: Model output logits [vocab_size]
     /// - Returns: Token ID with highest logit
     public static func greedy(logits: Tensor<Float>) -> Int {
-        var maxIndex = 0
-        var maxValue = -Float.infinity
-        
-        for (index, value) in logits.data.enumerated() {
-            if value > maxValue {
-                maxValue = value
-                maxIndex = index
-            }
-        }
-        
-        return maxIndex
+        return argmax(logits.data)
     }
     
     // MARK: - Temperature Sampling
@@ -203,19 +193,22 @@ public struct Sampler {
     ///   - rng: Inout RNG for stateful deterministic sampling
     /// - Returns: Sampled token ID
     internal static func topK(logits: Tensor<Float>, k: Int, temp: Float, rng: inout SeededRandomGenerator?) -> Int {
-        let vocabSize = logits.data.count
+        let logitsData = logits.data
+        let vocabSize = logitsData.count
         
         // If k >= vocab_size, just use temperature sampling
         if k >= vocabSize {
             return temperature(logits: logits, temp: temp, rng: &rng)
         }
+
+        if temp < 0.01 && k > 0 {
+            return argmax(logitsData)
+        }
         
-        // Sort and take top K indices (handles ties correctly)
-        let sorted = logits.data.enumerated().sorted { $0.element > $1.element }
-        let topKIndices = Set(sorted.prefix(k).map { $0.offset })
+        let topKIndices = Set(topKTokenIds(in: logitsData, k: max(0, k)))
         
         // Zero out all but top K tokens
-        var filteredData = logits.data
+        var filteredData = logitsData
         for i in 0..<filteredData.count {
             if !topKIndices.contains(i) {
                 filteredData[i] = -Float.infinity
@@ -357,6 +350,116 @@ public struct Sampler {
         // Fallback (shouldn't happen if probs sum to 1)
         return probs.count - 1
     }
+
+    private static func argmax(_ values: [Float]) -> Int {
+        var maxIndex = 0
+        var maxValue = -Float.infinity
+
+        for (index, value) in values.enumerated() {
+            if value > maxValue {
+                maxValue = value
+                maxIndex = index
+            }
+        }
+
+        return maxIndex
+    }
+
+    private static func adjustedLogitsData(
+        logits: Tensor<Float>,
+        config: SamplerConfig,
+        history: [Int]
+    ) -> [Float] {
+        var adjustedData = logits.data
+        if config.repetitionPenalty != 1.0 && !history.isEmpty {
+            let penalty = config.repetitionPenalty
+            for tokenId in history {
+                if tokenId >= 0 && tokenId < adjustedData.count {
+                    if adjustedData[tokenId] > 0 {
+                        adjustedData[tokenId] /= penalty
+                    } else {
+                        adjustedData[tokenId] *= penalty
+                    }
+                }
+            }
+        }
+        return adjustedData
+    }
+
+    private static func isHigherPriority(_ lhs: TopKCandidate, than rhs: TopKCandidate) -> Bool {
+        if lhs.value == rhs.value {
+            return lhs.index < rhs.index
+        }
+        return lhs.value > rhs.value
+    }
+
+    private static func isLowerPriority(_ lhs: TopKCandidate, than rhs: TopKCandidate) -> Bool {
+        isHigherPriority(rhs, than: lhs)
+    }
+
+    private static func topKTokenIds(in values: [Float], k: Int) -> [Int] {
+        guard k > 0 else { return [] }
+        guard k < values.count else {
+            return values.enumerated()
+                .map { TopKCandidate(index: $0.offset, value: $0.element) }
+                .sorted { isHigherPriority($0, than: $1) }
+                .map(\.index)
+        }
+
+        var heap: [TopKCandidate] = []
+        heap.reserveCapacity(k)
+
+        for (index, value) in values.enumerated() {
+            let candidate = TopKCandidate(index: index, value: value)
+            if heap.count < k {
+                heap.append(candidate)
+                siftUpMinHeap(&heap, from: heap.count - 1)
+            } else if let worst = heap.first, isHigherPriority(candidate, than: worst) {
+                heap[0] = candidate
+                siftDownMinHeap(&heap, from: 0)
+            }
+        }
+
+        return heap.sorted { isHigherPriority($0, than: $1) }.map(\.index)
+    }
+
+    private static func siftUpMinHeap(_ heap: inout [TopKCandidate], from index: Int) {
+        var child = index
+        while child > 0 {
+            let parent = (child - 1) / 2
+            if !isLowerPriority(heap[child], than: heap[parent]) {
+                break
+            }
+            heap.swapAt(child, parent)
+            child = parent
+        }
+    }
+
+    private static func siftDownMinHeap(_ heap: inout [TopKCandidate], from index: Int) {
+        var parent = index
+        while true {
+            let left = parent * 2 + 1
+            let right = left + 1
+            var candidate = parent
+
+            if left < heap.count, isLowerPriority(heap[left], than: heap[candidate]) {
+                candidate = left
+            }
+            if right < heap.count, isLowerPriority(heap[right], than: heap[candidate]) {
+                candidate = right
+            }
+            if candidate == parent {
+                break
+            }
+            heap.swapAt(parent, candidate)
+            parent = candidate
+        }
+    }
+
+    private struct TopKCandidate {
+        let index: Int
+        let value: Float
+    }
 }
 
 // MARK: - Seeded Random Generator
@@ -405,29 +508,18 @@ extension Sampler {
         history: [Int]
     ) -> [Float] {
         // Step 1: Apply repetition penalty (sign-aware, per docs)
-        var adjustedData = logits.data
-        if config.repetitionPenalty != 1.0 && !history.isEmpty {
-            let penalty = config.repetitionPenalty
-            for tokenId in history {
-                if tokenId >= 0 && tokenId < adjustedData.count {
-                    if adjustedData[tokenId] > 0 {
-                        adjustedData[tokenId] /= penalty
-                    } else {
-                        adjustedData[tokenId] *= penalty
-                    }
-                }
-            }
-        }
+        var adjustedData = adjustedLogitsData(logits: logits, config: config, history: history)
         var workingLogits = Tensor<Float>(shape: logits.shape, data: adjustedData)
 
         // Step 2: Apply top-k or top-p filtering if configured
         if let k = config.topK {
             // Filter to top-K by setting others to -inf
-            let sorted = workingLogits.data.enumerated().sorted { $0.element > $1.element }
-            let keep = Set(sorted.prefix(max(0, k)).map { $0.offset })
-            var filtered = workingLogits.data
-            for i in 0..<filtered.count { if !keep.contains(i) { filtered[i] = -Float.infinity } }
-            workingLogits = Tensor<Float>(shape: workingLogits.shape, data: filtered)
+            let effectiveK = max(0, k)
+            if effectiveK < adjustedData.count {
+                let keep = Set(topKTokenIds(in: adjustedData, k: effectiveK))
+                for i in 0..<adjustedData.count { if !keep.contains(i) { adjustedData[i] = -Float.infinity } }
+            }
+            workingLogits = Tensor<Float>(shape: workingLogits.shape, data: adjustedData)
         } else if let p = config.topP {
             // Convert to probabilities to compute nucleus, then zero out others
             let probs = workingLogits.softmax().data
@@ -439,7 +531,7 @@ extension Sampler {
                 if cumulative >= p { cutoff = i + 1; break }
             }
             let keep = Set(sorted.prefix(cutoff).map { $0.offset })
-            var filtered = workingLogits.data
+            var filtered = adjustedData
             for i in 0..<filtered.count { if !keep.contains(i) { filtered[i] = -Float.infinity } }
             workingLogits = Tensor<Float>(shape: workingLogits.shape, data: filtered)
         }
@@ -448,8 +540,9 @@ extension Sampler {
         let temperature = max(0, config.temperature)
         let scaledData: [Float]
         if temperature < 0.01 {
-            // Near-greedy
-            scaledData = workingLogits.data
+            var oneHot = [Float](repeating: 0, count: workingLogits.data.count)
+            oneHot[argmax(workingLogits.data)] = 1
+            return oneHot
         } else {
             scaledData = workingLogits.data.map { $0 / temperature }
         }
@@ -469,6 +562,12 @@ extension Sampler {
         config: inout SamplerConfig,
         history: [Int]
     ) -> SamplerResult {
+        if max(0, config.temperature) < 0.01 {
+            let adjustedData = adjustedLogitsData(logits: logits, config: config, history: history)
+            let tokenId = argmax(adjustedData)
+            return SamplerResult(tokenId: tokenId, probability: 1.0, entropy: 0.0)
+        }
+
         let finalProbs = samplingDistribution(logits: logits, config: config, history: history)
 
         // Extract RNG to local var to pass as inout and persist back

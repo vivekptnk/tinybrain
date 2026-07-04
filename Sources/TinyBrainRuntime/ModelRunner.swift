@@ -22,6 +22,14 @@
 
 import Foundation
 import Combine
+import Accelerate
+
+private enum DecodePerfFlags {
+    static let disableVectorizedAttention: Bool = {
+        let value = ProcessInfo.processInfo.environment["TINYBRAIN_DISABLE_VECTORIZED_ATTENTION"] ?? ""
+        return value == "1" || value.lowercased() == "true"
+    }()
+}
 
 /// Configuration for model inference
 public struct ModelConfig: Codable {
@@ -641,20 +649,143 @@ private extension ModelRunner {
         let vData = allValues.data
         let kvDim = numKVHeads * headDim
 
-        // Output: [numHeads * headDim]
-        var contextData = [Float](repeating: 0, count: numHeads * headDim)
+        let recordAttentionWeights = observer != nil
+        let attentionContext: (context: [Float], weights: [Float]?)
+        if DecodePerfFlags.disableVectorizedAttention {
+            attentionContext = attentionContextScalar(
+                qFlat: qFlat,
+                kData: kData,
+                vData: vData,
+                sequenceLength: sequenceLength,
+                headDim: headDim,
+                numHeads: numHeads,
+                repeats: repeats,
+                kvDim: kvDim,
+                scalingFactor: scalingFactor,
+                recordAttentionWeights: recordAttentionWeights
+            )
+        } else {
+            attentionContext = attentionContextVectorized(
+                qFlat: qFlat,
+                kData: kData,
+                vData: vData,
+                sequenceLength: sequenceLength,
+                headDim: headDim,
+                numHeads: numHeads,
+                repeats: repeats,
+                kvDim: kvDim,
+                scalingFactor: scalingFactor,
+                recordAttentionWeights: recordAttentionWeights
+            )
+        }
 
-        // Collect all attention weights for X-Ray (flat across heads)
-        var allAttnWeights = [Float]()
+        // X-Ray hook: attention weights (flattened: numHeads * seqLen)
+        if let weights = attentionContext.weights {
+            observer?.didComputeAttention(
+                layerIndex: layerIndex,
+                weights: weights,
+                position: currentPosition
+            )
+        }
+
+        // Context as [1, numHeads * headDim] row matrix for output projection
+        let context = Tensor<Float>(shape: TensorShape(1, numHeads * headDim), data: attentionContext.context)
+
+        return layerWeights.output.apply(toRow: context)
+    }
+
+    func attentionContextVectorized(qFlat: [Float],
+                                    kData: [Float],
+                                    vData: [Float],
+                                    sequenceLength: Int,
+                                    headDim: Int,
+                                    numHeads: Int,
+                                    repeats: Int,
+                                    kvDim: Int,
+                                    scalingFactor: Float,
+                                    recordAttentionWeights: Bool) -> (context: [Float], weights: [Float]?) {
+        var contextData = [Float](repeating: 0, count: numHeads * headDim)
+        var allAttnWeights = recordAttentionWeights ? [Float]() : nil
+
+        qFlat.withUnsafeBufferPointer { qPtr in
+        kData.withUnsafeBufferPointer { kPtr in
+        vData.withUnsafeBufferPointer { vPtr in
+        contextData.withUnsafeMutableBufferPointer { contextPtr in
+            guard let qBase = qPtr.baseAddress,
+                  let kBase = kPtr.baseAddress,
+                  let vBase = vPtr.baseAddress,
+                  let contextBase = contextPtr.baseAddress else { return }
+
+            let sequenceLength32 = Int32(sequenceLength)
+            let headDim32 = Int32(headDim)
+            let kvDim32 = Int32(kvDim)
+            let vectorLength = vDSP_Length(headDim)
+
+            for head in 0..<numHeads {
+                let kvHead = head / repeats
+                let qOffset = head * headDim
+                let kvHeadOffset = kvHead * headDim
+
+                var scores = [Float](repeating: 0, count: sequenceLength)
+                scores.withUnsafeMutableBufferPointer { scorePtr in
+                    guard let scoreBase = scorePtr.baseAddress else { return }
+                    cblas_sgemv(
+                        CblasRowMajor,
+                        CblasNoTrans,
+                        sequenceLength32,
+                        headDim32,
+                        scalingFactor,
+                        kBase + kvHeadOffset,
+                        kvDim32,
+                        qBase + qOffset,
+                        1,
+                        0.0,
+                        scoreBase,
+                        1
+                    )
+                }
+
+                stableSoftmaxNoEpsilon(&scores)
+                allAttnWeights?.append(contentsOf: scores)
+
+                let ctxOffset = head * headDim
+                for pos in 0..<sequenceLength {
+                    var weight = scores[pos]
+                    let vOffset = pos * kvDim + kvHeadOffset
+                    vDSP_vsma(
+                        vBase + vOffset,
+                        1,
+                        &weight,
+                        contextBase + ctxOffset,
+                        1,
+                        contextBase + ctxOffset,
+                        1,
+                        vectorLength
+                    )
+                }
+            }
+        }}}}
+
+        return (contextData, allAttnWeights)
+    }
+
+    func attentionContextScalar(qFlat: [Float],
+                                kData: [Float],
+                                vData: [Float],
+                                sequenceLength: Int,
+                                headDim: Int,
+                                numHeads: Int,
+                                repeats: Int,
+                                kvDim: Int,
+                                scalingFactor: Float,
+                                recordAttentionWeights: Bool) -> (context: [Float], weights: [Float]?) {
+        var contextData = [Float](repeating: 0, count: numHeads * headDim)
+        var allAttnWeights = recordAttentionWeights ? [Float]() : nil
 
         for head in 0..<numHeads {
-            // Which KV head does this query head use?
             let kvHead = head / repeats
-
-            // Extract q_h: [headDim]
             let qOffset = head * headDim
 
-            // Compute scores: q_h . k_h for each position
             var scores = [Float](repeating: 0, count: sequenceLength)
             for pos in 0..<sequenceLength {
                 var dot: Float = 0
@@ -665,15 +796,13 @@ private extension ModelRunner {
                 scores[pos] = dot * scalingFactor
             }
 
-            // Softmax
             let maxScore = scores.max() ?? 0
             var expScores = scores.map { exp($0 - maxScore) }
             let sumExp = expScores.reduce(0, +)
             expScores = expScores.map { $0 / sumExp }
 
-            allAttnWeights.append(contentsOf: expScores)
+            allAttnWeights?.append(contentsOf: expScores)
 
-            // Weighted sum of values
             let ctxOffset = head * headDim
             for pos in 0..<sequenceLength {
                 let w = expScores[pos]
@@ -684,17 +813,26 @@ private extension ModelRunner {
             }
         }
 
-        // X-Ray hook: attention weights (flattened: numHeads * seqLen)
-        observer?.didComputeAttention(
-            layerIndex: layerIndex,
-            weights: allAttnWeights,
-            position: currentPosition
-        )
+        return (contextData, allAttnWeights)
+    }
 
-        // Context as [1, numHeads * headDim] row matrix for output projection
-        let context = Tensor<Float>(shape: TensorShape(1, numHeads * headDim), data: contextData)
+    func stableSoftmaxNoEpsilon(_ values: inout [Float]) {
+        guard !values.isEmpty else { return }
 
-        return layerWeights.output.apply(toRow: context)
+        let n = vDSP_Length(values.count)
+        var maxScore: Float = 0
+        vDSP_maxv(values, 1, &maxScore, n)
+
+        var shifted = [Float](repeating: 0, count: values.count)
+        var negMax = -maxScore
+        vDSP_vsadd(values, 1, &negMax, &shifted, 1, n)
+
+        var count = Int32(values.count)
+        vvexpf(&values, shifted, &count)
+
+        var sumExp: Float = 0
+        vDSP_sve(values, 1, &sumExp, n)
+        vDSP_vsdiv(values, 1, &sumExp, &values, 1, n)
     }
 
     /// Repeat KV heads to match query heads for Grouped Query Attention.

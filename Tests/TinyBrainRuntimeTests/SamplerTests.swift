@@ -64,6 +64,22 @@ final class SamplerTests: XCTestCase {
         XCTAssertEqual(selectedTokens.count, 1, "Low temperature should be deterministic")
         XCTAssertEqual(selectedTokens.first, 3, "Should pick argmax")
     }
+
+    /// **Test:** Detailed sampling with temperature = 0 is a true greedy argmax.
+    ///
+    /// **Educational:**
+    /// Generation smoke tests use `sampleDetailed`, not the smaller helper
+    /// methods. The greedy path should not build a distribution or consume RNG.
+    func testSampleDetailedTemperatureZeroIsGreedyWithoutTopK() {
+        let logits = Tensor<Float>(shape: TensorShape(4), data: [0.2, 0.8, 0.8, 0.7])
+        var config = SamplerConfig(temperature: 0.0, seed: 42)
+
+        let result = Sampler.sampleDetailed(logits: logits, config: &config, history: [])
+
+        XCTAssertEqual(result.tokenId, 1, "Greedy tie-breaking should pick the first maximum")
+        XCTAssertEqual(result.probability, 1.0, accuracy: 0)
+        XCTAssertEqual(result.entropy, 0.0, accuracy: 0)
+    }
     
     /// **Test:** Temperature = 1.0 is standard softmax
     func testTemperatureOne() {
@@ -125,6 +141,37 @@ final class SamplerTests: XCTestCase {
         let token = Sampler.topK(logits: logits, k: 1, temp: 1.0)
         
         XCTAssertEqual(token, 3, "Top-1 should be greedy")
+    }
+
+    /// **Test:** Top-K filtering matches full-sort membership and tie order.
+    ///
+    /// **Educational:**
+    /// Large vocabularies make full sorting expensive. A partial selector must
+    /// still keep the exact same candidates a full descending sort would keep.
+    func testSamplingDistributionTopKMatchesFullSortWithTies() {
+        var data = [Float](repeating: -10.0, count: 128)
+        data[7] = 3.0
+        data[2] = 4.0
+        data[11] = 4.0
+        data[64] = 2.0
+        data[91] = 2.0
+        data[42] = 1.0
+
+        let logits = Tensor<Float>(shape: TensorShape(data.count), data: data)
+        let config = SamplerConfig(temperature: 1.0, topK: 5)
+        let distribution = Sampler.samplingDistribution(logits: logits, config: config, history: [])
+        let keptBySampler = Set(distribution.enumerated().compactMap { $0.element > 0 ? $0.offset : nil })
+        let expected = Set(
+            data.enumerated()
+                .sorted {
+                    if $0.element == $1.element { return $0.offset < $1.offset }
+                    return $0.element > $1.element
+                }
+                .prefix(5)
+                .map(\.offset)
+        )
+
+        XCTAssertEqual(keptBySampler, expected)
     }
     
     /// **Test:** Top-K with K >= vocab_size samples from all
@@ -331,4 +378,3 @@ final class SamplerTests: XCTestCase {
         XCTAssertEqual(token, 0, "Single token should always be selected")
     }
 }
-
