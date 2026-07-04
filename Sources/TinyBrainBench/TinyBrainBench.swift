@@ -13,7 +13,7 @@ struct TinyBrainBench: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tinybrain-bench",
         abstract: "Benchmark TinyBrain model inference performance",
-        version: "0.1.0"
+        version: "0.2.0"
     )
     
     @Option(name: .shortAndLong, help: "Path to the model file")
@@ -108,7 +108,7 @@ struct TinyBrainBench: AsyncParsableCommand {
             return
         }
         
-        print("🧠 TinyBrain Benchmark Tool v0.1.0")
+        print("🧠 TinyBrain Benchmark Tool v0.2.0")
         print("=" * 50)
         
         if let modelPath = model {

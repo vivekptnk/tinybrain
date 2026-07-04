@@ -182,7 +182,7 @@ Add TinyBrain to your Swift project:
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/vivekptnk/tinybrain.git", from: "0.1.0")
+    .package(url: "https://github.com/vivekptnk/tinybrain.git", from: "0.2.0")
 ]
 ```
 

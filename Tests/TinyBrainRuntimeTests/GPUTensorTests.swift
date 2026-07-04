@@ -51,7 +51,8 @@ final class GPUTensorTests: XCTestCase {
         
         try XCTSkipUnless(MetalBackend.isAvailable, "Metal not available on this device")
         
-        let gpu = Tensor<Float>.zeros(shape: TensorShape(100, 100)).toGPU()
+        // Matmuls below metalSizeThreshold (512) intentionally route to CPU (AMX faster), so use a larger matrix to exercise GPU residency.
+        let gpu = Tensor<Float>.zeros(shape: TensorShape(600, 600)).toGPU()
         let result = gpu.matmul(gpu)  // Stays on GPU
         
         XCTAssertTrue(result.isOnGPU, "Result should stay on GPU for GPU-only ops")
@@ -106,4 +107,3 @@ final class GPUTensorTests: XCTestCase {
         XCTAssertFalse(c.isOnGPU, "matmulCPU should always return CPU tensor")
     }
 }
-

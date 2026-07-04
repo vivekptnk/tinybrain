@@ -33,7 +33,7 @@ import Foundation
 /// ```
 public struct TinyBrain {
     /// TinyBrain version string
-    public static let version = "0.1.0"
+    public static let version = "0.2.0"
     
     /// Load a quantized model from the specified path
     /// - Parameter path: Path to the `.tbf` model file
@@ -54,4 +54,3 @@ public enum ModelError: Error {
 }
 
 // ModelRunner moved to ModelRunner.swift (TB-004 Phase 5)
-

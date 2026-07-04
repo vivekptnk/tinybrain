@@ -4,13 +4,16 @@ All notable changes to TinyBrain are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased — 0.2.0-dev]
-
-Status: unreleased as of 2026-07-03.
-
-Development release notes for the current v0.2.0 work. This section is not a tagged release.
+## [0.2.0] — 2026-07-04
 
 ### Added
+
+#### Model Support and Tokenization
+- Qwen2.5-1.5B-Instruct support, including config-driven RoPE theta (`1e6`) and RMSNorm epsilon handling.
+- GPT-2 style ByteLevel BPE tokenizer path with NFC normalization and ChatML metadata.
+- Qwen ChatML prompt style with `<|im_end|>` stop handling, no-BOS prompting, and style-aware sampling defaults.
+- ChatDemo now defaults to the Qwen2.5-1.5B-Instruct profile and pairs model/tokenizer selection at launch.
+- Gemma 2B and Phi-2 architecture support.
 
 #### Quantization and Metal Kernels
 - INT4 per-group quantization with group size 32 and FP16 scales.
@@ -22,8 +25,7 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 - Speculative decoding with draft and verify passes.
 - Tool-calling primitives (constrained JSON generation: ConstrainedSampler, tool schemas; generation-loop wiring tracked for the agent milestone).
 - Gemma RMSNorm variant using `(1 + w) * x`.
-- Gemma 2B and Phi-2 architecture support.
-- On-device RAG module and `tinybrain-rag` demo (TB-012) (commit messages predate the renumbering).
+- On-device RAG with `TinyBrainRAG`, the `tinybrain-rag` demo, local retrieval/generation flow, and a `retrieve` tool.
 
 #### Bridges and Demo App
 - TinyBrainProximaKit bridge with `TextEmbedder`.
@@ -33,6 +35,14 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 #### Benchmark Harness
 - `tinybrain-bench` scenario system for scripted benchmark runs.
 
+### Changed
+
+- ChatDemo was redesigned into an instrument-grade interface with an honest model header, unified telemetry, surfaced load/generation errors, and real cancellation wiring.
+- Streaming quantized matmul no longer re-materializes full FP32 weight matrices per token; scripted RAG question latency improved from >11min to ~1min.
+- BPE tokenization now uses batched best-pair merges, moving the hot loop from O(n^2) behavior to O(n) per merge pass on pathological inputs.
+- ProximaKit is pinned by revision, `Package.resolved` is committed, and release/docs language was updated for honest status claims around benchmarks, FlashAttention, and INT4 quality.
+- BREAKING (924fcb7): `tinybrain-bench` now exits non-zero and writes stderr diagnostics for unknown or invalid arguments. Scenario runs no longer silently substitute the toy model when the requested model is missing; pass explicit `--allow-toy-fallback` to opt in. Scripts relying on the old silent behavior must update.
+
 ### Fixed
 
 - HuggingFace tokenizer parity for `byte_fallback` and special-token pre-splitting.
@@ -40,23 +50,18 @@ Development release notes for the current v0.2.0 work. This section is not a tag
 - INT4 converter transpose handling, RoPE rotate-half convention, and speculative-decoding exact-distribution correction.
 - Five Metal GPU-backend correctness defects: per-channel INT4 scale collapse, causal masking, INT4 buffer cache, threadgroup-memory guard, and masked-row NaN.
 - Asymmetric quantization Int8 zero-point overflow trap on one-sided tensors.
-
-### Performance
-
-- Streaming quantized matmul eliminated full FP32 weight re-materialization per token; scripted RAG question latency improved from >11min to ~1min.
-- BPE merge loop moved from O(n^2) to batched best-pair merges; tokenizer suite pathological case improved from ~20min to seconds.
-
-### Changed
-
-- BREAKING (924fcb7): `tinybrain-bench` now exits non-zero and writes stderr diagnostics for unknown or invalid arguments. Scenario runs no longer silently substitute the toy model when the requested model is missing; pass explicit `--allow-toy-fallback` to opt in. Scripts relying on the old silent behavior must update.
+- `generateStream` now resets state per stream and cancels its producer, fixing cross-prompt contamination and closing the deferred cancellation audit item.
+- Chat output now uses incremental detokenization for correct word spacing, stops on EOS, and handles model/tokenizer mismatches with a pad-tolerant vocabulary check; Gemma chat is unblocked.
 
 ### Known limitations
 
 - INT4 quality measured honestly: 8.7% (Gemma) / 13.3% (TinyLlama) perplexity delta vs INT8 at group=32 RTN with INT8 output head — above the 6% target; GPTQ/AWQ tracked for 0.2.1. Real-model gates now run as green regression tripwires above these measured baselines; the <=6% bound returns as the v0.2.1 exit bar.
+- Metal kernels are not yet wired into the token-generation loop; generation still runs through the CPU path.
+- FlashAttention is implemented and tested as a kernel, but is not yet integrated into the inference attention path.
 
 ### Known issues
 
-- known issue: toggling X-Ray while a response is streaming can crash because `ModelRunner.observer` swaps are unsynchronized; toggle between generations until the v0.2.x fix lands. Producer-side generation can also continue briefly after cancel before stopping.
+- Toggling X-Ray while a response is streaming can crash because `ModelRunner.observer` swaps are unsynchronized; toggle between generations until the v0.2.x fix lands.
 
 ## [0.1.0] — 2025-10-25
 
@@ -156,4 +161,5 @@ First public release. Swift-native on-device LLM inference for Apple Silicon wit
 - 7 Python tests passing for model converter.
 - TDD methodology used throughout.
 
+[0.2.0]: https://github.com/vivekptnk/tinybrain/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/vivekptnk/tinybrain/releases/tag/v0.1.0
