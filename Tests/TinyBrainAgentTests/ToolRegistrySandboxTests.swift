@@ -280,6 +280,35 @@ final class SandboxPolicyTests: XCTestCase {
         XCTAssertEqual(recorder.events.map(\.decision), [.dryRun])
     }
 
+    func testWriteFileDanglingDirectoryFailureIsAudited() async throws {
+        let fixture = try SandboxFixture()
+        let danglingDirectory = fixture.url("dangling")
+        try FileManager.default.createSymbolicLink(
+            at: danglingDirectory,
+            withDestinationURL: fixture.outside.appendingPathComponent("missing")
+        )
+        let recorder = AuditRecorder()
+        let policy = SandboxPolicy(
+            readableRoots: [fixture.root],
+            writableRoots: [fixture.root],
+            audit: recorder.record
+        )
+
+        let result = try await dispatch(
+            BuiltInAgentTools.writeFile(policy: policy),
+            arguments: [
+                "path": fixture.url("dangling/created.txt").path,
+                "content": "should fail"
+            ]
+        )
+
+        XCTAssertTrue(result.isError)
+        XCTAssertEqual(recorder.events.count, 1)
+        XCTAssertEqual(recorder.events.first?.operation, .writeFile)
+        XCTAssertEqual(recorder.events.first?.decision, .denied)
+        XCTAssertFalse(recorder.events.first?.reason?.isEmpty ?? true)
+    }
+
     func testReadFileHonorsSizeCap() async throws {
         let fixture = try SandboxFixture()
         try fixture.write("large.txt", contents: "abcdef")

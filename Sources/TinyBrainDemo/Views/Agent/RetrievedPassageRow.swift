@@ -1,6 +1,7 @@
 /// Retrieved passage row for the Agent trace.
 
 import SwiftUI
+import TinyBrainAgent
 
 /// Compact rendering of one retrieved passage with rank, source, distance, and excerpt.
 public struct RetrievedPassageRow: View {

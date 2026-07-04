@@ -1,6 +1,7 @@
 /// Timeline tile for one TinyBrain Agent step.
 
 import SwiftUI
+import TinyBrainAgent
 
 /// Renders one plan, tool-call, observe, or terminal agent step.
 public struct AgentStepTile: View {

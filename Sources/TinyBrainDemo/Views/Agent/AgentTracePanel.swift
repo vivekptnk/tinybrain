@@ -1,6 +1,7 @@
 /// Live trace panel for the TinyBrain Agent plan-act-observe loop.
 
 import SwiftUI
+import TinyBrainAgent
 
 /// Sidebar-style Agent Trace panel, visually paired with `XRayPanel`.
 public struct AgentTracePanel: View {

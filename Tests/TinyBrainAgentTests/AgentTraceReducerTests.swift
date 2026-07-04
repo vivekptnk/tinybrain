@@ -1,5 +1,5 @@
 import XCTest
-@testable import TinyBrainDemo
+@testable import TinyBrainAgent
 
 final class AgentTraceReducerTests: XCTestCase {
     func testReducerMapsScriptedPlanActObserveBudgetFinalSequence() {

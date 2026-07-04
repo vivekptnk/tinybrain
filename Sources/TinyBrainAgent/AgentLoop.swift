@@ -257,7 +257,7 @@ public actor AgentLoop {
         activeTranscript.messages.append(
             AgentTranscriptMessage(
                 role: .tool,
-                content: formatObservation(call: call, result: result)
+                content: formatObservation(result: result)
             )
         )
         activeTranscript.steps.append(
@@ -444,7 +444,7 @@ public actor AgentLoop {
         return prompt
     }
 
-    private func formatObservation(call: ToolCall?, result: ToolResult) -> String {
+    private func formatObservation(result: ToolResult) -> String {
         result.content
     }
 

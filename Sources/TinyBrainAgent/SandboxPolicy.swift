@@ -92,6 +92,11 @@ public enum SandboxPolicyError: Error, Equatable, LocalizedError {
 }
 
 /// Security boundary for agent filesystem tools.
+///
+/// Paths are canonicalized and prefix-checked before the filesystem effect. This
+/// policy does not defend against a time-of-check/time-of-use race where another
+/// process swaps a symlink between the check and the write. TinyBrain's threat
+/// model is a trusted single-user local app, not hostile concurrent processes.
 public struct SandboxPolicy {
     /// Explicit roots from which tools may read.
     public let readableRoots: [URL]
@@ -221,11 +226,23 @@ public struct SandboxPolicy {
             throw SandboxPolicyError.dryRunWrite(resolved.path)
         }
 
-        try FileManager.default.createDirectory(
-            at: resolved.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try content.write(to: resolved, atomically: true, encoding: .utf8)
+        do {
+            try FileManager.default.createDirectory(
+                at: resolved.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try content.write(to: resolved, atomically: true, encoding: .utf8)
+        } catch {
+            audit(
+                .writeFile,
+                requestedPath: path,
+                resolved: resolved,
+                decision: .denied,
+                byteCount: content.utf8.count,
+                reason: error.localizedDescription
+            )
+            throw error
+        }
         audit(
             .writeFile,
             requestedPath: path,
