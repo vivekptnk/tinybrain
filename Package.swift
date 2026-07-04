@@ -70,9 +70,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         // YAML parsing for benchmark scenarios
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
-        // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge)
-        // ProximaKit pinned by revision to the commit that became the v1.6.0 tag; re-pin with from: "1.6.0" in a future bump.
-        .package(url: "https://github.com/vivekptnk/ProximaKit.git", revision: "dcc55ca6b44d50707421b1da404c2e49117596e9"),
+        // ProximaKit — vector similarity search (used by TinyBrainProximaKit bridge + RAGIndex HNSW retrieval)
+        .package(url: "https://github.com/vivekptnk/ProximaKit.git", from: "1.8.0"),
         // Cartographer — map annotation engine (used by TinyBrainCartographerBridge).
         // Pinned to 1b15048 (fix(concurrency): constrain retryOnTransient to Sendable for Swift 6 — required for the CI runner's toolchain; the previous pin 81a3047 failed to compile on GitHub's macos-15 Swift with a non-sendable-result error in SyncEngine).
         // Pinning by revision (not branch:) keeps resolution stable if the branch is

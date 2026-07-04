@@ -1,5 +1,5 @@
 {
-  "originHash" : "2351427180b55862eb85189c570f7edb3999556b141d404cec435e4629e229d6",
+  "originHash" : "9a09c456562c1d280d46ae1ef74a73ac6992c017b6f330669133d01bcbdbb57d",
   "pins" : [
     {
       "identity" : "cartographer",
@@ -14,7 +14,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vivekptnk/ProximaKit.git",
       "state" : {
-        "revision" : "dcc55ca6b44d50707421b1da404c2e49117596e9"
+        "revision" : "c10508927a2b547d5f78ff25abcf65ae8fc0f2c1",
+        "version" : "1.8.0"
       }
     },
     {
