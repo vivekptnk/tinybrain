@@ -81,6 +81,7 @@ struct ChatDemoApp: App {
 
         let vm = ChatViewModel(
             runner: runner,
+            activeWeights: loadedModel.info == nil ? nil : weights,
             tokenizer: tokenizer,
             activeModelName: activeModelName,
             activeQuant: activeQuant,

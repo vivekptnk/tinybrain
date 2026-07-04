@@ -11,6 +11,7 @@ public struct ChatView: View {
     @StateObject private var viewModel: ChatViewModel
     private let theme = TinyBrainTheme.shared
 
+    @State private var demoMode: DemoMode = .chat
     @State private var showTelemetry: Bool
     @State private var showXRay: Bool
     @State private var showErrorBanner = true
@@ -27,36 +28,58 @@ public struct ChatView: View {
         VStack(spacing: 0) {
             header
 
-            HStack(spacing: 0) {
+            if demoMode == .chat {
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        if viewModel.hasError && showErrorBanner {
+                            errorBanner
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+
+                        messagesList
+                        inputBar
+                    }
+                    .background(theme.colors.canvas)
+
+                    if showXRay {
+                        XRayPanel(
+                            xRay: viewModel.xRay,
+                            isGenerating: viewModel.isGenerating,
+                            tokenDecoder: { viewModel.decodeToken($0) }
+                        )
+                        .transition(.move(edge: .trailing))
+                    } else if showTelemetry {
+                        telemetrySidebar
+                            .frame(width: theme.layout.sidebarWidth)
+                            .transition(.move(edge: .trailing))
+                    }
+                }
+                .transition(.opacity)
+            } else {
                 VStack(spacing: 0) {
                     if viewModel.hasError && showErrorBanner {
                         errorBanner
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
-                    messagesList
-                    inputBar
-                }
-                .background(theme.colors.canvas)
-
-                if showXRay {
-                    XRayPanel(
-                        xRay: viewModel.xRay,
-                        isGenerating: viewModel.isGenerating,
-                        tokenDecoder: { viewModel.decodeToken($0) }
+                    AgentWorkbenchView(
+                        viewModel: viewModel.agent,
+                        isHostBusy: viewModel.isGenerating || viewModel.isSwitchingModel
                     )
-                    .transition(.move(edge: .trailing))
-                } else if showTelemetry {
-                    telemetrySidebar
-                        .frame(width: theme.layout.sidebarWidth)
-                        .transition(.move(edge: .trailing))
                 }
+                .transition(.opacity)
             }
         }
         .frame(minWidth: 700, minHeight: 500)
         .background(theme.colors.canvas)
         .onAppear {
-            viewModel.setXRayEnabled(showXRay)
+            viewModel.setXRayEnabled(showXRay && demoMode == .chat)
+        }
+        .onChange(of: demoMode) { _, mode in
+            viewModel.setXRayEnabled(showXRay && mode == .chat)
+            if mode == .agent {
+                Task { await viewModel.agent.prepareIfNeeded() }
+            }
         }
         .onChange(of: viewModel.hasError) { _, hasError in
             if hasError {
@@ -90,7 +113,7 @@ public struct ChatView: View {
             ) { model in
                 Task { await viewModel.switchModel(model) }
             }
-            .disabled(viewModel.isGenerating || viewModel.isSwitchingModel)
+            .disabled(viewModel.isGenerating || viewModel.agent.isRunning || viewModel.isSwitchingModel)
 
             statusSlot
                 .frame(width: 124, alignment: .leading)
@@ -103,6 +126,33 @@ public struct ChatView: View {
                 .padding(.leading, 4)
 
             HStack(spacing: 4) {
+                railButton(
+                    icon: demoMode == .chat ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right",
+                    label: "Chat",
+                    isActive: demoMode == .chat,
+                    tooltip: "Show chat"
+                ) {
+                    withAnimation(theme.animations.quick) {
+                        demoMode = .chat
+                    }
+                }
+
+                railButton(
+                    icon: demoMode == .agent ? "point.topleft.down.curvedto.point.bottomright.up.fill" : "point.topleft.down.curvedto.point.bottomright.up",
+                    label: "Agent",
+                    isActive: demoMode == .agent,
+                    tooltip: "Show Agent Trace"
+                ) {
+                    withAnimation(theme.animations.quick) {
+                        demoMode = .agent
+                    }
+                }
+
+                Rectangle()
+                    .fill(theme.colors.hairline)
+                    .frame(width: 0.5, height: 18)
+                    .padding(.horizontal, 2)
+
                 railButton(
                     icon: showXRay ? "eye.fill" : "eye",
                     label: "X-Ray",
@@ -117,6 +167,8 @@ public struct ChatView: View {
                         viewModel.setXRayEnabled(showXRay)
                     }
                 }
+                .disabled(demoMode != .chat)
+                .opacity(demoMode == .chat ? 1.0 : 0.45)
 
                 railButton(
                     icon: showTelemetry ? "chart.bar.fill" : "chart.bar",
@@ -131,6 +183,8 @@ public struct ChatView: View {
                         }
                     }
                 }
+                .disabled(demoMode != .chat)
+                .opacity(demoMode == .chat ? 1.0 : 0.45)
 
                 railButton(
                     icon: "square.and.pencil",
@@ -385,7 +439,7 @@ public struct ChatView: View {
                 #if os(macOS)
                 NativeTextField(
                     text: $viewModel.promptText,
-                    isDisabled: viewModel.isGenerating,
+                    isDisabled: viewModel.isGenerating || viewModel.agent.isRunning,
                     onSubmit: { sendMessage() }
                 )
                 .frame(height: 22)
@@ -393,7 +447,7 @@ public struct ChatView: View {
                 TextField("Message TinyBrain…", text: $viewModel.promptText)
                     .font(theme.typography.body)
                     .textFieldStyle(.plain)
-                    .disabled(viewModel.isGenerating)
+                    .disabled(viewModel.isGenerating || viewModel.agent.isRunning)
                 #endif
 
                 if viewModel.isGenerating {
@@ -420,7 +474,10 @@ public struct ChatView: View {
                             .foregroundStyle(viewModel.promptText.isEmpty ? theme.colors.textQuaternary : theme.colors.accent)
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        viewModel.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || viewModel.agent.isRunning
+                    )
                     .keyboardShortcut(.return, modifiers: .command)
                 }
             }
@@ -474,6 +531,7 @@ public struct ChatView: View {
 
     private func sendMessage() {
         guard !viewModel.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !viewModel.agent.isRunning else { return }
         Task {
             await viewModel.generate()
         }
@@ -623,6 +681,11 @@ public struct ChatView: View {
         .background(theme.colors.fillQuaternary)
         .clipShape(Capsule())
     }
+}
+
+private enum DemoMode {
+    case chat
+    case agent
 }
 
 private struct SuggestionChip: View {

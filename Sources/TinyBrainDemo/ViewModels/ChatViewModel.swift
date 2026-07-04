@@ -70,6 +70,9 @@ public final class ChatViewModel: ObservableObject {
     /// X-Ray visualization view model (TB-010)
     @Published public private(set) var xRay: XRayViewModel
 
+    /// Agent workbench view model.
+    @Published public private(set) var agent: AgentViewModel
+
     /// Model picker view model
     public let modelPicker: ModelPickerViewModel
 
@@ -77,6 +80,9 @@ public final class ChatViewModel: ObservableObject {
 
     /// Model runner (mutable to allow hot-swapping models)
     private var runner: ModelRunner
+
+    /// Active weights used to build a separate agent runner.
+    private var activeWeights: ModelWeights?
 
     /// Optional tokenizer (real or mock, mutable for hot-swapping)
     private var tokenizer: (any Tokenizer)?
@@ -107,12 +113,14 @@ public final class ChatViewModel: ObservableObject {
     ///   - activeModelPath: Absolute path for a real `.tbf` model, or nil for toy.
     public init(
         runner: ModelRunner,
+        activeWeights: ModelWeights? = nil,
         tokenizer: (any Tokenizer)? = nil,
         activeModelName: String = "Toy Model",
         activeQuant: QuantBadge = .toy,
         activeModelPath: String? = nil
     ) {
         self.runner = runner
+        self.activeWeights = activeWeights
         self.tokenizer = tokenizer
         self.activeModelName = activeModelName
         self.activeQuant = activeQuant
@@ -121,7 +129,26 @@ public final class ChatViewModel: ObservableObject {
         self.telemetry = TelemetryViewModel()
         self.xRay = XRayViewModel(numLayers: runner.config.numLayers)
         self.modelPicker = ModelPickerViewModel()
-        applySamplerDefaults(for: activePromptStyle)
+        let defaults = activePromptStyle.samplingDefaults
+        self.temperature = defaults.temperature
+        self.topK = defaults.topK ?? 0
+        self.topP = defaults.topP ?? 1.0
+        self.useTopK = defaults.topK != nil
+        self.agent = AgentViewModel(
+            activeWeights: activeWeights,
+            tokenizer: tokenizer,
+            promptStyle: activePromptStyle,
+            sampler: Self.samplerConfig(
+                temperature: defaults.temperature,
+                topK: defaults.topK,
+                topP: defaults.topP,
+                useTopK: defaults.topK != nil,
+                includesTopPWithTopK: defaults.includesTopPWithTopK,
+                repetitionPenalty: defaults.repetitionPenalty
+            ),
+            activeModelName: activeModelName,
+            isToyModel: activeModelPath == nil
+        )
         self.modelPicker.refresh()
         self.modelPicker.select(path: activeModelPath)
     }
@@ -135,7 +162,7 @@ public final class ChatViewModel: ObservableObject {
     ///
     /// - Parameter model: The ModelInfo to load, or nil for the toy model.
     public func switchModel(_ model: ModelInfo?) async {
-        guard !isGenerating else { return }
+        guard !isGenerating, !agent.isRunning else { return }
 
         isSwitchingModel = true
         pendingModelPath = model?.path
@@ -148,6 +175,7 @@ public final class ChatViewModel: ObservableObject {
 
             // Rebuild runner with new weights and matching tokenizer atomically.
             runner = ModelRunner(weights: weights)
+            activeWeights = model == nil ? nil : weights
             tokenizer = newTokenizer
             activePromptStyle = model?.promptStyle ?? .rawCompletion
             applySamplerDefaults(for: activePromptStyle)
@@ -165,6 +193,15 @@ public final class ChatViewModel: ObservableObject {
                 activeQuant = .toy
                 activeModelPath = nil
             }
+
+            agent.reconfigure(
+                weights: activeWeights,
+                tokenizer: tokenizer,
+                promptStyle: activePromptStyle,
+                sampler: currentSamplerConfig,
+                activeModelName: activeModelName,
+                isToyModel: activeModelPath == nil
+            )
         } catch {
             modelPicker.select(path: previousModelPath)
             failedModelSwitchTarget = model
@@ -225,6 +262,7 @@ public final class ChatViewModel: ObservableObject {
     public func generate() async {
         guard !promptText.isEmpty else { return }
         guard !isGenerating else { return }
+        guard !agent.isRunning else { return }
         
         // Add user message
         addUserMessage()
@@ -472,6 +510,24 @@ public final class ChatViewModel: ObservableObject {
         topK = defaults.topK ?? 0
         topP = defaults.topP ?? 1.0
         useTopK = defaults.topK != nil
+        agent.updateSampler(currentSamplerConfig)
+    }
+
+    private static func samplerConfig(
+        temperature: Float,
+        topK: Int?,
+        topP: Float?,
+        useTopK: Bool,
+        includesTopPWithTopK: Bool,
+        repetitionPenalty: Float
+    ) -> SamplerConfig {
+        let topPValue = (!useTopK || includesTopPWithTopK) ? topP : nil
+        return SamplerConfig(
+            temperature: temperature,
+            topK: useTopK ? topK : nil,
+            topP: topPValue,
+            repetitionPenalty: repetitionPenalty
+        )
     }
     
     /// Apply a preset sampler configuration

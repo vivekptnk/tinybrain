@@ -146,9 +146,12 @@ let package = Package(
         .target(
             name: "TinyBrainDemo",
             dependencies: [
+                "TinyBrainAgent",
                 "TinyBrainRuntime",
                 "TinyBrainMetal",
-                "TinyBrainTokenizer"
+                "TinyBrainRAG",
+                "TinyBrainTokenizer",
+                .product(name: "ProximaEmbeddings", package: "ProximaKit")
             ],
             path: "Sources/TinyBrainDemo"
         ),

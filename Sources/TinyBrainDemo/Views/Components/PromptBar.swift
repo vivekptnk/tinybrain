@@ -17,11 +17,12 @@ class FocusableTextField: NSTextField {
 struct NativeTextField: NSViewRepresentable {
     @Binding var text: String
     var isDisabled: Bool
+    var placeholder: String = "Message TinyBrain…"
     var onSubmit: () -> Void
 
     func makeNSView(context: Context) -> FocusableTextField {
         let textField = FocusableTextField()
-        textField.placeholderString = "Message TinyBrain…"
+        textField.placeholderString = placeholder
         textField.delegate = context.coordinator
         textField.isEditable = true
         textField.isSelectable = true
@@ -31,7 +32,7 @@ struct NativeTextField: NSViewRepresentable {
         textField.font = .systemFont(ofSize: 14)
         textField.textColor = .labelColor
         textField.placeholderAttributedString = NSAttributedString(
-            string: "Message TinyBrain…",
+            string: placeholder,
             attributes: [
                 .foregroundColor: NSColor.tertiaryLabelColor,
                 .font: NSFont.systemFont(ofSize: 14)
@@ -50,6 +51,7 @@ struct NativeTextField: NSViewRepresentable {
 
         nsView.isEditable = !isDisabled
         nsView.isEnabled = !isDisabled
+        nsView.placeholderString = placeholder
 
         // Auto-focus on first appear
         if !context.coordinator.hasFocused && !isDisabled && nsView.window != nil {
