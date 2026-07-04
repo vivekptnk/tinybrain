@@ -35,6 +35,62 @@ def _align_4kb(offset):
     return ((offset + 4095) // 4096) * 4096
 
 
+def _read_tbf_config(path):
+    """Read the JSON config from a converter-written TBF header."""
+    with open(path, 'rb') as f:
+        assert f.read(4) == b'TBFM'
+        version = struct.unpack('<I', f.read(4))[0]
+        assert version == 1
+        config_len = struct.unpack('<I', f.read(4))[0]
+        return json.loads(f.read(config_len))
+
+
+def _read_tbf_tensor_names(path):
+    """Return tensor names from the TBF tensor index."""
+    with open(path, 'rb') as f:
+        blob = f.read()
+
+    offset = 0
+    assert blob[offset:offset + 4] == b'TBFM'
+    offset += 4
+    _version = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4
+    config_len = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4 + config_len
+    offset = _align_4kb(offset)
+
+    metadata_count = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4
+    for _ in range(metadata_count):
+        name_len = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4 + name_len
+        offset += 1  # precision
+        offset += 1  # mode
+        offset += 4  # group size
+        scales_count = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4 + scales_count * 4
+        zp_count = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4 + zp_count
+
+    offset = _align_4kb(offset)
+    tensor_count = struct.unpack_from('<I', blob, offset)[0]
+    offset += 4
+
+    names = []
+    for _ in range(tensor_count):
+        name_len = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4
+        name = blob[offset:offset + name_len].decode('utf-8')
+        offset += name_len
+        names.append(name)
+        dim_count = struct.unpack_from('<I', blob, offset)[0]
+        offset += 4 + dim_count * 4
+        offset += 8  # data offset
+        offset += 8  # data size
+
+    return names
+
+
 def _read_tbf_quantized_tensor(path, tensor_name):
     """Read one quantized tensor from a converter-written TBF file."""
     with open(path, 'rb') as f:
@@ -419,6 +475,86 @@ class TestGQAWeightExtraction:
             f"Inferred num_kv_heads={config.num_kv_heads}, expected {num_kv_heads}"
         assert config.num_heads == num_heads
         assert config.hidden_dim == hidden_dim
+
+    def test_qwen2_auto_config_reads_rope_norm_and_qkv_biases(self):
+        """Qwen2 auto-config must preserve theta/epsilon and q/k/v biases."""
+        import torch
+
+        hidden_dim = 24
+        num_heads = 12
+        num_kv_heads = 2
+        head_dim = hidden_dim // num_heads
+        kv_dim = num_kv_heads * head_dim
+        intermediate_dim = 48
+        vocab_size = 64
+
+        state_dict = {
+            'model.embed_tokens.weight': torch.randn(vocab_size, hidden_dim),
+            'model.layers.0.self_attn.q_proj.weight': torch.randn(hidden_dim, hidden_dim),
+            'model.layers.0.self_attn.q_proj.bias': torch.randn(hidden_dim),
+            'model.layers.0.self_attn.k_proj.weight': torch.randn(kv_dim, hidden_dim),
+            'model.layers.0.self_attn.k_proj.bias': torch.randn(kv_dim),
+            'model.layers.0.self_attn.v_proj.weight': torch.randn(kv_dim, hidden_dim),
+            'model.layers.0.self_attn.v_proj.bias': torch.randn(kv_dim),
+            'model.layers.0.self_attn.o_proj.weight': torch.randn(hidden_dim, hidden_dim),
+            'model.layers.0.mlp.gate_proj.weight': torch.randn(intermediate_dim, hidden_dim),
+            'model.layers.0.mlp.up_proj.weight': torch.randn(intermediate_dim, hidden_dim),
+            'model.layers.0.mlp.down_proj.weight': torch.randn(hidden_dim, intermediate_dim),
+            'model.layers.0.input_layernorm.weight': torch.randn(hidden_dim),
+            'model.layers.0.post_attention_layernorm.weight': torch.randn(hidden_dim),
+            'model.norm.weight': torch.randn(hidden_dim),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_json = {
+                'model_type': 'qwen2',
+                'vocab_size': vocab_size,
+                'hidden_size': hidden_dim,
+                'num_hidden_layers': 1,
+                'num_attention_heads': num_heads,
+                'num_key_value_heads': num_kv_heads,
+                'intermediate_size': intermediate_dim,
+                'max_position_embeddings': 32768,
+                'rope_theta': 1000000.0,
+                'rms_norm_eps': 1e-6,
+                'tie_word_embeddings': True,
+            }
+            config_path = os.path.join(tmpdir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump(config_json, f)
+
+            fake_checkpoint = os.path.join(tmpdir, 'model.safetensors')
+            with open(fake_checkpoint, 'w') as f:
+                f.write('')
+
+            config = infer_config_from_weights(state_dict, checkpoint_path=fake_checkpoint)
+            assert config.architecture == 'llama'
+            assert config.num_kv_heads == 2
+            assert config.max_seq_len == 32768
+            assert config.rope_theta == pytest.approx(1000000.0)
+            assert config.rms_norm_epsilon == pytest.approx(1e-6)
+
+            weights = extract_weights(state_dict, config)
+            layer = weights['layers'][0]
+            assert layer['q_proj_bias'].shape == (hidden_dim,)
+            assert layer['k_proj_bias'].shape == (kv_dim,)
+            assert layer['v_proj_bias'].shape == (kv_dim,)
+            assert 'o_proj_bias' not in layer
+
+            output_path = os.path.join(tmpdir, 'qwen2-like.tbf')
+            write_tbf_format(weights, config, output_path, quantize_mode='int8')
+            header = _read_tbf_config(output_path)
+            assert header['architecture'] == 'llama'
+            assert header['numKVHeads'] == 2
+            assert header['maxSeqLen'] == 32768
+            assert header['ropeTheta'] == pytest.approx(1000000.0)
+            assert header['rmsNormEpsilon'] == pytest.approx(1e-6)
+
+            tensor_names = set(_read_tbf_tensor_names(output_path))
+            assert 'layer_0_attn_q_bias' in tensor_names
+            assert 'layer_0_attn_k_bias' in tensor_names
+            assert 'layer_0_attn_v_bias' in tensor_names
+            assert 'layer_0_attn_o_bias' not in tensor_names
 
     def test_infer_config_gqa_fallback_detects_kv_difference(self):
         """Fallback inference (no config.json) should detect KV heads differ from Q heads"""

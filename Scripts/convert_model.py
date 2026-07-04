@@ -41,6 +41,8 @@ class ModelConfig:
     num_kv_heads: int = None  # For GQA/MQA (defaults to num_heads for MHA)
     architecture: str = "llama"  # "llama", "gemma", or "phi"
     partial_rotary_factor: float = 1.0  # Phi-2 uses 0.4; others use 1.0 (full RoPE)
+    rope_theta: float = 10000.0  # HF rope_theta; Qwen2 uses 1000000.0
+    rms_norm_epsilon: float = 1e-5  # HF rms_norm_eps
 
     def __post_init__(self):
         if self.intermediate_dim is None:
@@ -68,6 +70,8 @@ def write_tbf_header(f, config: ModelConfig):
         'intermediateDim': config.intermediate_dim,
         'architecture': config.architecture,
         'partialRotaryFactor': config.partial_rotary_factor,
+        'ropeTheta': config.rope_theta,
+        'rmsNormEpsilon': config.rms_norm_epsilon,
     }
     config_json = json.dumps(config_dict).encode('utf-8')
 
@@ -749,6 +753,8 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
             num_kv_heads = hf_config.get('num_key_value_heads', num_heads)  # GQA support!
             intermediate_dim = hf_config.get('intermediate_size', 4 * hidden_dim)
             max_seq_len = hf_config.get('max_position_embeddings', 2048)
+            rope_theta = float(hf_config.get('rope_theta', 10000.0))
+            rms_norm_epsilon = float(hf_config.get('rms_norm_eps', 1e-5))
 
             # Gate runtime-visible arch divergences via the TBF `architecture` field.
             raw_model_type = (hf_config.get('model_type') or '').lower()
@@ -756,6 +762,10 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
                 architecture = 'gemma'
             elif raw_model_type.startswith('phi'):
                 architecture = 'phi'
+            elif raw_model_type.startswith('qwen'):
+                # Qwen2 is LLaMA-family at runtime; q/k/v bias tensors are
+                # detected from weights, not the architecture string.
+                architecture = 'llama'
             else:
                 architecture = 'llama'
 
@@ -770,6 +780,9 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
             print(f"  Num heads: {num_heads}")
             print(f"  Num KV heads: {num_kv_heads}")
             print(f"  Intermediate dim: {intermediate_dim}")
+            print(f"  Max sequence length: {max_seq_len}")
+            print(f"  RoPE theta: {rope_theta}")
+            print(f"  RMSNorm epsilon: {rms_norm_epsilon}")
             if partial_rotary_factor != 1.0:
                 print(f"  Partial RoPE factor: {partial_rotary_factor}")
 
@@ -783,6 +796,8 @@ def infer_config_from_weights(state_dict: Dict, checkpoint_path: str = None) -> 
                 max_seq_len=max_seq_len,
                 architecture=architecture,
                 partial_rotary_factor=partial_rotary_factor,
+                rope_theta=rope_theta,
+                rms_norm_epsilon=rms_norm_epsilon,
             )
 
     # Fallback: infer from weight shapes

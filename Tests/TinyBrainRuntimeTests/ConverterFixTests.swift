@@ -178,6 +178,19 @@ final class ConverterFixTests: XCTestCase {
         XCTAssertEqual(decoded.numKVHeads, 2)
         XCTAssertEqual(decoded.vocabSize, 100)
         XCTAssertEqual(decoded.intermediateDim, 128)
+        XCTAssertEqual(decoded.ropeTheta, 10000.0, accuracy: 1e-6)
+        XCTAssertEqual(decoded.rmsNormEpsilon, 1e-5, accuracy: 1e-10)
+    }
+
+    func testModelConfigCodablePreservesRopeThetaAndRmsNormEpsilon() throws {
+        let config = ModelConfig(numLayers: 2, hiddenDim: 64, numHeads: 4, vocabSize: 100,
+                                  numKVHeads: 2, intermediateDim: 128,
+                                  ropeTheta: 1_000_000.0, rmsNormEpsilon: 1e-6)
+        let encoded = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(ModelConfig.self, from: encoded)
+
+        XCTAssertEqual(decoded.ropeTheta, 1_000_000.0, accuracy: 0.01)
+        XCTAssertEqual(decoded.rmsNormEpsilon, 1e-6, accuracy: 1e-12)
     }
 
     func testModelConfigCodableWithoutIntermediateDim() throws {
@@ -187,6 +200,8 @@ final class ConverterFixTests: XCTestCase {
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(ModelConfig.self, from: json)
         XCTAssertEqual(decoded.intermediateDim, 256)  // default 4 * 64
+        XCTAssertEqual(decoded.ropeTheta, 10000.0, accuracy: 1e-6)
+        XCTAssertEqual(decoded.rmsNormEpsilon, 1e-5, accuracy: 1e-10)
     }
 
     // MARK: - RoPE (tested indirectly since applyRoPE is private)

@@ -41,18 +41,65 @@ final class RoPEParityTests: XCTestCase {
         }
     }
 
+    func testApplyRoPEMatchesHFRotateHalfReferenceWithQwenTheta() {
+        let headDim = 8
+        let rotaryDims = 8
+        let position = 5
+        let input: [Float] = [0.5, -1.0, 2.0, -4.0, 1.5, -2.5, 3.0, -3.5]
+
+        let runner = ModelRunner(config: ModelConfig(numLayers: 1,
+                                                     hiddenDim: headDim,
+                                                     numHeads: 1,
+                                                     vocabSize: 16,
+                                                     ropeTheta: 1_000_000.0))
+
+        let actual = runner.applyRoPE(input,
+                                      headDim: headDim,
+                                      numHeads: 1,
+                                      position: position,
+                                      rotaryDims: rotaryDims)
+
+        // Hand-computed HF rotate-half reference for theta=1e6:
+        // angles = [5, 0.15811387, 0.0050000004, 0.0001581139].
+        let expected: [Float] = [
+             1.580217600,
+            -0.593886316,
+             1.984974980,
+            -3.999446630,
+            -0.053968847,
+            -2.626271009,
+             3.009962320,
+            -3.500632524,
+        ]
+
+        for index in 0..<input.count {
+            XCTAssertEqual(actual[index], expected[index], accuracy: 1e-5,
+                           "applyRoPE must honor config.ropeTheta=1e6 at index \(index)")
+        }
+
+        let defaultThetaReference = hfRotateHalfReference(input,
+                                                          headDim: headDim,
+                                                          numHeads: 1,
+                                                          position: position,
+                                                          rotaryDims: rotaryDims,
+                                                          ropeTheta: 10000.0)
+        XCTAssertGreaterThan(maxAbsoluteDelta(actual, defaultThetaReference), 0.02,
+                             "Qwen theta=1e6 fixture must distinguish config-driven RoPE from the default 10000 base")
+    }
+
     private func hfRotateHalfReference(_ input: [Float],
                                        headDim: Int,
                                        numHeads: Int,
                                        position: Int,
-                                       rotaryDims: Int) -> [Float] {
+                                       rotaryDims: Int,
+                                       ropeTheta: Float = 10000.0) -> [Float] {
         var output = input
         let halfRotaryDims = rotaryDims / 2
 
         for head in 0..<numHeads {
             let offset = head * headDim
             for d in 0..<halfRotaryDims {
-                let frequency = pow(Float(10000.0), -Float(2 * d) / Float(rotaryDims))
+                let frequency = pow(ropeTheta, -Float(2 * d) / Float(rotaryDims))
                 let angle = Float(position) * frequency
                 let cosAngle = cos(angle)
                 let sinAngle = sin(angle)
@@ -72,13 +119,14 @@ final class RoPEParityTests: XCTestCase {
                                           headDim: Int,
                                           numHeads: Int,
                                           position: Int,
-                                          rotaryDims: Int) -> [Float] {
+                                          rotaryDims: Int,
+                                          ropeTheta: Float = 10000.0) -> [Float] {
         var output = input
 
         for head in 0..<numHeads {
             let offset = head * headDim
             for i in stride(from: 0, to: rotaryDims, by: 2) {
-                let frequency = pow(Float(10000.0), -Float(i) / Float(rotaryDims))
+                let frequency = pow(ropeTheta, -Float(i) / Float(rotaryDims))
                 let angle = Float(position) * frequency
                 let cosAngle = cos(angle)
                 let sinAngle = sin(angle)

@@ -137,6 +137,84 @@ final class TBFFormatTests: XCTestCase {
         }
     }
 
+    func testRoundTripPreservesRopeThetaAndRmsNormEpsilon() throws {
+        let config = ModelConfig(
+            numLayers: 1,
+            hiddenDim: 8,
+            numHeads: 2,
+            vocabSize: 16,
+            maxSeqLen: 64,
+            numKVHeads: 1,
+            intermediateDim: 32,
+            ropeTheta: 1_000_000.0,
+            rmsNormEpsilon: 1e-6
+        )
+
+        let original = ModelWeights.makeToyModel(config: config, seed: 123)
+        let filePath = tempDirectory.appendingPathComponent("config-roundtrip.tbf").path
+
+        try original.save(to: filePath)
+        let loaded = try ModelWeights.load(from: filePath)
+
+        XCTAssertEqual(loaded.config.ropeTheta, 1_000_000.0, accuracy: 0.01)
+        XCTAssertEqual(loaded.config.rmsNormEpsilon, 1e-6, accuracy: 1e-12)
+        XCTAssertEqual(loaded.config.numKVHeads, 1)
+        XCTAssertEqual(loaded.config.intermediateDim, 32)
+    }
+
+    func testLegacyTBFWithoutRopeThetaAndRmsNormEpsilonLoadsDefaults() throws {
+        let config = ModelConfig(
+            numLayers: 1,
+            hiddenDim: 8,
+            numHeads: 2,
+            vocabSize: 16,
+            maxSeqLen: 64,
+            numKVHeads: 1,
+            intermediateDim: 32
+        )
+
+        let original = ModelWeights.makeToyModel(config: config, seed: 456)
+        let modernPath = tempDirectory.appendingPathComponent("modern.tbf").path
+        let legacyPath = tempDirectory.appendingPathComponent("legacy.tbf").path
+        try original.save(to: modernPath)
+
+        let legacyConfigJSON = """
+        {
+          "numLayers": 1,
+          "hiddenDim": 8,
+          "numHeads": 2,
+          "numKVHeads": 1,
+          "vocabSize": 16,
+          "maxSeqLen": 64,
+          "intermediateDim": 32,
+          "architecture": "llama",
+          "partialRotaryFactor": 1.0
+        }
+        """.data(using: .utf8)!
+
+        let originalData = try Data(contentsOf: URL(fileURLWithPath: modernPath))
+        var legacyData = Data()
+        legacyData.append(contentsOf: "TBFM".utf8)
+        var version: UInt32 = 1
+        legacyData.append(Data(bytes: &version, count: 4))
+        var configLength = UInt32(legacyConfigJSON.count)
+        legacyData.append(Data(bytes: &configLength, count: 4))
+        legacyData.append(legacyConfigJSON)
+        XCTAssertLessThanOrEqual(legacyData.count, 4096)
+        legacyData.append(Data(count: 4096 - legacyData.count))
+        legacyData.append(contentsOf: originalData.dropFirst(4096))
+        try legacyData.write(to: URL(fileURLWithPath: legacyPath))
+
+        let loaded = try ModelWeights.load(from: legacyPath)
+        XCTAssertEqual(loaded.config.ropeTheta, 10000.0, accuracy: 1e-6)
+        XCTAssertEqual(loaded.config.rmsNormEpsilon, 1e-5, accuracy: 1e-10)
+
+        let runner = ModelRunner(weights: loaded)
+        let logits = runner.step(tokenId: 0)
+        XCTAssertTrue(logits.data.allSatisfy { $0.isFinite },
+                      "Legacy TBF with defaulted config fields should still run")
+    }
+
     func testINT4QuantizedModelRoundTripPreservesMetadataAndRunsForward() throws {
         let groupSize = 4
         let config = ModelConfig(

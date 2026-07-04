@@ -59,6 +59,14 @@ public struct ModelConfig: Codable {
     /// without knowing the architecture.
     public let partialRotaryFactor: Float
 
+    /// RoPE frequency base (`rope_theta` in HuggingFace configs).
+    /// Defaults to LLaMA/TinyLlama/Gemma's 10000.0 for legacy .tbf files.
+    public let ropeTheta: Float
+
+    /// RMSNorm numerical stability constant (`rms_norm_eps` in HuggingFace configs).
+    /// Defaults to the historical TinyBrain value for legacy .tbf files.
+    public let rmsNormEpsilon: Float
+
     /// Computed: KV dimension (hiddenDim / numHeads * numKVHeads)
     public var kvDim: Int {
         return (hiddenDim / numHeads) * numKVHeads
@@ -90,6 +98,25 @@ public struct ModelConfig: Codable {
     public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int,
                 maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil,
                 architecture: String = "llama", partialRotaryFactor: Float = 1.0) {
+        self.init(
+            numLayers: numLayers,
+            hiddenDim: hiddenDim,
+            numHeads: numHeads,
+            vocabSize: vocabSize,
+            maxSeqLen: maxSeqLen,
+            numKVHeads: numKVHeads,
+            intermediateDim: intermediateDim,
+            architecture: architecture,
+            partialRotaryFactor: partialRotaryFactor,
+            ropeTheta: 10000.0,
+            rmsNormEpsilon: 1e-5
+        )
+    }
+
+    public init(numLayers: Int, hiddenDim: Int, numHeads: Int, vocabSize: Int,
+                maxSeqLen: Int = 2048, numKVHeads: Int? = nil, intermediateDim: Int? = nil,
+                architecture: String = "llama", partialRotaryFactor: Float = 1.0,
+                ropeTheta: Float, rmsNormEpsilon: Float = 1e-5) {
         self.numLayers = numLayers
         self.hiddenDim = hiddenDim
         self.numHeads = numHeads
@@ -99,11 +126,14 @@ public struct ModelConfig: Codable {
         self.intermediateDim = intermediateDim ?? (4 * hiddenDim)
         self.architecture = architecture
         self.partialRotaryFactor = partialRotaryFactor
+        self.ropeTheta = ropeTheta
+        self.rmsNormEpsilon = rmsNormEpsilon
     }
 
     enum CodingKeys: String, CodingKey {
         case numLayers, hiddenDim, numHeads, numKVHeads, vocabSize, maxSeqLen,
-             intermediateDim, architecture, partialRotaryFactor
+             intermediateDim, architecture, partialRotaryFactor, ropeTheta,
+             rmsNormEpsilon
     }
 
     public init(from decoder: Decoder) throws {
@@ -117,6 +147,8 @@ public struct ModelConfig: Codable {
         intermediateDim = try container.decodeIfPresent(Int.self, forKey: .intermediateDim) ?? (4 * hiddenDim)
         architecture = try container.decodeIfPresent(String.self, forKey: .architecture) ?? "llama"
         partialRotaryFactor = try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 1.0
+        ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10000.0
+        rmsNormEpsilon = try container.decodeIfPresent(Float.self, forKey: .rmsNormEpsilon) ?? 1e-5
     }
 }
 
@@ -185,9 +217,11 @@ public final class ModelRunner {
             if config.isPhiStyle {
                 hiddenRow = hiddenRow.layerNorm(weight: finalNorm, bias: weights.finalNormBias)
             } else if config.isGemmaStyle {
-                hiddenRow = hiddenRow.rmsNormWithOffset(weight: finalNorm)
+                hiddenRow = hiddenRow.rmsNormWithOffset(weight: finalNorm,
+                                                        epsilon: config.rmsNormEpsilon)
             } else {
-                hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+                hiddenRow = hiddenRow.rmsNorm(weight: finalNorm,
+                                              epsilon: config.rmsNormEpsilon)
             }
         }
 
@@ -336,9 +370,11 @@ public final class ModelRunner {
             if config.isPhiStyle {
                 hiddenRow = hiddenRow.layerNorm(weight: finalNorm, bias: weights.finalNormBias)
             } else if config.isGemmaStyle {
-                hiddenRow = hiddenRow.rmsNormWithOffset(weight: finalNorm)
+                hiddenRow = hiddenRow.rmsNormWithOffset(weight: finalNorm,
+                                                        epsilon: config.rmsNormEpsilon)
             } else {
-                hiddenRow = hiddenRow.rmsNorm(weight: finalNorm)
+                hiddenRow = hiddenRow.rmsNorm(weight: finalNorm,
+                                              epsilon: config.rmsNormEpsilon)
             }
         }
 
@@ -421,8 +457,10 @@ private extension ModelRunner {
         let normedForAttn: Tensor<Float>
         if let normWeights = layerWeights.inputNormWeights {
             normedForAttn = config.isGemmaStyle
-                ? hiddenRow.rmsNormWithOffset(weight: normWeights)
-                : hiddenRow.rmsNorm(weight: normWeights)
+                ? hiddenRow.rmsNormWithOffset(weight: normWeights,
+                                              epsilon: config.rmsNormEpsilon)
+                : hiddenRow.rmsNorm(weight: normWeights,
+                                    epsilon: config.rmsNormEpsilon)
         } else {
             normedForAttn = hiddenRow
         }
@@ -436,8 +474,10 @@ private extension ModelRunner {
         let normedForFFN: Tensor<Float>
         if let normWeights = layerWeights.postAttentionNormWeights {
             normedForFFN = config.isGemmaStyle
-                ? residual1.rmsNormWithOffset(weight: normWeights)
-                : residual1.rmsNorm(weight: normWeights)
+                ? residual1.rmsNormWithOffset(weight: normWeights,
+                                              epsilon: config.rmsNormEpsilon)
+                : residual1.rmsNorm(weight: normWeights,
+                                    epsilon: config.rmsNormEpsilon)
         } else {
             normedForFFN = residual1
         }
@@ -516,7 +556,7 @@ extension ModelRunner {
             for d in 0..<halfRotaryDims {
                 // Frequencies computed over the rotary subspace (rDims), not full headDim.
                 let freqIdx = Float(2 * d) / Float(rDims)
-                let theta = pow(10000.0, -freqIdx)
+                let theta = pow(config.ropeTheta, -freqIdx)
                 let angle = Float(position) * theta
 
                 let cosA = cos(angle)
