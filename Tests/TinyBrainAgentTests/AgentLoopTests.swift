@@ -295,6 +295,10 @@ final class AgentLoopTests: XCTestCase {
         let requests = await generator.requests
         XCTAssertGreaterThanOrEqual(requests.count, 2)
         let observationPrompt = requests[1].prompt
+        XCTAssertTrue(
+            observationPrompt.contains("If retrieval reports no sufficiently relevant passages"),
+            observationPrompt
+        )
         XCTAssertTrue(observationPrompt.contains("<|im_start|>user\n<tool_response>\n"), observationPrompt)
         XCTAssertTrue(observationPrompt.contains(passage), observationPrompt)
         XCTAssertTrue(observationPrompt.contains("</tool_response><|im_end|>"), observationPrompt)
@@ -336,46 +340,85 @@ final class AgentLoopTests: XCTestCase {
             chunkingConfig: ChunkingConfig(targetTokens: 160, overlapTokens: 0)
         )
 
-        let registry = ToolRegistry()
-        await registry.register(BuiltInAgentTools.retrieve(engine.retrieveTool(defaultK: 2, maxK: 3)))
-        let observer = TraceRecorder()
-        let loop = AgentLoop(
-            generator: ModelRunnerAgentGenerator(
-                runner: ModelRunner(weights: weights),
-                tokenizer: tokenizer
-            ),
-            tokenizer: tokenizer,
-            registry: registry,
-            config: AgentConfig(
-                maxSteps: 1,
-                toolChoice: .required,
-                constraintMode: .strict,
-                perStepTokenBudget: 160,
-                contextBudget: 2_048,
-                sampler: SamplerConfig(temperature: 0.0, topK: 1)
-            ),
-            observer: observer
+        let config = AgentConfig(
+            maxSteps: 1,
+            toolChoice: .required,
+            constraintMode: .strict,
+            perStepTokenBudget: 160,
+            contextBudget: 2_048,
+            sampler: SamplerConfig(temperature: 0.0, topK: 1)
         )
 
-        let events = try await collectEvents(
-            from: loop.run("Find the Project Atlas review lock timing and owner.")
-        )
+        func runScenario(_ prompt: String) async throws -> (events: [AgentEvent], observer: TraceRecorder) {
+            let registry = ToolRegistry()
+            await registry.register(BuiltInAgentTools.retrieve(
+                engine.retrieveTool(defaultK: 2, maxK: 3, maxDistance: 0.85)
+            ))
+            let observer = TraceRecorder()
+            let loop = AgentLoop(
+                generator: ModelRunnerAgentGenerator(
+                    runner: ModelRunner(weights: weights),
+                    tokenizer: tokenizer
+                ),
+                tokenizer: tokenizer,
+                registry: registry,
+                config: config,
+                observer: observer
+            )
+            let events = try await collectEvents(from: loop.run(prompt))
+            let retrieveCalls = events.toolCalls.filter { $0.call.name == "retrieve" }
+            XCTAssertGreaterThanOrEqual(retrieveCalls.count, 1)
+            return (events, observer)
+        }
 
-        let retrieveCalls = events.toolCalls.filter { $0.call.name == "retrieve" }
-        XCTAssertGreaterThanOrEqual(retrieveCalls.count, 1)
-        let final = try XCTUnwrap(events.finalAnswers.last)
+        let atlas = try await runScenario("Find the Project Atlas review lock timing and owner.")
+        let final = try XCTUnwrap(atlas.events.finalAnswers.last)
         XCTAssertTrue(
             final.answer.contains("August 14, 2026") || final.answer.contains("August 14"),
             final.answer
         )
         XCTAssertTrue(final.answer.contains("Mira Chen"), final.answer)
-        print("TINYBRAIN_QWEN_FINAL_ANSWER: \(final.answer)")
+        print("TINYBRAIN_QWEN_ATLAS_FINAL_ANSWER_BEGIN")
+        print(final.answer)
+        print("TINYBRAIN_QWEN_ATLAS_FINAL_ANSWER_END")
 
         print("TINYBRAIN_AGENT_TRACE_BEGIN")
-        for line in observer.lines {
+        for line in atlas.observer.lines {
             print(line)
         }
         print("TINYBRAIN_AGENT_TRACE_END")
+
+        let vague = try await runScenario("What does it do")
+        let vagueRetrieve = try XCTUnwrap(vague.events.toolExecutions.first { $0.call?.name == "retrieve" })
+        XCTAssertFalse(vagueRetrieve.result.isError)
+        XCTAssertTrue(vagueRetrieve.result.content.contains("No sufficiently relevant passages found"))
+        XCTAssertTrue(vagueRetrieve.result.content.contains("threshold 0.85"))
+
+        let vagueFinal = try XCTUnwrap(vague.events.finalAnswers.last)
+        let vagueAnswer = vagueFinal.answer.lowercased()
+        XCTAssertFalse(vagueFinal.answer.contains("August"), vagueFinal.answer)
+        XCTAssertFalse(vagueFinal.answer.contains("2026"), vagueFinal.answer)
+        XCTAssertFalse(vagueFinal.answer.contains("Mira Chen"), vagueFinal.answer)
+        XCTAssertTrue(
+            [
+                "don't have",
+                "do not have",
+                "no relevant",
+                "not covered",
+                "doesn't contain",
+                "does not contain",
+                "knowledge base may not cover",
+                "not in my notes",
+                "notes don't",
+                "notes do not",
+                "couldn't find",
+                "could not find"
+            ].contains { vagueAnswer.contains($0) },
+            vagueFinal.answer
+        )
+        print("TINYBRAIN_QWEN_VAGUE_FINAL_ANSWER_BEGIN")
+        print(vagueFinal.answer)
+        print("TINYBRAIN_QWEN_VAGUE_FINAL_ANSWER_END")
     }
 
     private var echoDefinition: ToolDefinition {

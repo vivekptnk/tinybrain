@@ -351,6 +351,7 @@ public actor AgentLoop {
         Use exactly one tool call when a tool is needed, then wait for the observation.
         When you have enough evidence, answer the user directly in natural language.
         Tool errors are observations; explain what you can from the transcript.
+        If retrieval reports no sufficiently relevant passages, say you don't have that information in your notes and suggest rephrasing; do not invent an answer.
         """
 
         if !toolPrompt.isEmpty {

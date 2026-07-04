@@ -71,6 +71,98 @@ final class RetrievalToolTests: XCTestCase {
         XCTAssertTrue(result.content.contains("source: rag.md"))
     }
 
+    func testRetrieveToolDropsPassagesBeyondDistanceFloor() async throws {
+        let tool = RetrievalTool(defaultK: 3, maxK: 3, maxDistance: 0.85) { _, _ in
+            [
+                RAGTestSupport.passage("Relevant Atlas timing.", rank: 0, distance: 0.581, sourcePath: "atlas.md"),
+                RAGTestSupport.passage("Near-boundary Atlas owner.", rank: 1, distance: 0.850, sourcePath: "atlas.md"),
+                RAGTestSupport.passage("Noisy kitchen note.", rank: 2, distance: 0.965, sourcePath: "kitchen.md")
+            ]
+        }
+
+        let output = try await tool.handle(ToolCall(
+            id: "filter",
+            name: "retrieve",
+            arguments: ["query": "Project Atlas timing", "k": 3]
+        ))
+
+        XCTAssertTrue(output.contains("Relevant Atlas timing."), output)
+        XCTAssertTrue(output.contains("Near-boundary Atlas owner."), output)
+        XCTAssertFalse(output.contains("Noisy kitchen note."), output)
+        XCTAssertFalse(output.contains("0.965"), output)
+    }
+
+    func testRetrieveToolAllPassagesBeyondDistanceFloorReturnsNonErrorNoRelevantMessage() async throws {
+        let tool = RetrievalTool(defaultK: 1, maxK: 1, maxDistance: 0.85) { _, _ in
+            [
+                RAGTestSupport.passage(
+                    "Atlas review lock is August 14, 2026.",
+                    rank: 0,
+                    distance: 0.965,
+                    sourcePath: "ops/project-atlas.md"
+                )
+            ]
+        }
+        let dispatcher = ClosureToolDispatcher()
+        tool.register(on: dispatcher)
+
+        let result = try await dispatcher.dispatch(ToolCall(
+            id: "vague",
+            name: "retrieve",
+            arguments: ["query": "What does it do", "k": 1]
+        ))
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(
+            result.content,
+            "No sufficiently relevant passages found for 'What does it do' (best distance 0.965, threshold 0.85). The knowledge base may not cover this topic."
+        )
+    }
+
+    func testRetrieveToolNilDistanceFloorPreservesHighDistanceResults() async throws {
+        let tool = RetrievalTool(defaultK: 1, maxK: 1, maxDistance: nil) { _, _ in
+            [
+                RAGTestSupport.passage(
+                    "High-distance results are still returned when the floor is disabled.",
+                    rank: 0,
+                    distance: 0.965,
+                    sourcePath: "legacy.md"
+                )
+            ]
+        }
+
+        let output = try await tool.handle(ToolCall(
+            id: "legacy",
+            name: "retrieve",
+            arguments: ["query": "legacy behavior", "k": 1]
+        ))
+
+        XCTAssertTrue(output.contains("High-distance results are still returned"), output)
+        XCTAssertTrue(output.contains("distance: 0.965"), output)
+    }
+
+    func testRetrieveToolKeepsPassageExactlyAtDistanceFloor() async throws {
+        let tool = RetrievalTool(defaultK: 1, maxK: 1, maxDistance: 0.85) { _, _ in
+            [
+                RAGTestSupport.passage(
+                    "The boundary passage should survive the floor.",
+                    rank: 0,
+                    distance: 0.85,
+                    sourcePath: "boundary.md"
+                )
+            ]
+        }
+
+        let output = try await tool.handle(ToolCall(
+            id: "boundary",
+            name: "retrieve",
+            arguments: ["query": "boundary", "k": 1]
+        ))
+
+        XCTAssertTrue(output.contains("The boundary passage should survive the floor."), output)
+        XCTAssertTrue(output.contains("distance: 0.850"), output)
+    }
+
     func testRetrieveToolBoundsKToConfiguredRange() async throws {
         let captured = CapturedK()
         let tool = RetrievalTool(defaultK: 3, maxK: 5) { _, k in
