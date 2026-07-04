@@ -206,7 +206,62 @@ final class StreamingTests: XCTestCase {
         XCTAssertEqual(stream1.count, 5)
         XCTAssertEqual(stream2.count, 5)
     }
+
+    func testGenerateStreamStartsFreshSequenceEachCall() async throws {
+        // WHAT: Each high-level stream begins at position 0
+        // WHY: Separate prompts must not inherit stale KV cache or RoPE positions
+        // HOW: Run two streams without manual reset and verify the second position is not cumulative
+
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 64,
+            numHeads: 2,
+            vocabSize: 1000
+        )
+
+        let runner = ModelRunner(config: config)
+        let generation = GenerationConfig(
+            maxTokens: 2,
+            sampler: SamplerConfig(temperature: 0.0)
+        )
+
+        for try await _ in runner.generateStream(prompt: [1, 2, 3], config: generation) {}
+        XCTAssertEqual(runner.currentPosition, 4)
+
+        for try await _ in runner.generateStream(prompt: [4], config: generation) {}
+        XCTAssertEqual(runner.currentPosition, 2, "Second stream should start from a cleared cache")
+    }
+
+    func testGenerateStreamStopsProducerWhenConsumerBreaks() async throws {
+        // WHAT: Ending iteration terminates the producer task
+        // WHY: A caller may stop at EOS or a stop sequence outside GenerationConfig
+        // HOW: Break after one token, then verify the runner is not advanced to maxTokens
+
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 64,
+            numHeads: 2,
+            vocabSize: 1000
+        )
+
+        let runner = ModelRunner(config: config)
+        let generation = GenerationConfig(
+            maxTokens: 50,
+            sampler: SamplerConfig(temperature: 0.0)
+        )
+
+        var received = 0
+        for try await _ in runner.generateStream(prompt: [1], config: generation) {
+            received += 1
+            break
+        }
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(received, 1)
+        XCTAssertLessThanOrEqual(runner.currentPosition, 2,
+                                 "Producer should stop promptly after the consumer exits")
+    }
 }
 
 // ModelConfig is now in ModelRunner.swift (no longer mocked)
-

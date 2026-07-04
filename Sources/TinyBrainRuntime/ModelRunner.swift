@@ -263,8 +263,10 @@ public final class ModelRunner {
         config: GenerationConfig = GenerationConfig()
     ) -> AsyncThrowingStream<TokenOutput, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 var mutableConfig = config
+
+                self.reset()
 
                 // Sanitize prompt tokens (clip to valid range)
                 let sanitizedPrompt = prompt.map { max(0, min($0, self.config.vocabSize - 1)) }
@@ -273,6 +275,10 @@ public final class ModelRunner {
                 var currentToken = sanitizedPrompt.last ?? 0
                 if !sanitizedPrompt.isEmpty {
                     for token in sanitizedPrompt.dropLast() {
+                        if Task.isCancelled {
+                            continuation.finish()
+                            return
+                        }
                         _ = self.step(tokenId: token)
                     }
                 }
@@ -282,7 +288,7 @@ public final class ModelRunner {
 
                 // Generate tokens
                 var generated = 0
-                while generated < mutableConfig.maxTokens {
+                while generated < mutableConfig.maxTokens && !Task.isCancelled {
                     // Step 1: Forward pass to get logits
                     let logits = self.step(tokenId: currentToken)
 
@@ -313,7 +319,20 @@ public final class ModelRunner {
                     )
 
                     // Step 5: Yield token to consumer
-                    continuation.yield(output)
+                    switch continuation.yield(output) {
+                    case .terminated:
+                        return
+                    case .enqueued, .dropped:
+                        break
+                    @unknown default:
+                        break
+                    }
+
+                    await Task.yield()
+                    if Task.isCancelled {
+                        continuation.finish()
+                        return
+                    }
 
                     // Step 6: Check for stop tokens
                     if mutableConfig.stopTokens.contains(detailed.tokenId) {
@@ -327,6 +346,9 @@ public final class ModelRunner {
                 }
 
                 continuation.finish()
+            }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }

@@ -102,7 +102,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TinyBrainRuntimeTests",
-            dependencies: ["TinyBrainRuntime", "TinyBrainMetal"],
+            dependencies: ["TinyBrainRuntime", "TinyBrainMetal", "TinyBrainTokenizer"],
             path: "Tests/TinyBrainRuntimeTests",
             resources: [
                 .process("Fixtures")
