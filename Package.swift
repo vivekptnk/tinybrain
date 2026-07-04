@@ -41,6 +41,10 @@ let package = Package(
             name: "TinyBrainRAG",
             targets: ["TinyBrainRAG"]
         ),
+        .library(
+            name: "TinyBrainAgent",
+            targets: ["TinyBrainAgent"]
+        ),
         // Cartographer bridge (optional — conforms to Cartographer's
         // SmartAnnotationService protocol). Cartographer is pinned by SHA
         // on feat/cg-003-demo-app-wiring (see dependencies below). Re-pin
@@ -187,6 +191,28 @@ let package = Package(
             resources: [
                 .process("Fixtures")
             ]
+        ),
+
+        // MARK: - Agent Runtime
+        .target(
+            name: "TinyBrainAgent",
+            dependencies: [
+                "TinyBrainRuntime",
+                "TinyBrainRAG",
+                "TinyBrainTokenizer"
+            ],
+            path: "Sources/TinyBrainAgent"
+        ),
+        .testTarget(
+            name: "TinyBrainAgentTests",
+            dependencies: [
+                "TinyBrainAgent",
+                "TinyBrainRAG",
+                "TinyBrainRuntime",
+                "TinyBrainTokenizer",
+                "TinyBrainMetal"
+            ],
+            path: "Tests/TinyBrainAgentTests"
         ),
 
         // MARK: - Cartographer Bridge
