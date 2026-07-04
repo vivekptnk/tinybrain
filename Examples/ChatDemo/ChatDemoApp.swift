@@ -70,8 +70,8 @@ struct ChatDemoApp: App {
         let weights = loadedModel.weights
         let runner = ModelRunner(weights: weights)
 
-        // Load tokenizer (auto-detects format)
-        let tokenizer = TokenizerLoader.loadBestAvailable()
+        // Tokenizer is paired with the selected model during initial load.
+        let tokenizer = loadedModel.tokenizer
 
         // Create view model
         let activeModelName = loadedModel.info?.displayName ?? "Toy Model"
@@ -129,21 +129,38 @@ struct ChatDemoApp: App {
         #endif
     }
 
-    private static func loadInitialModel() -> (weights: ModelWeights, info: ModelInfo?) {
-        let requestedPath = "Models/tinyllama-1.1b-int8.tbf"
-        let resolvedPath = resolveProjectPath(requestedPath)
+    private static func loadInitialModel() -> (weights: ModelWeights, tokenizer: any Tokenizer, info: ModelInfo?) {
+        let preferredPaths = [
+            "Models/qwen2.5-1.5b-int8.tbf",
+            "Models/tinyllama-1.1b-int8.tbf"
+        ]
 
-        if FileManager.default.fileExists(atPath: resolvedPath) {
+        for requestedPath in preferredPaths {
+            let resolvedPath = resolveProjectPath(requestedPath)
+            guard FileManager.default.fileExists(atPath: resolvedPath) else { continue }
+
             do {
                 let weights = try ModelLoader.load(from: resolvedPath)
-                return (weights, ModelInfo(path: resolvedPath))
+                let tokenizer = try TokenizerLoader.loadTokenizer(forModelAt: resolvedPath)
+                return (weights, tokenizer, ModelInfo(path: resolvedPath))
             } catch {
-                print("⚠️ Failed to load \(resolvedPath): \(error). Falling back to toy model.")
+                print("⚠️ Failed to load \(resolvedPath): \(error). Trying next model.")
             }
         }
 
-        let fallbackWeights = ModelLoader.loadWithFallback(from: requestedPath)
-        return (fallbackWeights, nil)
+        let fallbackWeights = makeToyWeights()
+        return (fallbackWeights, TokenizerLoader.loadBestAvailable(), nil)
+    }
+
+    private static func makeToyWeights() -> ModelWeights {
+        let config = ModelConfig(
+            numLayers: 2,
+            hiddenDim: 128,
+            numHeads: 4,
+            vocabSize: 100,
+            maxSeqLen: 256
+        )
+        return ModelWeights.makeToyModel(config: config, seed: 42)
     }
 
     private static func resolveProjectPath(_ path: String) -> String {
