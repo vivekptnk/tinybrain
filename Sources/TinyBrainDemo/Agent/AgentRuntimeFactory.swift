@@ -39,12 +39,32 @@ public enum AgentRuntimeFactory {
     /// Number of plan-act-observe steps in the P1 demo.
     public static let maxSteps = 3
 
+    /// Greedy factual decoding verified by the Qwen agent smoke test.
+    static let factualSampler = SamplerConfig(temperature: 0.0, topK: 1)
+
+    /// Builds the Demo agent configuration used for tool calls and final answers.
+    static func makeAgentConfig(
+        tokenizer: any Tokenizer,
+        promptStyle: ModelPromptStyle
+    ) -> AgentConfig {
+        AgentConfig(
+            maxSteps: maxSteps,
+            toolChoice: .required,
+            constraintMode: .strict,
+            perStepTokenBudget: 160,
+            contextBudget: 2_048,
+            sampler: factualSampler,
+            stopTokens: TinyBrainChatStops.stopTokenIDs(for: tokenizer, promptStyle: promptStyle),
+            promptStyle: promptStyle.agentPromptStyle
+        )
+    }
+
     /// Builds an agent loop, RAG index, RAG engine, and retrieve tool.
     public static func makeRuntime(
         weights: ModelWeights,
         tokenizer: any Tokenizer,
         promptStyle: ModelPromptStyle,
-        sampler: SamplerConfig,
+        sampler _: SamplerConfig,
         observer: AgentTraceObserver
     ) async throws -> AgentRuntimeContext {
         let indexBundle = makeIndex()
@@ -65,16 +85,7 @@ public enum AgentRuntimeFactory {
         )
 
         let runner = ModelRunner(weights: weights)
-        let config = AgentConfig(
-            maxSteps: maxSteps,
-            toolChoice: .required,
-            constraintMode: .strict,
-            perStepTokenBudget: 160,
-            contextBudget: 2_048,
-            sampler: sampler,
-            stopTokens: TinyBrainChatStops.stopTokenIDs(for: tokenizer, promptStyle: promptStyle),
-            promptStyle: promptStyle.agentPromptStyle
-        )
+        let config = makeAgentConfig(tokenizer: tokenizer, promptStyle: promptStyle)
 
         let loop = AgentLoop(
             runner: runner,
