@@ -81,6 +81,7 @@ final class RAGIndexTests: XCTestCase {
             RAGTestSupport.chunk("banana bread recipe", sourcePath: "food.md", ordinal: 1)
         ]
         try await index.add(chunks)
+        let freshResults = try await index.search("private local", k: 1)
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("TinyBrainRAGIndexTests-\(UUID().uuidString)")
@@ -91,10 +92,49 @@ final class RAGIndexTests: XCTestCase {
         try await index.save(to: url)
 
         let loaded = try RAGIndex.load(from: url, embedder: embedder)
+        try await loaded.validateStoredChunks(expectedCount: chunks.count)
         let results = try await loaded.search("private local", k: 1)
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results[0].chunk, chunks[0])
+        XCTAssertEqual(results[0].chunk.sourcePath, freshResults[0].chunk.sourcePath)
+        XCTAssertEqual(results[0].distance, freshResults[0].distance)
+    }
+
+    func testValidateStoredChunksRejectsCountMismatch() async throws {
+        let embedder = DeterministicStubEmbedder(dimension: 32, seed: 6)
+        let index = RAGIndex(embedder: embedder)
+        try await index.add([
+            RAGTestSupport.chunk("one stored chunk", ordinal: 0),
+            RAGTestSupport.chunk("second stored chunk", ordinal: 1)
+        ])
+
+        do {
+            try await index.validateStoredChunks(expectedCount: 1)
+            XCTFail("Expected validateStoredChunks to reject a count mismatch.")
+        } catch {
+            XCTAssertEqual(error as? RAGIndexError, .metadataCountMismatch(expected: 1, got: 2))
+        }
+    }
+
+    func testLoadTruncatedIndexThrowsInsteadOfCrashing() async throws {
+        let embedder = DeterministicStubEmbedder(dimension: 32, seed: 12)
+        let index = RAGIndex(embedder: embedder)
+        try await index.add([RAGTestSupport.chunk("truncate safety", ordinal: 0)])
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBrainRAGCorruptTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("rag-index.pxkt")
+        try await index.save(to: url)
+        let data = try Data(contentsOf: url)
+        try data.prefix(max(1, data.count / 2)).write(to: url, options: .atomic)
+
+        XCTAssertThrowsError(
+            try RAGIndex.load(from: url, embedder: embedder)
+        )
     }
 
     func testSearchWithMismatchedEmbeddingVectorReturnsEmpty() async throws {

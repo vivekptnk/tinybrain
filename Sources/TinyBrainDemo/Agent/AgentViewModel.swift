@@ -110,7 +110,8 @@ public final class AgentViewModel: ObservableObject {
             trace.updateCorpusStatus(.ready(
                 noteCount: built.corpus.noteCount,
                 chunkCount: built.corpus.chunkCount,
-                embedder: built.corpus.embedder
+                embedder: built.corpus.embedder,
+                indexPreparation: built.corpus.indexPreparation
             ))
         } catch {
             let message = "Agent index failed: \(error.localizedDescription)"

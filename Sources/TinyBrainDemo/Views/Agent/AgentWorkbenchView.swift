@@ -258,8 +258,8 @@ private struct AgentCorpusStrip: View {
             Text("· \(noteCount) notes · on-device")
                 .font(theme.typography.caption)
                 .foregroundStyle(theme.colors.textTertiary)
-        case .ready(let noteCount, let chunkCount, let embedder):
-            Text("· \(noteCount) notes · \(chunkCount) chunks · \(shortEmbedder(embedder)) · on-device")
+        case .ready(let noteCount, let chunkCount, let embedder, let indexPreparation):
+            Text("· \(noteCount) notes · \(chunkCount) chunks · \(preparationText(indexPreparation)) · \(shortEmbedder(embedder)) · on-device")
                 .font(theme.typography.caption)
                 .foregroundStyle(theme.colors.textTertiary)
                 .lineLimit(1)
@@ -318,6 +318,18 @@ private struct AgentCorpusStrip: View {
     private func shortEmbedder(_ embedder: String) -> String {
         embedder.replacingOccurrences(of: "NLEmbeddingProvider", with: "NL")
             .replacingOccurrences(of: "DeterministicStubEmbedder", with: "Stub")
+    }
+
+    private func preparationText(_ preparation: AgentIndexPreparationSummary) -> String {
+        let elapsed = String(format: "%.1f", preparation.elapsedSeconds)
+        switch preparation.source {
+        case .indexed:
+            return "indexed in \(elapsed)s"
+        case .indexedNotPersisted:
+            return "indexed in \(elapsed)s · not persisted"
+        case .loaded:
+            return "loaded from disk in \(elapsed)s"
+        }
     }
 }
 

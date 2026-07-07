@@ -13,7 +13,12 @@ import TinyBrainRuntime
 public enum AgentCorpusStatus: Equatable, Sendable {
     case idle(noteCount: Int)
     case indexing(noteCount: Int)
-    case ready(noteCount: Int, chunkCount: Int, embedder: String)
+    case ready(
+        noteCount: Int,
+        chunkCount: Int,
+        embedder: String,
+        indexPreparation: AgentIndexPreparationSummary
+    )
     case failed(String)
 
     /// Whether retrieval can run.

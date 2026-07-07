@@ -6,10 +6,20 @@ public enum RAGIndexError: Error, Equatable, LocalizedError, Sendable {
     /// The persisted index dimension does not match the supplied embedder.
     case dimensionMismatch(expected: Int, got: Int)
 
+    /// The persisted index has a different number of live entries than expected.
+    case metadataCountMismatch(expected: Int, got: Int)
+
+    /// A persisted live entry is missing or does not decode as a `DocumentChunk`.
+    case invalidStoredMetadata(index: Int)
+
     public var errorDescription: String? {
         switch self {
         case .dimensionMismatch(let expected, let got):
             return "Embedder dimension \(got) does not match index dimension \(expected)."
+        case .metadataCountMismatch(let expected, let got):
+            return "Index stores \(got) live chunks, expected \(expected)."
+        case .invalidStoredMetadata(let index):
+            return "Index metadata at live entry \(index) is missing or is not a DocumentChunk."
         }
     }
 }
@@ -38,6 +48,7 @@ public actor RAGIndex {
     private let embedder: any TextEmbedder
     private let index: HNSWIndex
     private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
 
     /// Creates an empty HNSW index whose dimension comes from `embedder`.
     public init(
@@ -106,6 +117,23 @@ public actor RAGIndex {
     /// Persists the underlying ProximaKit binary index, including chunk metadata.
     public func save(to url: URL) async throws {
         try await index.save(to: url)
+    }
+
+    /// Validates that every live persisted entry stores decodable chunk metadata.
+    ///
+    /// Use this after loading a cached index before serving retrieval from it.
+    public func validateStoredChunks(expectedCount: Int) async throws {
+        let entries = await index.liveEntries()
+        guard entries.count == expectedCount else {
+            throw RAGIndexError.metadataCountMismatch(expected: expectedCount, got: entries.count)
+        }
+
+        for (entryIndex, entry) in entries.enumerated() {
+            guard let metadata = entry.metadata,
+                  (try? decoder.decode(DocumentChunk.self, from: metadata)) != nil else {
+                throw RAGIndexError.invalidStoredMetadata(index: entryIndex)
+            }
+        }
     }
 
     /// Loads a persisted ProximaKit index and validates it against `embedder`.
