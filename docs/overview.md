@@ -134,7 +134,7 @@ F13 is the reliability boundary for tool calls: when strict constrained generati
 
 Effects cross a separate sandbox boundary. `SandboxPolicy` denies writes by default, resolves paths with symlink-safe canonicalization before root checks, caps reads, and audits allowed and denied operations. A symlink write escape found during security judging was fixed; the follow-up security judge denied 15+ independent escape attacks.
 
-`AgentTraceObserver` mirrors the X-Ray observer pattern at the agent level. ChatDemo's Agent Mode consumes those events in `AgentTracePanel`, showing planning steps, proposed tool calls, retrieved passages with lower-is-better distances, tool results, budget exhaustion, and the final answer.
+`AgentTraceObserver` mirrors the X-Ray observer pattern at the agent level. ChatDemo's Agent Mode consumes those events in `AgentTracePanel`, showing planning steps, proposed tool calls, retrieved passages with lower-is-better distances, tool results, budget exhaustion, and the final answer. Retrieve tool events carry optional `RetrievedPassageRecord` arrays so UI rows are built from structured metadata; the legacy prose parser remains a fallback for tools that only emit text.
 
 ---
 

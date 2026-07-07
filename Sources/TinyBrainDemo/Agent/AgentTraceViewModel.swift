@@ -143,7 +143,8 @@ extension AgentTraceViewModel: AgentTraceObserver {
             resultContent: event.result.content,
             isError: event.result.isError,
             elapsedMs: event.elapsedMs,
-            resultTokens: event.resultTokens
+            resultTokens: event.resultTokens,
+            passages: event.passages
         )))
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import TinyBrainRAG
 import TinyBrainRuntime
 
 /// Prompt envelope used by ``AgentLoop`` when rendering the agent transcript.
@@ -214,11 +215,15 @@ public struct AgentToolResultSnapshot: Codable, Equatable {
     /// Whether the result is an error observation.
     public let isError: Bool
 
+    /// Structured retrieved passages carried beside ``content``, when available.
+    public let passages: [RetrievedPassageRecord]?
+
     /// Creates a snapshot from a runtime tool result.
-    public init(result: ToolResult) {
+    public init(result: ToolResult, passages: [RetrievedPassageRecord]? = nil) {
         self.callId = result.callId
         self.content = result.content
         self.isError = result.isError
+        self.passages = passages
     }
 }
 

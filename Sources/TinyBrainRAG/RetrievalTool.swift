@@ -14,6 +14,54 @@ public enum RetrievalToolError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+/// Programmatic passage metadata returned by ``RetrievalTool`` alongside prose.
+public struct RetrievedPassageRecord: Codable, Equatable, Sendable {
+    /// Zero-based rank in the rendered retrieve result.
+    public let rank: Int
+
+    /// Original source path for the retrieved chunk.
+    public let sourcePath: String
+
+    /// Lower-is-better vector distance.
+    public let distance: Float
+
+    /// Retrieved chunk text, preserving its original line breaks.
+    public let excerpt: String
+
+    /// Stable chunk identifier when the backing corpus provides one.
+    public let chunkId: String?
+
+    /// Creates a structured retrieval record.
+    public init(
+        rank: Int,
+        sourcePath: String,
+        distance: Float,
+        excerpt: String,
+        chunkId: String? = nil
+    ) {
+        self.rank = rank
+        self.sourcePath = sourcePath
+        self.distance = distance
+        self.excerpt = excerpt
+        self.chunkId = chunkId
+    }
+}
+
+/// Combined retrieve-tool output for programmatic consumers.
+public struct RetrievalToolOutput: Equatable, Sendable {
+    /// Prose result returned to the model.
+    public let content: String
+
+    /// Structured records used to render ``content``.
+    public let records: [RetrievedPassageRecord]
+
+    /// Creates a retrieval output.
+    public init(content: String, records: [RetrievedPassageRecord]) {
+        self.content = content
+        self.records = records
+    }
+}
+
 /// Tool-calling adapter that exposes RAG retrieval as `retrieve`.
 public struct RetrievalTool {
     /// Tool name used by the model and dispatcher.
@@ -73,6 +121,11 @@ public struct RetrievalTool {
 
     /// Handles a TinyBrain tool call and returns numbered passages.
     public func handle(_ call: ToolCall) async throws -> String {
+        try await handleWithRecords(call).content
+    }
+
+    /// Handles a TinyBrain tool call and returns prose plus structured records.
+    public func handleWithRecords(_ call: ToolCall) async throws -> RetrievalToolOutput {
         guard let rawQuery = call.arguments["query"] as? String else {
             throw RetrievalToolError.missingQuery
         }
@@ -88,20 +141,29 @@ public struct RetrievalTool {
         let filteredPassages = filtered(passages)
         guard !filteredPassages.isEmpty else {
             if let maxDistance, let bestDistance = passages.map(\.distance).min() {
-                return noRelevantPassagesMessage(
-                    query: query,
-                    bestDistance: bestDistance,
-                    maxDistance: maxDistance
+                return RetrievalToolOutput(
+                    content: noRelevantPassagesMessage(
+                        query: query,
+                        bestDistance: bestDistance,
+                        maxDistance: maxDistance
+                    ),
+                    records: []
                 )
             }
-            return "No relevant passages found."
+            return RetrievalToolOutput(content: "No relevant passages found.", records: [])
         }
 
-        return filteredPassages.enumerated()
-            .map { index, passage in
-                let text = passage.chunk.text.replacingOccurrences(of: "\n", with: " ")
-                let distance = String(format: "%.3f", passage.distance)
-                return "[\(index + 1)] \(text) (source: \(passage.chunk.sourcePath), distance: \(distance))"
+        let records = Self.records(from: filteredPassages)
+        return RetrievalToolOutput(content: Self.render(records: records), records: records)
+    }
+
+    /// Renders structured records into the legacy prose format read by models.
+    public static func render(records: [RetrievedPassageRecord]) -> String {
+        records
+            .map { record in
+                let text = record.excerpt.components(separatedBy: .newlines).joined(separator: " ")
+                let distance = String(format: "%.3f", record.distance)
+                return "[\(record.rank + 1)] \(text) (source: \(record.sourcePath), distance: \(distance))"
             }
             .joined(separator: "\n")
     }
@@ -110,6 +172,17 @@ public struct RetrievalTool {
     public func register(on dispatcher: ClosureToolDispatcher) {
         dispatcher.register(definition.name) { call in
             try await handle(call)
+        }
+    }
+
+    private static func records(from passages: [RetrievedPassage]) -> [RetrievedPassageRecord] {
+        passages.enumerated().map { index, passage in
+            RetrievedPassageRecord(
+                rank: index,
+                sourcePath: passage.chunk.sourcePath,
+                distance: passage.distance,
+                excerpt: passage.chunk.text
+            )
         }
     }
 

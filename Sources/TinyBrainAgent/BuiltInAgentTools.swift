@@ -6,9 +6,10 @@ import TinyBrainRuntime
 public enum BuiltInAgentTools {
     /// Creates the `retrieve` tool backed by TinyBrainRAG's retrieval adapter.
     public static func retrieve(_ retrievalTool: RetrievalTool) -> RegisteredTool {
-        RegisteredTool(definition: retrievalTool.definition) { call in
-            try await retrievalTool.handle(call)
-        }
+        RegisteredTool(definition: retrievalTool.definition, structuredHandler: { call in
+            let output = try await retrievalTool.handleWithRecords(call)
+            return AgentToolOutput(content: output.content, passages: output.records)
+        })
     }
 
     /// Creates the `read_file` tool gated by a sandbox policy.

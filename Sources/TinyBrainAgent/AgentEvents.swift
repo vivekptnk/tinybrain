@@ -1,4 +1,5 @@
 import Foundation
+import TinyBrainRAG
 import TinyBrainRuntime
 
 /// Event emitted when an agent step begins.
@@ -52,19 +53,24 @@ public struct AgentToolExecuted: Equatable {
     /// Approximate result-token count.
     public let resultTokens: Int
 
+    /// Structured retrieved passages, when the executed tool exposed them.
+    public let passages: [RetrievedPassageRecord]?
+
     /// Creates a tool-executed event.
     public init(
         index: Int,
         call: ToolCall?,
         result: ToolResult,
         elapsedMs: Double,
-        resultTokens: Int
+        resultTokens: Int,
+        passages: [RetrievedPassageRecord]? = nil
     ) {
         self.index = index
         self.call = call
         self.result = result
         self.elapsedMs = elapsedMs
         self.resultTokens = resultTokens
+        self.passages = passages
     }
 }
 

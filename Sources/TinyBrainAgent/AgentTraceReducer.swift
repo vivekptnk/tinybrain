@@ -4,6 +4,7 @@
 /// can be tested without rendering the demo app.
 
 import Foundation
+import TinyBrainRAG
 
 /// High-level state shown on an agent step badge.
 public enum AgentStepVisualState: String, Equatable, Sendable {
@@ -213,7 +214,8 @@ public enum AgentTraceReducerEvent: Equatable, Sendable {
         resultContent: String,
         isError: Bool,
         elapsedMs: Double,
-        resultTokens: Int
+        resultTokens: Int,
+        passages: [RetrievedPassageRecord]? = nil
     )
     case budgetExhausted(maxSteps: Int)
     case finalAnswer(answer: String, terminationReason: String, completedStepCount: Int)
@@ -288,7 +290,15 @@ public struct AgentTraceReducer: Equatable, Sendable {
             }
             snapshot.activeStepIndex = index
 
-        case .toolExecuted(let index, let toolName, let resultContent, let isError, let elapsedMs, let resultTokens):
+        case .toolExecuted(
+            let index,
+            let toolName,
+            let resultContent,
+            let isError,
+            let elapsedMs,
+            let resultTokens,
+            let passages
+        ):
             upsertStep(index: index, now: now) { step in
                 step.state = isError ? .error : .observed
                 step.toolName = step.toolName ?? toolName
@@ -296,7 +306,7 @@ public struct AgentTraceReducer: Equatable, Sendable {
                 step.isError = isError
                 step.elapsedMs = elapsedMs
                 step.resultTokens = resultTokens
-                step.passages = Self.parseRetrievedPassages(from: resultContent)
+                step.passages = Self.visiblePassages(from: passages, fallbackContent: resultContent)
             } create: {
                 var step = AgentVisibleStep(index: index, promptTokens: 0, startedAt: now)
                 step.state = isError ? .error : .observed
@@ -305,7 +315,7 @@ public struct AgentTraceReducer: Equatable, Sendable {
                 step.isError = isError
                 step.elapsedMs = elapsedMs
                 step.resultTokens = resultTokens
-                step.passages = Self.parseRetrievedPassages(from: resultContent)
+                step.passages = Self.visiblePassages(from: passages, fallbackContent: resultContent)
                 return step
             }
             snapshot.activeStepIndex = index
@@ -379,6 +389,24 @@ public struct AgentTraceReducer: Equatable, Sendable {
                 source: String(string[sourceRange]),
                 distance: distance,
                 excerpt: String(string[excerptRange])
+            )
+        }
+    }
+
+    private static func visiblePassages(
+        from records: [RetrievedPassageRecord]?,
+        fallbackContent: String
+    ) -> [AgentRetrievedPassage] {
+        guard let records else {
+            return parseRetrievedPassages(from: fallbackContent)
+        }
+
+        return records.map { record in
+            AgentRetrievedPassage(
+                rank: record.rank,
+                source: record.sourcePath,
+                distance: Double(record.distance),
+                excerpt: record.excerpt
             )
         }
     }

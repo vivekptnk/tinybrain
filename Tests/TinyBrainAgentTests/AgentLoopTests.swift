@@ -265,6 +265,10 @@ final class AgentLoopTests: XCTestCase {
         let events = try await collectEvents(from: loop.run("What is the offline launch phrase?"))
 
         XCTAssertEqual(events.toolExecutions.map(\.result.isError), [false, false])
+        let retrieveExecution = try XCTUnwrap(events.toolExecutions.first { $0.call?.name == "retrieve" })
+        let retrievePassages = try XCTUnwrap(retrieveExecution.passages)
+        XCTAssertEqual(canonicalPath(retrievePassages.first?.sourcePath), canonicalPath(factFile.path))
+        XCTAssertNotNil(retrievePassages.first?.distance)
         XCTAssertEqual(events.finalAnswers.last?.answer, "The offline launch phrase is Aurora Quartz.")
         XCTAssertEqual(events.finalAnswers.last?.transcript.steps.map(\.toolCall?.name), ["retrieve", "read_file"])
         XCTAssertEqual(
@@ -372,6 +376,15 @@ final class AgentLoopTests: XCTestCase {
         }
 
         let atlas = try await runScenario("Find the Project Atlas review lock timing and owner.")
+        let atlasRetrieve = try XCTUnwrap(atlas.events.toolExecutions.first { $0.call?.name == "retrieve" })
+        let atlasPassages = try XCTUnwrap(atlasRetrieve.passages)
+        let atlasPassage = try XCTUnwrap(atlasPassages.first)
+        XCTAssertEqual(canonicalPath(atlasPassage.sourcePath), canonicalPath(factFile.path))
+        XCTAssertLessThanOrEqual(atlasPassage.distance, 0.85)
+        XCTAssertTrue(
+            atlasRetrieve.result.content.contains(String(format: "distance: %.3f", atlasPassage.distance)),
+            atlasRetrieve.result.content
+        )
         let final = try XCTUnwrap(atlas.events.finalAnswers.last)
         XCTAssertTrue(
             final.answer.contains("August 14, 2026") || final.answer.contains("August 14"),
@@ -448,6 +461,10 @@ final class AgentLoopTests: XCTestCase {
             return direct.path
         }
         return URL(fileURLWithPath: cwd).appendingPathComponent(relativePath).path
+    }
+
+    private func canonicalPath(_ path: String?) -> String? {
+        path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
     }
 }
 

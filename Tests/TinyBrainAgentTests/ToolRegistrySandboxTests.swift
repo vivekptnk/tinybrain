@@ -1,4 +1,5 @@
 import Foundation
+import TinyBrainRAG
 import TinyBrainRuntime
 import XCTest
 @testable import TinyBrainAgent
@@ -68,6 +69,34 @@ final class ToolRegistryTests: XCTestCase {
         XCTAssertEqual(prompt.components(separatedBy: "### current_time").count - 1, 1)
         XCTAssertEqual(prompt.components(separatedBy: "### echo").count - 1, 1)
         XCTAssertTrue(prompt.contains("You may call a tool"))
+    }
+
+    func testStructuredHandlerKeepsRuntimeDispatcherTextAndAgentDispatcherPayload() async throws {
+        let registry = ToolRegistry()
+        let records = [
+            RetrievedPassageRecord(
+                rank: 0,
+                sourcePath: "notes/atlas.md",
+                distance: 0.25,
+                excerpt: "Atlas belongs in the local notes."
+            )
+        ]
+        await registry.register(RegisteredTool(definition: echoDefinition, structuredHandler: { _ in
+            AgentToolOutput(content: "structured text", passages: records)
+        }))
+
+        let runtimeDispatcher = await registry.dispatcher()
+        let runtimeResult = try await runtimeDispatcher.dispatch(
+            ToolCall(id: "call_1", name: "echo", arguments: ["text": "hello"])
+        )
+        XCTAssertEqual(runtimeResult, ToolResult(callId: "call_1", content: "structured text"))
+
+        let agentDispatcher = await registry.agentDispatcher()
+        let agentResult = await agentDispatcher.dispatch(
+            ToolCall(id: "call_2", name: "echo", arguments: ["text": "hello"])
+        )
+        XCTAssertEqual(agentResult.result, ToolResult(callId: "call_2", content: "structured text"))
+        XCTAssertEqual(agentResult.passages, records)
     }
 
     private var currentTimeDefinition: ToolDefinition {

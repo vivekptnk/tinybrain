@@ -71,6 +71,34 @@ final class RetrievalToolTests: XCTestCase {
         XCTAssertTrue(result.content.contains("source: rag.md"))
     }
 
+    func testRetrieveToolStructuredRecordsRenderLegacyTextAndPreserveExcerpt() async throws {
+        let excerpt = "Atlas review lock is August 14, 2026.\nOwner is Mira Chen."
+        let passage = RAGTestSupport.passage(
+            excerpt,
+            rank: 0,
+            distance: 0.1234,
+            sourcePath: "ops/project-atlas.md"
+        )
+        let tool = RetrievalTool(defaultK: 1, maxK: 1) { _, _ in [passage] }
+
+        let output = try await tool.handleWithRecords(ToolCall(
+            id: "structured",
+            name: "retrieve",
+            arguments: ["query": "Project Atlas", "k": 1]
+        ))
+
+        XCTAssertEqual(output.records.count, 1)
+        XCTAssertEqual(output.records[0].rank, 0)
+        XCTAssertEqual(output.records[0].sourcePath, "ops/project-atlas.md")
+        XCTAssertEqual(output.records[0].excerpt, excerpt)
+        XCTAssertNil(output.records[0].chunkId)
+        XCTAssertEqual(output.content, RetrievalTool.render(records: output.records))
+        XCTAssertEqual(
+            output.content,
+            "[1] Atlas review lock is August 14, 2026. Owner is Mira Chen. (source: ops/project-atlas.md, distance: 0.123)"
+        )
+    }
+
     func testRetrieveToolDropsPassagesBeyondDistanceFloor() async throws {
         let tool = RetrievalTool(defaultK: 3, maxK: 3, maxDistance: 0.85) { _, _ in
             [

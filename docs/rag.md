@@ -128,6 +128,14 @@ TB-012 already exposes retrieval as a TinyBrain tool. `RetrievalTool` defines a
 configured range, calls the same retrieval closure used by `RAGEngine`, and
 returns numbered passages with source paths and distances.
 
+`RetrievalTool.handle(_:)` remains the model-facing string API. Programmatic
+callers can use `handleWithRecords(_:)` to receive the same prose plus
+`RetrievedPassageRecord` values carrying rank, `sourcePath`, distance, excerpt,
+and optional `chunkId`. The prose is rendered from those records with
+`RetrievalTool.render(records:)`, keeping the text format in one place while
+agent traces and UI code consume structured metadata instead of reverse-parsing
+the model observation.
+
 That is the seam TB-011 can register inside a private agent runtime. The larger
 agent loop is not implemented in `TinyBrainRAG`: planning, repeated tool calls,
 memory policy, and UI affordances remain follow-up work. The shipped piece is

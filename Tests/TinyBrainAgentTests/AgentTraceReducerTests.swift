@@ -1,4 +1,5 @@
 import XCTest
+import TinyBrainRAG
 @testable import TinyBrainAgent
 
 final class AgentTraceReducerTests: XCTestCase {
@@ -74,5 +75,39 @@ final class AgentTraceReducerTests: XCTestCase {
         XCTAssertEqual(snapshot.finalAnswer, "Project Atlas locks on August 14, 2026, with Mira Chen as owner.")
         XCTAssertEqual(snapshot.steps.map(\.state), [.done])
         XCTAssertEqual(snapshot.runMetrics.steps, 1)
+    }
+
+    func testReducerUsesStructuredPassagesBeforeProseFallbackPreservingMultilineExcerpt() {
+        var reducer = AgentTraceReducer()
+        let start = Date(timeIntervalSince1970: 100)
+        let excerpt = "Atlas review lock is August 14, 2026.\nOwner is Mira Chen."
+        let records = [
+            RetrievedPassageRecord(
+                rank: 0,
+                sourcePath: "ops/project-atlas.md",
+                distance: 0.124,
+                excerpt: excerpt
+            )
+        ]
+
+        _ = reducer.reset(maxSteps: 1, now: start)
+        _ = reducer.reduce(.stepStarted(index: 0, promptTokens: 64), now: start)
+        let snapshot = reducer.reduce(
+            .toolExecuted(
+                index: 0,
+                toolName: "retrieve",
+                resultContent: RetrievalTool.render(records: records),
+                isError: false,
+                elapsedMs: 12,
+                resultTokens: 21,
+                passages: records
+            ),
+            now: start.addingTimeInterval(0.1)
+        )
+
+        XCTAssertEqual(snapshot.steps[0].passages.count, 1)
+        XCTAssertEqual(snapshot.steps[0].passages[0].source, "ops/project-atlas.md")
+        XCTAssertEqual(snapshot.steps[0].passages[0].distance, 0.124, accuracy: 0.0001)
+        XCTAssertEqual(snapshot.steps[0].passages[0].excerpt, excerpt)
     }
 }

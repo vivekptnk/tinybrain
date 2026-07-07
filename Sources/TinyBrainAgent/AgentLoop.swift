@@ -1,4 +1,5 @@
 import Foundation
+import TinyBrainRAG
 import TinyBrainRuntime
 import TinyBrainTokenizer
 
@@ -91,7 +92,7 @@ public actor AgentLoop {
             try Task.checkCancellation()
 
             let definitions = await registry.definitions
-            let dispatcher = await registry.dispatcher()
+            let dispatcher = await registry.agentDispatcher()
             let stepToolChoice = effectiveToolChoice()
             let prompt = await renderPrompt(toolChoice: stepToolChoice, mode: .toolOrFinalAnswer)
             let promptTokens = tokenCount(prompt)
@@ -132,13 +133,15 @@ public actor AgentLoop {
                     continuation: continuation
                 )
                 let started = Date()
-                let result = await dispatchSafely(call, dispatcher: dispatcher)
+                let dispatch = await dispatchSafely(call, dispatcher: dispatcher)
+                let result = dispatch.result
                 let elapsedMs = Date().timeIntervalSince(started) * 1_000
                 appendStep(
                     index: stepIndex,
                     modelOutput: generation.text,
                     call: call,
                     result: result,
+                    passages: dispatch.passages,
                     promptTokens: promptTokens,
                     generatedTokens: generation.tokenCount,
                     elapsedMs: elapsedMs
@@ -150,7 +153,8 @@ public actor AgentLoop {
                             call: call,
                             result: result,
                             elapsedMs: elapsedMs,
-                            resultTokens: tokenCount(result.content)
+                            resultTokens: tokenCount(result.content),
+                            passages: dispatch.passages
                         )
                     ),
                     continuation: continuation
@@ -163,6 +167,7 @@ public actor AgentLoop {
                     modelOutput: generation.text,
                     call: nil,
                     result: result,
+                    passages: nil,
                     promptTokens: promptTokens,
                     generatedTokens: generation.tokenCount,
                     elapsedMs: 0
@@ -230,16 +235,11 @@ public actor AgentLoop {
         return config.toolChoice
     }
 
-    private func dispatchSafely(_ call: ToolCall, dispatcher: ToolDispatcher) async -> ToolResult {
-        do {
-            return try await dispatcher.dispatch(call)
-        } catch {
-            return ToolResult(
-                callId: call.id,
-                content: "Error: \(error.localizedDescription)",
-                isError: true
-            )
-        }
+    private func dispatchSafely(
+        _ call: ToolCall,
+        dispatcher: AgentToolDispatching
+    ) async -> AgentToolDispatchResult {
+        await dispatcher.dispatch(call)
     }
 
     private func appendStep(
@@ -247,6 +247,7 @@ public actor AgentLoop {
         modelOutput: String,
         call: ToolCall?,
         result: ToolResult,
+        passages: [RetrievedPassageRecord]?,
         promptTokens: Int,
         generatedTokens: Int,
         elapsedMs: Double
@@ -265,7 +266,7 @@ public actor AgentLoop {
                 index: index,
                 modelOutput: modelOutput,
                 toolCall: call.map(AgentToolCallSnapshot.init(call:)),
-                toolResult: AgentToolResultSnapshot(result: result),
+                toolResult: AgentToolResultSnapshot(result: result, passages: passages),
                 promptTokens: promptTokens,
                 generatedTokens: generatedTokens,
                 resultTokens: tokenCount(result.content),
